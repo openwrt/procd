@@ -59,7 +59,7 @@ static void procd_ubus_try_connect(void)
 
 	ctx->connection_lost = procd_ubus_connection_lost;
 	ubus_connected = true;
-	procd_register_objects(ctx);
+	procd_init_service(ctx);
 }
 
 static void procd_ubus_connection_lost(struct ubus_context *old_ctx)
