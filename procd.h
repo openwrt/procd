@@ -2,6 +2,7 @@
 #define __PROCD_H
 
 #include <libubox/uloop.h>
+#include <libubus.h>
 #include <stdio.h>
 
 #define DPRINTF(fmt, ...) do { \
@@ -12,5 +13,6 @@
 extern int debug;
 extern char *ubus_socket;
 void procd_connect_ubus(void);
+void procd_register_objects(struct ubus_context *ctx);
 
 #endif

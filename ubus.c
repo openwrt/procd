@@ -2,8 +2,6 @@
 #include <unistd.h>
 #include <signal.h>
 
-#include <libubus.h>
-
 #include "procd.h"
 
 char *ubus_socket = NULL;
@@ -61,6 +59,7 @@ static void procd_ubus_try_connect(void)
 
 	ctx->connection_lost = procd_ubus_connection_lost;
 	ubus_connected = true;
+	procd_register_objects(ctx);
 }
 
 static void procd_ubus_connection_lost(struct ubus_context *old_ctx)
