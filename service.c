@@ -1,89 +1,10 @@
 #include <libubox/avl-cmp.h>
 #include "procd.h"
 #include "service.h"
+#include "instance.h"
 
 struct avl_tree services;
 static struct blob_buf b;
-
-static void
-start_instance(struct service_instance *in)
-{
-	in->restart = false;
-}
-
-static void
-instance_timeout(struct uloop_timeout *t)
-{
-	struct service_instance *in;
-
-	in = container_of(t, struct service_instance, timeout);
-	kill(in->proc.pid, SIGKILL);
-	uloop_process_delete(&in->proc);
-	in->proc.cb(&in->proc, -1);
-}
-
-static void
-instance_exit(struct uloop_process *p, int ret)
-{
-	struct service_instance *in;
-
-	in = container_of(p, struct service_instance, proc);
-	uloop_timeout_cancel(&in->timeout);
-	if (in->restart)
-		start_instance(in);
-}
-
-static void
-stop_instance(struct service_instance *in, bool restart)
-{
-	if (!in->proc.pending)
-		return;
-
-	kill(in->proc.pid, SIGTERM);
-}
-
-static bool
-instance_config_changed(struct service_instance *in, struct service_instance *in_new)
-{
-	int len = blob_pad_len(in->config);
-
-	if (len != blob_pad_len(in_new->config))
-		return true;
-
-	if (memcmp(in->config, in_new->config, blob_pad_len(in->config)) != 0)
-		return true;
-
-	return false;
-}
-
-static bool
-update_instance(struct service_instance *in, struct service_instance *in_new)
-{
-	bool changed = instance_config_changed(in, in_new);
-
-	in->config = in_new->config;
-	if (!changed)
-		return false;
-
-	stop_instance(in, true);
-	return true;
-}
-
-static void
-free_instance(struct service_instance *in)
-{
-	uloop_process_delete(&in->proc);
-	uloop_timeout_cancel(&in->timeout);
-	free(in);
-}
-
-static void
-init_instance(struct service_instance *in, struct blob_attr *config)
-{
-	in->config = config;
-	in->timeout.cb = instance_timeout;
-	in->proc.cb = instance_exit;
-}
 
 static void
 service_instance_add(struct service *s, struct blob_attr *attr)
@@ -98,7 +19,7 @@ service_instance_add(struct service *s, struct blob_attr *attr)
 	if (!in)
 		return;
 
-	init_instance(in, attr);
+	instance_init(in, attr);
 	vlist_add(&s->instances, &in->node, (void *) name);
 }
 
@@ -115,13 +36,13 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		in_n = container_of(node_new, struct service_instance, node);
 
 	if (in_o && in_n) {
-		update_instance(in_o, in_n);
-		free_instance(in_n);
+		instance_update(in_o, in_n);
+		instance_free(in_n);
 	} else if (in_o) {
-		stop_instance(in_o, false);
-		free_instance(in_o);
+		instance_stop(in_o, false);
+		instance_free(in_o);
 	} else if (in_n) {
-		start_instance(in_n);
+		instance_start(in_n);
 	}
 }
 
