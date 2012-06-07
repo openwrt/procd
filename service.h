@@ -15,7 +15,9 @@ struct service_instance {
 	struct vlist_node node;
 	const char *name;
 
+	bool restart;
 	struct blob_attr *config;
 	struct uloop_process proc;
+	struct uloop_timeout timeout;
 };
 
