@@ -16,6 +16,9 @@ struct blobmsg_list_node {
 	struct blob_attr *data;
 };
 
+#define blobmsg_list_simple_init(list) \
+	__blobmsg_list_init(tree, 0, sizeof(struct blobmsg_list_node))
+
 #define blobmsg_list_init(list, type, field) \
 	__blobmsg_list_init(tree, offsetof(type, field), sizeof(type))
 
