@@ -53,3 +53,35 @@ blobmsg_list_free(struct blobmsg_list *list)
 		free(ptr);
 	}
 }
+
+bool
+blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2)
+{
+	struct blobmsg_list_node *n1, *n2;
+	int count = l1->avl.count;
+
+	if (count != l2->avl.count)
+		return false;
+
+	n1 = avl_first_element(&l1->avl, n1, avl);
+	n2 = avl_first_element(&l2->avl, n2, avl);
+
+	while (count-- > 0) {
+		int len;
+
+		len = blob_len(n1->data);
+		if (len != blob_len(n2->data))
+			return false;
+
+		if (memcmp(n1->data, n2->data, len) != 0)
+			return false;
+
+		if (!count)
+			break;
+
+		n1 = avl_next_element(n1, avl);
+		n2 = avl_next_element(n2, avl);
+	}
+
+	return true;
+}
