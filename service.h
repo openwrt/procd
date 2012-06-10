@@ -1,3 +1,6 @@
+#ifndef __PROCD_SERVICE_H
+#define __PROCD_SERVICE_H
+
 #include <libubox/avl.h>
 #include <libubox/vlist.h>
 
@@ -11,13 +14,4 @@ struct service {
 	struct vlist_tree instances;
 };
 
-struct service_instance {
-	struct vlist_node node;
-	const char *name;
-
-	bool restart;
-	struct blob_attr *config;
-	struct uloop_process proc;
-	struct uloop_timeout timeout;
-};
-
+#endif
