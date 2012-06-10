@@ -17,10 +17,10 @@ struct blobmsg_list_node {
 };
 
 #define blobmsg_list_simple_init(list) \
-	__blobmsg_list_init(tree, 0, sizeof(struct blobmsg_list_node))
+	__blobmsg_list_init(list, 0, sizeof(struct blobmsg_list_node))
 
 #define blobmsg_list_init(list, type, field) \
-	__blobmsg_list_init(tree, offsetof(type, field), sizeof(type))
+	__blobmsg_list_init(list, offsetof(type, field), sizeof(type))
 
 void __blobmsg_list_init(struct blobmsg_list *list, int offset, int len);
 int blobmsg_list_fill(struct blobmsg_list *list, void *data, int len);
