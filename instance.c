@@ -86,6 +86,7 @@ instance_exit(struct uloop_process *p, int ret)
 	struct service_instance *in;
 
 	in = container_of(p, struct service_instance, proc);
+	DPRINTF("Instance %s::%s exit with error code %d\n", in->srv->name, in->name, ret);
 	uloop_timeout_cancel(&in->timeout);
 	if (in->restart)
 		instance_start(in);
