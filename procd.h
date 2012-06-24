@@ -12,6 +12,11 @@
 		fprintf(stderr, "DEBUG %s(%d): " fmt, __func__, __LINE__, ## __VA_ARGS__); \
 	} while (0)
 
+#define DEBUG(level, fmt, ...) do { \
+	if (debug >= level) \
+		fprintf(stderr, "DEBUG %s(%d): " fmt, __func__, __LINE__, ## __VA_ARGS__); \
+	} while (0)
+
 extern int debug;
 extern char *ubus_socket;
 void procd_connect_ubus(void);
