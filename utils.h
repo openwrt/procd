@@ -26,5 +26,6 @@ void __blobmsg_list_init(struct blobmsg_list *list, int offset, int len);
 int blobmsg_list_fill(struct blobmsg_list *list, void *data, int len);
 void blobmsg_list_free(struct blobmsg_list *list);
 bool blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2);
+void blobmsg_list_move(struct blobmsg_list *list, struct blobmsg_list *src);
 
 #endif

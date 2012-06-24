@@ -43,6 +43,20 @@ blobmsg_list_fill(struct blobmsg_list *list, void *data, int len)
 }
 
 void
+blobmsg_list_move(struct blobmsg_list *list, struct blobmsg_list *src)
+{
+	struct blobmsg_list_node *node, *tmp;
+	void *ptr;
+
+	avl_remove_all_elements(&src->avl, node, avl, tmp) {
+		if (!avl_insert(&list->avl, &node->avl)) {
+			ptr = ((char *) node - list->node_offset);
+			free(ptr);
+		}
+	}
+}
+
+void
 blobmsg_list_free(struct blobmsg_list *list)
 {
 	struct blobmsg_list_node *node, *tmp;
