@@ -115,6 +115,7 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 	if (!changed)
 		return false;
 
+	in->restart = true;
 	instance_stop(in, true);
 	instance_config_move(in, in_new);
 	return true;
