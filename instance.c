@@ -173,6 +173,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	blobmsg_list_move(&in->env, &in_src->env);
 	blobmsg_list_move(&in->data, &in_src->data);
 	in->command = in_src->command;
+	in->name = in_src->name;
 }
 
 bool
@@ -202,6 +203,7 @@ instance_free(struct service_instance *in)
 void
 instance_init(struct service_instance *in, struct blob_attr *config)
 {
+	in->name = blobmsg_name(config);
 	in->config = config;
 	in->timeout.cb = instance_timeout;
 	in->proc.cb = instance_exit;
@@ -209,4 +211,16 @@ instance_init(struct service_instance *in, struct blob_attr *config)
 	blobmsg_list_simple_init(&in->env);
 	blobmsg_list_simple_init(&in->data);
 	in->valid = instance_config_parse(in);
+}
+
+void instance_dump(struct blob_buf *b, struct service_instance *in)
+{
+	void *i;
+
+	i = blobmsg_open_table(b, in->name);
+	blobmsg_add_u8(b, "running", in->proc.pending);
+	if (in->proc.pending)
+		blobmsg_add_u32(b, "pid", in->proc.pid);
+	blobmsg_add_blob(b, in->command);
+	blobmsg_close_table(b, i);
 }

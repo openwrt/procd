@@ -148,6 +148,20 @@ free:
 	return ret;
 }
 
+static void
+service_dump(struct service *s)
+{
+	struct service_instance *in;
+	void *c, *i;
+
+	c = blobmsg_open_table(&b, s->name);
+	i = blobmsg_open_table(&b, "instances");
+	vlist_for_each_element(&s->instances, in, node)
+		instance_dump(&b, in);
+	blobmsg_close_table(&b, i);
+	blobmsg_close_table(&b, c);
+}
+
 static int
 service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 		    struct ubus_request_data *req, const char *method,
@@ -156,12 +170,8 @@ service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 	struct service *s;
 
 	blob_buf_init(&b, 0);
-	avl_for_each_element(&services, s, avl) {
-		void *c;
-
-		c = blobmsg_open_table(&b, s->name);
-		blobmsg_close_table(&b, c);
-	}
+	avl_for_each_element(&services, s, avl)
+		service_dump(s);
 
 	ubus_send_reply(ctx, req, b.head);
 
