@@ -3,11 +3,12 @@
 #include "utils.h"
 
 void
-__blobmsg_list_init(struct blobmsg_list *list, int offset, int len)
+__blobmsg_list_init(struct blobmsg_list *list, int offset, int len, blobmsg_list_cmp cmp)
 {
 	avl_init(&list->avl, avl_strcmp, false, NULL);
 	list->node_offset = offset;
 	list->node_len = len;
+	list->cmp = cmp;
 }
 
 int
@@ -21,7 +22,7 @@ blobmsg_list_fill(struct blobmsg_list *list, void *data, int len, bool array)
 	int rem = len;
 
 	__blob_for_each_attr(cur, data, rem) {
-		if (!blobmsg_check_attr(cur, true))
+		if (!blobmsg_check_attr(cur, !array))
 			continue;
 
 		ptr = calloc(1, list->node_len);
@@ -52,7 +53,7 @@ blobmsg_list_move(struct blobmsg_list *list, struct blobmsg_list *src)
 	void *ptr;
 
 	avl_remove_all_elements(&src->avl, node, avl, tmp) {
-		if (!avl_insert(&list->avl, &node->avl)) {
+		if (avl_insert(&list->avl, &node->avl)) {
 			ptr = ((char *) node - list->node_offset);
 			free(ptr);
 		}
@@ -91,6 +92,9 @@ blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2)
 			return false;
 
 		if (memcmp(n1->data, n2->data, len) != 0)
+			return false;
+
+		if (l1->cmp && !l1->cmp(n1, n2))
 			return false;
 
 		if (!count)
