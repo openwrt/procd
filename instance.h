@@ -3,15 +3,21 @@
 
 #include <libubox/vlist.h>
 #include <libubox/uloop.h>
+#include "utils.h"
 
 struct service_instance {
 	struct vlist_node node;
 	const char *name;
 
+	bool valid;
 	bool restart;
 	struct blob_attr *config;
 	struct uloop_process proc;
 	struct uloop_timeout timeout;
+
+	struct blob_attr *command;
+	struct blobmsg_list env;
+	struct blobmsg_list data;
 };
 
 void instance_start(struct service_instance *in);
