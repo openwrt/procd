@@ -19,6 +19,8 @@ void
 instance_start(struct service_instance *in)
 {
 	in->restart = false;
+	if (!in->valid)
+		return;
 }
 
 static void
