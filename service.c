@@ -36,12 +36,15 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		in_n = container_of(node_new, struct service_instance, node);
 
 	if (in_o && in_n) {
+		DPRINTF("Update instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_update(in_o, in_n);
 		instance_free(in_n);
 	} else if (in_o) {
+		DPRINTF("Free instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_stop(in_o, false);
 		instance_free(in_o);
 	} else if (in_n) {
+		DPRINTF("Create instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_start(in_n);
 	}
 }
@@ -128,9 +131,12 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	name = blobmsg_data(cur);
 
 	s = avl_find_element(&services, name, s, avl);
-	if (s)
+	if (s) {
+		DPRINTF("Update service %s\n", name);
 		return service_update(s, msg, tb);
+	}
 
+	DPRINTF("Create service %s\n", name);
 	s = service_alloc(name);
 	if (!s)
 		return UBUS_STATUS_UNKNOWN_ERROR;
