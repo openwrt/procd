@@ -19,7 +19,7 @@ service_instance_add(struct service *s, struct blob_attr *attr)
 	if (!in)
 		return;
 
-	instance_init(in, attr);
+	instance_init(in, s, attr);
 	vlist_add(&s->instances, &in->node, (void *) name);
 }
 

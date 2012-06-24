@@ -64,6 +64,7 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
+	DPRINTF("Started instance %s::%s\n", in->srv->name, in->name);
 	in->proc.pid = pid;
 	uloop_process_add(&in->proc);
 }
@@ -201,8 +202,9 @@ instance_free(struct service_instance *in)
 }
 
 void
-instance_init(struct service_instance *in, struct blob_attr *config)
+instance_init(struct service_instance *in, struct service *s, struct blob_attr *config)
 {
+	in->srv = s;
 	in->name = blobmsg_name(config);
 	in->config = config;
 	in->timeout.cb = instance_timeout;
