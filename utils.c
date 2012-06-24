@@ -11,7 +11,7 @@ __blobmsg_list_init(struct blobmsg_list *list, int offset, int len)
 }
 
 int
-blobmsg_list_fill(struct blobmsg_list *list, void *data, int len)
+blobmsg_list_fill(struct blobmsg_list *list, void *data, int len, bool array)
 {
 	struct avl_tree *tree = &list->avl;
 	struct blobmsg_list_node *node;
@@ -29,7 +29,10 @@ blobmsg_list_fill(struct blobmsg_list *list, void *data, int len)
 			return -1;
 
 		node = (void *) ((char *)ptr + list->node_offset);
-		node->avl.key = blobmsg_name(cur);
+		if (array)
+			node->avl.key = blobmsg_data(cur);
+		else
+			node->avl.key = blobmsg_name(cur);
 		node->data = cur;
 		if (avl_insert(tree, &node->avl)) {
 			free(ptr);

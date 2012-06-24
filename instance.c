@@ -30,7 +30,7 @@ instance_run(struct service_instance *in)
 		argc++;
 
 	blobmsg_list_for_each(&in->env, var)
-		putenv(blobmsg_data(var->data));
+		setenv(blobmsg_name(var->data), blobmsg_data(var->data), 1);
 
 	argv = alloca(sizeof(char *) * argc);
 	argc = 0;
@@ -149,13 +149,13 @@ instance_config_parse(struct service_instance *in)
 	if ((cur = tb[INSTANCE_ATTR_ENV])) {
 		if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
 			return false;
-		blobmsg_list_fill(&in->env, blobmsg_data(cur), blobmsg_data_len(cur));
+		blobmsg_list_fill(&in->env, blobmsg_data(cur), blobmsg_data_len(cur), false);
 	}
 
 	if ((cur = tb[INSTANCE_ATTR_DATA])) {
 		if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
 			return false;
-		blobmsg_list_fill(&in->data, blobmsg_data(cur), blobmsg_data_len(cur));
+		blobmsg_list_fill(&in->data, blobmsg_data(cur), blobmsg_data_len(cur), false);
 	}
 
 	return true;
