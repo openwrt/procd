@@ -1,3 +1,5 @@
+#include <unistd.h>
+
 #include "procd.h"
 #include "service.h"
 #include "instance.h"
@@ -15,12 +17,55 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_DATA] = { "data", BLOBMSG_TYPE_TABLE },
 };
 
+static void
+instance_run(struct service_instance *in)
+{
+	struct blobmsg_list_node *var;
+	struct blob_attr *cur;
+	char **argv;
+	int argc = 1; /* NULL terminated */
+	int rem;
+
+	blobmsg_for_each_attr(cur, in->command, rem)
+		argc++;
+
+	blobmsg_list_for_each(&in->env, var)
+		putenv(blobmsg_data(var->data));
+
+	argv = alloca(sizeof(char *) * argc);
+	argc = 0;
+
+	blobmsg_for_each_attr(cur, in->command, rem)
+		argv[argc++] = blobmsg_data(cur);
+
+	argv[argc] = NULL;
+	execvp(argv[0], argv);
+	exit(127);
+}
+
 void
 instance_start(struct service_instance *in)
 {
+	int pid;
+
+	if (in->proc.pending)
+		return;
+
 	in->restart = false;
 	if (!in->valid)
 		return;
+
+	pid = fork();
+	if (pid < 0)
+		return;
+
+	if (!pid) {
+		instance_run(in);
+		return;
+	}
+
+	in->proc.pid = pid;
+	uloop_process_add(&in->proc);
 }
 
 static void
@@ -76,19 +121,40 @@ static bool
 instance_config_parse(struct service_instance *in)
 {
 	struct blob_attr *tb[__INSTANCE_ATTR_MAX];
-	struct blob_attr *cur;
+	struct blob_attr *cur, *cur2;
+	int argc = 0;
+	int rem;
 
 	blobmsg_parse(instance_attr, __INSTANCE_ATTR_MAX, tb,
 		blobmsg_data(in->config), blobmsg_data_len(in->config));
 
-	if (!tb[INSTANCE_ATTR_COMMAND])
+	cur = tb[INSTANCE_ATTR_COMMAND];
+	if (!cur)
 		return false;
 
-	if ((cur = tb[INSTANCE_ATTR_ENV]))
-		blobmsg_list_fill(&in->env, blobmsg_data(cur), blobmsg_data_len(cur));
+	if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
+		return false;
 
-	if ((cur = tb[INSTANCE_ATTR_DATA]))
+	blobmsg_for_each_attr(cur2, cur, rem) {
+		argc++;
+		break;
+	}
+	if (!argc)
+		return false;
+
+	in->command = cur;
+
+	if ((cur = tb[INSTANCE_ATTR_ENV])) {
+		if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
+			return false;
+		blobmsg_list_fill(&in->env, blobmsg_data(cur), blobmsg_data_len(cur));
+	}
+
+	if ((cur = tb[INSTANCE_ATTR_DATA])) {
+		if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
+			return false;
 		blobmsg_list_fill(&in->data, blobmsg_data(cur), blobmsg_data_len(cur));
+	}
 
 	return true;
 }
