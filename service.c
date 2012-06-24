@@ -44,7 +44,7 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		instance_stop(in_o, false);
 		instance_free(in_o);
 	} else if (in_n) {
-		DPRINTF("Create instance %s::%s\n", in_o->srv->name, in_o->name);
+		DPRINTF("Create instance %s::%s\n", in_n->srv->name, in_n->name);
 		instance_start(in_n);
 	}
 }
