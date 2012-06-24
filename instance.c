@@ -80,6 +80,7 @@ instance_config_parse(struct service_instance *in)
 
 	blobmsg_parse(instance_attr, __INSTANCE_ATTR_MAX, tb,
 		blobmsg_data(in->config), blobmsg_data_len(in->config));
+
 	if (!tb[INSTANCE_ATTR_COMMAND])
 		return false;
 
@@ -143,5 +144,3 @@ instance_init(struct service_instance *in, struct blob_attr *config)
 	blobmsg_list_simple_init(&in->data);
 	in->valid = instance_config_parse(in);
 }
-
-
