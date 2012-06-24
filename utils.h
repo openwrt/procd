@@ -22,6 +22,9 @@ struct blobmsg_list_node {
 #define blobmsg_list_init(list, type, field) \
 	__blobmsg_list_init(list, offsetof(type, field), sizeof(type))
 
+#define blobmsg_list_for_each(list, element) \
+	avl_for_each_element(&(list)->avl, element, avl)
+
 void __blobmsg_list_init(struct blobmsg_list *list, int offset, int len);
 int blobmsg_list_fill(struct blobmsg_list *list, void *data, int len);
 void blobmsg_list_free(struct blobmsg_list *list);
