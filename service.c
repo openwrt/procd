@@ -62,16 +62,16 @@ service_alloc(const char *name)
 }
 
 enum {
-	SERVICE_ATTR_NAME,
-	SERVICE_ATTR_SCRIPT,
-	SERVICE_ATTR_INSTANCES,
-	__SERVICE_ATTR_MAX
+	SERVICE_SET_NAME,
+	SERVICE_SET_SCRIPT,
+	SERVICE_SET_INSTANCES,
+	__SERVICE_SET_MAX
 };
 
-static const struct blobmsg_policy service_attrs[__SERVICE_ATTR_MAX] = {
-	[SERVICE_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
-	[SERVICE_ATTR_SCRIPT] = { "script", BLOBMSG_TYPE_STRING },
-	[SERVICE_ATTR_INSTANCES] = { "instances", BLOBMSG_TYPE_TABLE },
+static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
+	[SERVICE_SET_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[SERVICE_SET_SCRIPT] = { "script", BLOBMSG_TYPE_STRING },
+	[SERVICE_SET_INSTANCES] = { "instances", BLOBMSG_TYPE_TABLE },
 };
 
 
@@ -84,12 +84,12 @@ service_update(struct service *s, struct blob_attr *config, struct blob_attr **t
 
 	/* only the pointer changes, the content stays the same,
 	 * no avl update necessary */
-	s->name = s->avl.key = blobmsg_data(tb[SERVICE_ATTR_NAME]);
+	s->name = s->avl.key = blobmsg_data(tb[SERVICE_SET_NAME]);
 	s->config = config;
 
-	if (tb[SERVICE_ATTR_INSTANCES]) {
+	if (tb[SERVICE_SET_INSTANCES]) {
 		vlist_update(&s->instances);
-		blobmsg_for_each_attr(cur, tb[SERVICE_ATTR_INSTANCES], rem) {
+		blobmsg_for_each_attr(cur, tb[SERVICE_SET_INSTANCES], rem) {
 			service_instance_add(s, cur);
 		}
 		vlist_flush(&s->instances);
@@ -109,12 +109,22 @@ service_delete(struct service *s)
 	free(s);
 }
 
+enum {
+	SERVICE_ATTR_NAME,
+	__SERVICE_ATTR_MAX,
+};
+
+static const struct blobmsg_policy service_attrs[__SERVICE_ATTR_MAX] = {
+	[SERVICE_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
+};
+
+
 static int
 service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		   struct ubus_request_data *req, const char *method,
 		   struct blob_attr *msg)
 {
-	struct blob_attr *tb[__SERVICE_ATTR_MAX], *cur;
+	struct blob_attr *tb[__SERVICE_SET_MAX], *cur;
 	struct service *s = NULL;
 	const char *name;
 	int ret = UBUS_STATUS_INVALID_ARGUMENT;
@@ -123,7 +133,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!msg)
 		return UBUS_STATUS_UNKNOWN_ERROR;
 
-	blobmsg_parse(service_attrs, __SERVICE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_set_attrs, __SERVICE_SET_MAX, tb, blob_data(msg), blob_len(msg));
 	cur = tb[SERVICE_ATTR_NAME];
 	if (!cur)
 		goto free;
@@ -184,25 +194,15 @@ service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
-enum {
-	SERVICE_DEL_NAME,
-	__SERVICE_DEL_MAX,
-};
-
-static const struct blobmsg_policy service_del_attrs[__SERVICE_DEL_MAX] = {
-	[SERVICE_DEL_NAME] = { "name", BLOBMSG_TYPE_STRING },
-};
-
-
 static int
 service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 		    struct ubus_request_data *req, const char *method,
 		    struct blob_attr *msg)
 {
-	struct blob_attr *tb[__SERVICE_DEL_MAX], *cur;
+	struct blob_attr *tb[__SERVICE_ATTR_MAX], *cur;
 	struct service *s, *tmp;
 
-	blobmsg_parse(service_del_attrs, __SERVICE_DEL_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_attrs, __SERVICE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
 
 	cur = tb[SERVICE_ATTR_NAME];
 	if (!cur) {
@@ -219,10 +219,38 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+static int
+service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
+		      struct ubus_request_data *req, const char *method,
+		      struct blob_attr *msg)
+{
+	struct blob_attr *tb[__SERVICE_ATTR_MAX], *cur;
+	struct service *s;
+
+	blobmsg_parse(service_attrs, __SERVICE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+
+	cur = tb[SERVICE_ATTR_NAME];
+	if (!cur)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+	if (!s)
+		return UBUS_STATUS_NOT_FOUND;
+
+	if (!strcmp(method, "update_start"))
+		vlist_update(&s->instances);
+	else
+		vlist_flush(&s->instances);
+
+	return 0;
+}
+
 static struct ubus_method main_object_methods[] = {
-	{ .name = "list", .handler = service_handle_list },
-	{ .name = "set", .handler = service_handle_set },
-	{ .name = "delete", .handler = service_handle_delete },
+	UBUS_METHOD("set", service_handle_set, service_set_attrs),
+	UBUS_METHOD("list", service_handle_list, service_attrs),
+	UBUS_METHOD("delete", service_handle_delete, service_attrs),
+	UBUS_METHOD("update_start", service_handle_update, service_attrs),
+	UBUS_METHOD("update_complete", service_handle_update, service_attrs),
 };
 
 static struct ubus_object_type main_object_type =
