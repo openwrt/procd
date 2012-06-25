@@ -53,10 +53,17 @@ static struct service *
 service_alloc(const char *name)
 {
 	struct service *s;
+	char *new_name;
 
-	s = calloc(1, sizeof(*s));
+	s = calloc(1, sizeof(*s) + strlen(name) + 1);
+
+	new_name = (char *) s + 1;
+	strcpy(new_name, name);
+
 	vlist_init(&s->instances, avl_strcmp, service_instance_update);
 	s->instances.keep_old = true;
+	s->name = new_name;
+	s->avl.key = s->name;
 
 	return s;
 }
@@ -78,14 +85,8 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 static int
 service_update(struct service *s, struct blob_attr *config, struct blob_attr **tb)
 {
-	struct blob_attr *old_config = s->config;
 	struct blob_attr *cur;
 	int rem;
-
-	/* only the pointer changes, the content stays the same,
-	 * no avl update necessary */
-	s->name = s->avl.key = blobmsg_data(tb[SERVICE_SET_NAME]);
-	s->config = config;
 
 	if (tb[SERVICE_SET_INSTANCES]) {
 		vlist_update(&s->instances);
@@ -94,8 +95,6 @@ service_update(struct service *s, struct blob_attr *config, struct blob_attr **t
 		}
 		vlist_flush(&s->instances);
 	}
-
-	free(old_config);
 
 	return 0;
 }
@@ -128,10 +127,6 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	struct service *s = NULL;
 	const char *name;
 	int ret = UBUS_STATUS_INVALID_ARGUMENT;
-
-	msg = blob_memdup(msg);
-	if (!msg)
-		return UBUS_STATUS_UNKNOWN_ERROR;
 
 	blobmsg_parse(service_set_attrs, __SERVICE_SET_MAX, tb, blob_data(msg), blob_len(msg));
 	cur = tb[SERVICE_ATTR_NAME];
