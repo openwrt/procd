@@ -246,12 +246,14 @@ instance_free(struct service_instance *in)
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	instance_config_cleanup(in);
+	free(in->config);
 	free(in);
 }
 
 void
 instance_init(struct service_instance *in, struct service *s, struct blob_attr *config)
 {
+	config = blob_memdup(config);
 	in->srv = s;
 	in->name = blobmsg_name(config);
 	in->config = config;
