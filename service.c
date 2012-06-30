@@ -83,17 +83,19 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 
 
 static int
-service_update(struct service *s, struct blob_attr *config, struct blob_attr **tb)
+service_update(struct service *s, struct blob_attr *config, struct blob_attr **tb, bool add)
 {
 	struct blob_attr *cur;
 	int rem;
 
 	if (tb[SERVICE_SET_INSTANCES]) {
-		vlist_update(&s->instances);
+		if (!add)
+			vlist_update(&s->instances);
 		blobmsg_for_each_attr(cur, tb[SERVICE_SET_INSTANCES], rem) {
 			service_instance_add(s, cur);
 		}
-		vlist_flush(&s->instances);
+		if (!add)
+			vlist_flush(&s->instances);
 	}
 
 	return 0;
@@ -127,6 +129,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	struct service *s = NULL;
 	const char *name;
 	int ret = UBUS_STATUS_INVALID_ARGUMENT;
+	bool add = !strcmp(method, "add");
 
 	blobmsg_parse(service_set_attrs, __SERVICE_SET_MAX, tb, blob_data(msg), blob_len(msg));
 	cur = tb[SERVICE_ATTR_NAME];
@@ -138,7 +141,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	s = avl_find_element(&services, name, s, avl);
 	if (s) {
 		DPRINTF("Update service %s\n", name);
-		return service_update(s, msg, tb);
+		return service_update(s, msg, tb, add);
 	}
 
 	DPRINTF("Create service %s\n", name);
@@ -146,7 +149,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!s)
 		return UBUS_STATUS_UNKNOWN_ERROR;
 
-	ret = service_update(s, msg, tb);
+	ret = service_update(s, msg, tb, add);
 	if (ret)
 		goto free;
 
@@ -242,6 +245,7 @@ service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 
 static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
+	UBUS_METHOD("add", service_handle_set, service_set_attrs),
 	UBUS_METHOD("list", service_handle_list, service_attrs),
 	UBUS_METHOD("delete", service_handle_delete, service_attrs),
 	UBUS_METHOD("update_start", service_handle_update, service_attrs),
