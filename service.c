@@ -57,7 +57,7 @@ service_alloc(const char *name)
 
 	s = calloc(1, sizeof(*s) + strlen(name) + 1);
 
-	new_name = (char *) s + 1;
+	new_name = (char *) (s + 1);
 	strcpy(new_name, name);
 
 	vlist_init(&s->instances, avl_strcmp, service_instance_update);
