@@ -1,3 +1,4 @@
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <net/if.h>
@@ -12,6 +13,7 @@ enum {
 	INSTANCE_ATTR_ENV,
 	INSTANCE_ATTR_DATA,
 	INSTANCE_ATTR_NETDEV,
+	INSTANCE_ATTR_NICE,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -20,6 +22,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_ENV] = { "env", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_DATA] = { "data", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_NETDEV] = { "netdev", BLOBMSG_TYPE_ARRAY },
+	[INSTANCE_ATTR_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
 };
 
 struct instance_netdev {
@@ -35,6 +38,9 @@ instance_run(struct service_instance *in)
 	char **argv;
 	int argc = 1; /* NULL terminated */
 	int rem;
+
+	if (in->nice)
+		setpriority(PRIO_PROCESS, 0, in->nice);
 
 	blobmsg_for_each_attr(cur, in->command, rem)
 		argc++;
@@ -129,6 +135,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (!blobmsg_list_equal(&in->netdev, &in_new->netdev))
 		return true;
 
+	if (in->nice != in_new->nice)
+		return true;
+
 	return false;
 }
 
@@ -175,6 +184,12 @@ instance_config_parse(struct service_instance *in)
 		return false;
 
 	in->command = cur;
+
+	if ((cur = tb[INSTANCE_ATTR_NICE])) {
+		in->nice = (int8_t) blobmsg_get_u32(cur);
+		if (in->nice < -20 || in->nice > 20)
+			return false;
+	}
 
 	if ((cur = tb[INSTANCE_ATTR_ENV])) {
 		if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))

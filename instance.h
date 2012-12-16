@@ -10,8 +10,10 @@ struct service_instance {
 	struct service *srv;
 	const char *name;
 
+	int8_t nice;
 	bool valid;
 	bool restart;
+
 	struct blob_attr *config;
 	struct uloop_process proc;
 	struct uloop_timeout timeout;
