@@ -1,3 +1,4 @@
+#include <sys/resource.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
@@ -31,6 +32,7 @@ static void procd_restart_ubus(void)
 
 	ubus_proc.pid = fork();
 	if (!ubus_proc.pid) {
+		setpriority(PRIO_PROCESS, 0, -20);
 		execvp(argv[0], argv);
 		exit(-1);
 	}
