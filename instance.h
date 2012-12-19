@@ -22,6 +22,7 @@ struct service_instance {
 	struct blobmsg_list env;
 	struct blobmsg_list data;
 	struct blobmsg_list netdev;
+	struct blobmsg_list file;
 };
 
 void instance_start(struct service_instance *in);

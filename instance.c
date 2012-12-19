@@ -3,16 +3,20 @@
 #include <sys/socket.h>
 #include <net/if.h>
 #include <unistd.h>
+#include <stdint.h>
+#include <fcntl.h>
 
 #include "procd.h"
 #include "service.h"
 #include "instance.h"
+#include "md5.h"
 
 enum {
 	INSTANCE_ATTR_COMMAND,
 	INSTANCE_ATTR_ENV,
 	INSTANCE_ATTR_DATA,
 	INSTANCE_ATTR_NETDEV,
+	INSTANCE_ATTR_FILE,
 	INSTANCE_ATTR_NICE,
 	__INSTANCE_ATTR_MAX
 };
@@ -22,12 +26,18 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_ENV] = { "env", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_DATA] = { "data", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_NETDEV] = { "netdev", BLOBMSG_TYPE_ARRAY },
+	[INSTANCE_ATTR_FILE] = { "file", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
 };
 
 struct instance_netdev {
 	struct blobmsg_list_node node;
 	int ifindex;
+};
+
+struct instance_file {
+	struct blobmsg_list_node node;
+	uint32_t md5[4];
 };
 
 static void
@@ -135,6 +145,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (!blobmsg_list_equal(&in->netdev, &in_new->netdev))
 		return true;
 
+	if (!blobmsg_list_equal(&in->file, &in_new->file))
+		return true;
+
 	if (in->nice != in_new->nice)
 		return true;
 
@@ -156,6 +169,67 @@ instance_netdev_update(struct blobmsg_list_node *l)
 	struct instance_netdev *n = container_of(l, struct instance_netdev, node);
 
 	n->ifindex = if_nametoindex(n->node.avl.key);
+}
+
+static bool
+instance_file_cmp(struct blobmsg_list_node *l1, struct blobmsg_list_node *l2)
+{
+	struct instance_file *f1 = container_of(l1, struct instance_file, node);
+	struct instance_file *f2 = container_of(l2, struct instance_file, node);
+
+	return !memcmp(f1->md5, f2->md5, sizeof(f1->md5));
+}
+
+static void
+instance_file_update(struct blobmsg_list_node *l)
+{
+	struct instance_file *f = container_of(l, struct instance_file, node);
+	md5_ctx_t md5;
+	char buf[256];
+	int len, fd;
+
+	memset(f->md5, 0, sizeof(f->md5));
+
+	fd = open(l->avl.key, O_RDONLY);
+	if (fd < 0)
+		return;
+
+	md5_begin(&md5);
+	do {
+		len = read(fd, buf, sizeof(buf));
+		if (len < 0) {
+			if (errno == EINTR)
+				continue;
+
+			break;
+		}
+		if (!len)
+			break;
+
+		md5_hash(buf, len, &md5);
+	} while(1);
+
+	md5_end(f->md5, &md5);
+	close(fd);
+}
+
+static bool
+instance_fill_array(struct blobmsg_list *l, struct blob_attr *cur, blobmsg_update_cb cb, bool array)
+{
+	struct blobmsg_list_node *node;
+
+	if (!cur)
+		return true;
+
+	if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
+		return false;
+
+	blobmsg_list_fill(l, blobmsg_data(cur), blobmsg_data_len(cur), array);
+	if (cb) {
+		blobmsg_list_for_each(l, node)
+			cb(node);
+	}
+	return true;
 }
 
 static bool
@@ -191,30 +265,17 @@ instance_config_parse(struct service_instance *in)
 			return false;
 	}
 
-	if ((cur = tb[INSTANCE_ATTR_ENV])) {
-		if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
-			return false;
+	if (!instance_fill_array(&in->env, tb[INSTANCE_ATTR_ENV], NULL, false))
+		return false;
 
-		blobmsg_list_fill(&in->env, blobmsg_data(cur), blobmsg_data_len(cur), false);
-	}
+	if (!instance_fill_array(&in->data, tb[INSTANCE_ATTR_DATA], NULL, false))
+		return false;
 
-	if ((cur = tb[INSTANCE_ATTR_DATA])) {
-		if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
-			return false;
+	if (!instance_fill_array(&in->netdev, tb[INSTANCE_ATTR_NETDEV], instance_netdev_update, true))
+		return false;
 
-		blobmsg_list_fill(&in->data, blobmsg_data(cur), blobmsg_data_len(cur), false);
-	}
-
-	if ((cur = tb[INSTANCE_ATTR_NETDEV])) {
-		struct blobmsg_list_node *ndev;
-
-		if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
-			return false;
-
-		blobmsg_list_fill(&in->netdev, blobmsg_data(cur), blobmsg_data_len(cur), true);
-		blobmsg_list_for_each(&in->netdev, ndev)
-			instance_netdev_update(ndev);
-	}
+	if (!instance_fill_array(&in->file, tb[INSTANCE_ATTR_FILE], instance_file_update, true))
+		return false;
 
 	return true;
 }
@@ -278,6 +339,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->proc.cb = instance_exit;
 
 	blobmsg_list_init(&in->netdev, struct instance_netdev, node, instance_netdev_cmp);
+	blobmsg_list_init(&in->file, struct instance_file, node, instance_file_cmp);
 	blobmsg_list_simple_init(&in->env);
 	blobmsg_list_simple_init(&in->data);
 	in->valid = instance_config_parse(in);

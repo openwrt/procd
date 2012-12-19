@@ -11,6 +11,7 @@ struct blobmsg_list_node {
 };
 
 typedef bool (*blobmsg_list_cmp)(struct blobmsg_list_node *l1, struct blobmsg_list_node *l2);
+typedef void (*blobmsg_update_cb)(struct blobmsg_list_node *n);
 
 struct blobmsg_list {
 	struct avl_tree avl;

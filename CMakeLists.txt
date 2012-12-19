@@ -10,7 +10,7 @@ IF(APPLE)
   LINK_DIRECTORIES(/opt/local/lib)
 ENDIF()
 
-SET(SOURCES main.c ubus.c service.c instance.c utils.c)
+SET(SOURCES main.c ubus.c service.c instance.c utils.c md5.c)
 
 SET(LIBS ubox ubus)
 
