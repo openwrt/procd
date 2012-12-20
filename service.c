@@ -118,6 +118,17 @@ static const struct blobmsg_policy service_attrs[__SERVICE_ATTR_MAX] = {
 	[SERVICE_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
 };
 
+enum {
+	SERVICE_DEL_ATTR_NAME,
+	SERVICE_DEL_ATTR_INSTANCE,
+	__SERVICE_DEL_ATTR_MAX,
+};
+
+static const struct blobmsg_policy service_del_attrs[__SERVICE_DEL_ATTR_MAX] = {
+	[SERVICE_DEL_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[SERVICE_DEL_ATTR_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+};
+
 
 static int
 service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
@@ -196,12 +207,13 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 		    struct ubus_request_data *req, const char *method,
 		    struct blob_attr *msg)
 {
-	struct blob_attr *tb[__SERVICE_ATTR_MAX], *cur;
+	struct blob_attr *tb[__SERVICE_DEL_ATTR_MAX], *cur;
 	struct service *s, *tmp;
+	struct service_instance *in;
 
-	blobmsg_parse(service_attrs, __SERVICE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_del_attrs, __SERVICE_DEL_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
 
-	cur = tb[SERVICE_ATTR_NAME];
+	cur = tb[SERVICE_DEL_ATTR_NAME];
 	if (!cur) {
 		avl_for_each_element_safe(&services, s, avl, tmp)
 			service_delete(s);
@@ -212,7 +224,20 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!s)
 		return UBUS_STATUS_NOT_FOUND;
 
-	service_delete(s);
+	cur = tb[SERVICE_DEL_ATTR_INSTANCE];
+	if (!cur) {
+		service_delete(s);
+		return 0;
+	}
+
+	in = vlist_find(&s->instances, blobmsg_data(cur), in, node);
+	if (!in) {
+		fprintf(stderr, "instance %s not found\n", (char *) blobmsg_data(cur));
+		return UBUS_STATUS_NOT_FOUND;
+	}
+
+	vlist_delete(&s->instances, &in->node);
+
 	return 0;
 }
 
@@ -246,7 +271,7 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
 	UBUS_METHOD("list", service_handle_list, service_attrs),
-	UBUS_METHOD("delete", service_handle_delete, service_attrs),
+	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
 	UBUS_METHOD("update_start", service_handle_update, service_attrs),
 	UBUS_METHOD("update_complete", service_handle_update, service_attrs),
 };
