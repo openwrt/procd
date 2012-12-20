@@ -10,7 +10,6 @@ static void
 service_instance_add(struct service *s, struct blob_attr *attr)
 {
 	struct service_instance *in;
-	const char *name = blobmsg_name(attr);
 
 	if (blobmsg_type(attr) != BLOBMSG_TYPE_TABLE)
 		return;
@@ -20,7 +19,7 @@ service_instance_add(struct service *s, struct blob_attr *attr)
 		return;
 
 	instance_init(in, s, attr);
-	vlist_add(&s->instances, &in->node, (void *) name);
+	vlist_add(&s->instances, &in->node, (void *) in->name);
 }
 
 static void
