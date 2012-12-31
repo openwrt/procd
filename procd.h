@@ -2,6 +2,7 @@
 #define __PROCD_H
 
 #include <libubox/uloop.h>
+#include <libubox/utils.h>
 #include <libubus.h>
 #include <stdio.h>
 
