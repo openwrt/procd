@@ -10,9 +10,10 @@ IF(APPLE)
   LINK_DIRECTORIES(/opt/local/lib)
 ENDIF()
 
-SET(SOURCES main.c ubus.c service.c instance.c utils.c md5.c)
+SET(SOURCES main.c ubus.c service.c instance.c utils.c md5.c hotplug-rule.c hotplug.c)
 
-SET(LIBS ubox ubus)
+find_library(json NAMES json-c json)
+SET(LIBS ubox ubus ${json} blobmsg_json)
 
 IF(DEBUG)
   ADD_DEFINITIONS(-DDEBUG -g3)
