@@ -379,6 +379,11 @@ static int cmd_process_strings(struct blob_attr *attr, struct blob_attr *msg)
 		if (args++ < 0)
 			continue;
 
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING) {
+			rule_error(attr, "Invalid argument in command");
+			return -1;
+		}
+
 		cmd_add_string(blobmsg_data(cur), msg);
 	}
 
@@ -398,7 +403,10 @@ static int __rule_process_cmd(struct blob_attr *cur, struct blob_attr *msg)
 		return ret;
 
 	name = blobmsg_data(blobmsg_data(cur));
-	cmd_process_strings(cur, msg);
+	ret = cmd_process_strings(cur, msg);
+	if (ret)
+		return ret;
+
 	rule_handle_command(name, blob_data(b.head));
 
 	return 0;
