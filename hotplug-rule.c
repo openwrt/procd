@@ -399,6 +399,12 @@ static int __rule_process_cmd(struct blob_attr *cur, struct blob_attr *msg)
 	bool found;
 	int ret;
 
+	if (blobmsg_type(cur) != BLOBMSG_TYPE_ARRAY ||
+	    blobmsg_type(blobmsg_data(cur)) != BLOBMSG_TYPE_STRING) {
+		rule_error(cur, "Unexpected element type");
+		return -1;
+	}
+
 	ret = __rule_process_type(cur, msg, cmd, ARRAY_SIZE(cmd), &found);
 	if (found)
 		return ret;
