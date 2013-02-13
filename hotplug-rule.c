@@ -306,7 +306,8 @@ static int rule_process_expr(struct blob_attr *cur, struct blob_attr *msg)
 	bool found;
 	int ret;
 
-	if (blobmsg_type(cur) != BLOBMSG_TYPE_ARRAY) {
+	if (blobmsg_type(cur) != BLOBMSG_TYPE_ARRAY ||
+	    blobmsg_type(blobmsg_data(cur)) != BLOBMSG_TYPE_STRING) {
 		rule_error(cur, "Unexpected element type");
 		return -1;
 	}
