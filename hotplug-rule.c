@@ -354,7 +354,7 @@ static void cmd_add_string(const char *pattern, struct blob_attr *msg)
 		}
 
 		if (cur_len) {
-			dest = blobmsg_realloc_string_buffer(&b, cur_len);
+			dest = blobmsg_realloc_string_buffer(&b, cur_len + 1);
 			memcpy(dest + len, cur, cur_len);
 			len += cur_len;
 		}
