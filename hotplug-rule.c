@@ -467,7 +467,7 @@ rule_file_load(const char *filename)
 		return NULL;
 
 	obj = json_object_from_file((char *) filename);
-	if (!obj)
+	if (is_error(obj))
 		return NULL;
 
 	if (!json_object_is_type(obj, json_type_array)) {
