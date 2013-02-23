@@ -325,7 +325,7 @@ static void cmd_add_string(const char *pattern, struct blob_attr *msg)
 	int len = 0;
 	bool var = false;
 
-	blobmsg_alloc_string_buffer(&b, NULL, 1);
+	dest = blobmsg_alloc_string_buffer(&b, NULL, 1);
 	str = alloca(strlen(pattern) + 1);
 	strcpy(str, pattern);
 	next = str;
