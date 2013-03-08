@@ -1,4 +1,7 @@
 procd
+logread
+askfirst
+udevtrigger
 .*
 Makefile
 CMakeCache.txt
