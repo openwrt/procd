@@ -1,25 +1,23 @@
+/*
+ * Copyright (C) 2013 Felix Fietkau <nbd@openwrt.org>
+ * Copyright (C) 2013 John Crispin <blogic@openwrt.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License version 2.1
+ * as published by the Free Software Foundation
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
 #ifndef __PROCD_HOTPLUG_H
 #define __PROCD_HOTPLUG_H
 
-#include <libubox/avl.h>
-#include <libubox/blob.h>
-#include <libubox/blobmsg.h>
-#include <libubox/utils.h>
+#include <libubox/uloop.h>
 
-struct rule_file {
-	struct avl_node avl;
-	struct blob_attr data[];
-};
-
-struct rule_handler {
-	const char *name;
-	int (*handler)(struct blob_attr *cur, struct blob_attr *msg);
-};
-
-struct rule_file *rule_file_get(const char *filename);
-void rule_file_free_all(void);
-void rule_error(struct blob_attr *cur, const char *msg);
-void rule_process_msg(struct rule_file *f, struct blob_attr *msg);
-void rule_handle_command(const char *name, struct blob_attr *data);
+void hotplug(char *rules);
+void hotplug_last_event(uloop_timeout_handler handler);
 
 #endif
