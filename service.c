@@ -284,7 +284,7 @@ static struct ubus_object main_object = {
 	.n_methods = ARRAY_SIZE(main_object_methods),
 };
 
-void procd_init_service(struct ubus_context *ctx)
+void ubus_init_service(struct ubus_context *ctx)
 {
 	avl_init(&services, avl_strcmp, false, NULL);
 	ubus_add_object(ctx, &main_object);
