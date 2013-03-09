@@ -1,3 +1,17 @@
+/*
+ * Copyright (C) 2013 Felix Fietkau <nbd@openwrt.org>
+ * Copyright (C) 2013 John Crispin <blogic@openwrt.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License version 2.1
+ * as published by the Free Software Foundation
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
 #include <libubox/avl-cmp.h>
 #include "procd.h"
 #include "service.h"
@@ -35,15 +49,15 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		in_n = container_of(node_new, struct service_instance, node);
 
 	if (in_o && in_n) {
-		LOG("Update instance %s::%s\n", in_o->srv->name, in_o->name);
+		DEBUG(1, "Update instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_update(in_o, in_n);
 		instance_free(in_n);
 	} else if (in_o) {
-		LOG("Free instance %s::%s\n", in_o->srv->name, in_o->name);
+		DEBUG(1, "Free instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_stop(in_o, false);
 		instance_free(in_o);
 	} else if (in_n) {
-		LOG("Create instance %s::%s\n", in_n->srv->name, in_n->name);
+		DEBUG(1, "Create instance %s::%s\n", in_n->srv->name, in_n->name);
 		instance_start(in_n);
 	}
 }
@@ -148,11 +162,11 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	s = avl_find_element(&services, name, s, avl);
 	if (s) {
-		LOG("Update service %s\n", name);
+		DEBUG(1, "Update service %s\n", name);
 		return service_update(s, msg, tb, add);
 	}
 
-	LOG("Create service %s\n", name);
+	DEBUG(1, "Create service %s\n", name);
 	s = service_alloc(name);
 	if (!s)
 		return UBUS_STATUS_UNKNOWN_ERROR;

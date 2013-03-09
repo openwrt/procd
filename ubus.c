@@ -1,3 +1,17 @@
+/*
+ * Copyright (C) 2013 Felix Fietkau <nbd@openwrt.org>
+ * Copyright (C) 2013 John Crispin <blogic@openwrt.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License version 2.1
+ * as published by the Free Software Foundation
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
 #include <sys/resource.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -42,7 +56,7 @@ static void procd_restart_ubus(void)
 		return;
 	}
 
-	LOG("Launched new ubus instance, pid=%d\n", (int) ubus_proc.pid);
+	DEBUG(1, "Launched new ubus instance, pid=%d\n", (int) ubus_proc.pid);
 	uloop_process_add(&ubus_proc);
 }
 
@@ -77,7 +91,7 @@ static void procd_ubus_connection_lost(struct ubus_context *old_ctx)
 		procd_ubus_try_connect();
 	}
 
-	LOG("Connected to ubus, id=%08x\n", ctx->local_id);
+	DEBUG(1, "Connected to ubus, id=%08x\n", ctx->local_id);
 	ubus_add_uloop(ctx);
 }
 

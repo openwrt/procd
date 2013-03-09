@@ -1,3 +1,17 @@
+/*
+ * Copyright (C) 2013 Felix Fietkau <nbd@openwrt.org>
+ * Copyright (C) 2013 John Crispin <blogic@openwrt.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License version 2.1
+ * as published by the Free Software Foundation
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -90,7 +104,7 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
-	LOG("Started instance %s::%s\n", in->srv->name, in->name);
+	DEBUG(1, "Started instance %s::%s\n", in->srv->name, in->name);
 	in->proc.pid = pid;
 	uloop_process_add(&in->proc);
 }
