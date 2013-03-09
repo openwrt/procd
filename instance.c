@@ -90,7 +90,7 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
-	DPRINTF("Started instance %s::%s\n", in->srv->name, in->name);
+	LOG("Started instance %s::%s\n", in->srv->name, in->name);
 	in->proc.pid = pid;
 	uloop_process_add(&in->proc);
 }
@@ -112,7 +112,7 @@ instance_exit(struct uloop_process *p, int ret)
 	struct service_instance *in;
 
 	in = container_of(p, struct service_instance, proc);
-	DPRINTF("Instance %s::%s exit with error code %d\n", in->srv->name, in->name, ret);
+	LOG("Instance %s::%s exit with error code %d\n", in->srv->name, in->name, ret);
 	uloop_timeout_cancel(&in->timeout);
 	if (in->restart)
 		instance_start(in);

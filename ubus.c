@@ -22,7 +22,7 @@ static void procd_restart_ubus(void)
 	char *argv[] = { "ubusd", NULL, ubus_socket, NULL };
 
 	if (ubus_proc.pending) {
-		DPRINTF("Killing existing ubus instance, pid=%d\n", (int) ubus_proc.pid);
+		ERROR("Killing existing ubus instance, pid=%d\n", (int) ubus_proc.pid);
 		kill(ubus_proc.pid, SIGKILL);
 		uloop_process_delete(&ubus_proc);
 	}
@@ -38,11 +38,11 @@ static void procd_restart_ubus(void)
 	}
 
 	if (ubus_proc.pid <= 0) {
-		DPRINTF("Failed to start new ubus instance\n");
+		ERROR("Failed to start new ubus instance\n");
 		return;
 	}
 
-	DPRINTF("Launched new ubus instance, pid=%d\n", (int) ubus_proc.pid);
+	LOG("Launched new ubus instance, pid=%d\n", (int) ubus_proc.pid);
 	uloop_process_add(&ubus_proc);
 }
 
@@ -55,7 +55,7 @@ static void procd_ubus_try_connect(void)
 
 	ctx = ubus_connect(ubus_socket);
 	if (!ctx) {
-		DPRINTF("Connection to ubus failed\n");
+		DEBUG(2, "Connection to ubus failed\n");
 		return;
 	}
 
@@ -73,7 +73,7 @@ static void procd_ubus_connection_lost(struct ubus_context *old_ctx)
 		procd_ubus_try_connect();
 	}
 
-	DPRINTF("Connected to ubus, id=%08x\n", ctx->local_id);
+	LOG("Connected to ubus, id=%08x\n", ctx->local_id);
 	ubus_add_uloop(ctx);
 }
 
