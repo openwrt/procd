@@ -24,19 +24,19 @@
 
 static void early_mounts(void)
 {
-	mount("proc", "/proc", "proc", 0, 0);
-	mount("sysfs", "/sys", "sysfs", 0, 0);
+	mount("proc", "/proc", "proc", MS_NOATIME, 0);
+	mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
 
-	mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "size=512k,mode=1777");
+	mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, NULL);
 	mkdir("/tmp/run", 0777);
 	mkdir("/tmp/lock", 0777);
 	mkdir("/tmp/state", 0777);
 	symlink("/tmp", "/var");
 
-	mount("tmpfs", "/dev", "tmpfs", 0, "mode=0755,size=512K");
+	mount("tmpfs", "/dev", "tmpfs", MS_NOATIME, "mode=0755,size=512K");
 	mkdir("/dev/shm", 0755);
 	mkdir("/dev/pts", 0755);
-	mount("devpts", "/dev/pts", "devpts", 0, 0);
+	mount("devpts", "/dev/pts", "devpts", MS_NOATIME, "mode=600");
 }
 
 static void early_dev(void)
