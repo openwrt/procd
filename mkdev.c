@@ -109,10 +109,8 @@ int mkdev(const char *name, int _mode)
 {
 	char *pattern;
 
-	if (chdir("/dev")) {
-		perror("chdir");
+	if (chdir("/dev"))
 		return 1;
-	}
 
 	pattern = add_pattern(name);
 	patterns = &pattern;

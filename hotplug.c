@@ -422,13 +422,11 @@ void hotplug(char *rules)
 	nls.nl_groups = -1;
 
 	if ((hotplug_fd.fd = socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT)) == -1) {
-		ERROR("Failed to open hotplug socket\n");
-		perror("socket");
+		ERROR("Failed to open hotplug socket: %s\n", strerror(errno));
 		exit(1);
 	}
 	if (bind(hotplug_fd.fd, (void *)&nls, sizeof(struct sockaddr_nl))) {
-		ERROR("Failed to bind hotplug socket\n");
-		perror("socket");
+		ERROR("Failed to bind hotplug socket: %s\n", strerror(errno));
 		exit(1);
 	}
 
