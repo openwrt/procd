@@ -262,11 +262,6 @@ int log_buffer_init(int size)
 	return 0;
 }
 
-int log_buffer_size(void)
-{
-	return log_size;
-}
-
 void log_init(void)
 {
 	regcomp(&pat_prio, "^<([0-9]*)>(.*)", REG_EXTENDED);
