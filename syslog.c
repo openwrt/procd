@@ -46,8 +46,8 @@ static char *log_dev = LOG_DEFAULT_SOCKET;
 static int log_size = LOG_DEFAULT_SIZE;
 static struct log_head *log, *log_end, *oldest, *newest;
 static int current_id = 0;
-regex_t pat_prio;
-regex_t pat_tstamp;
+static regex_t pat_prio;
+static regex_t pat_tstamp;
 
 static struct log_head *log_next(struct log_head *h, int size)
 {
