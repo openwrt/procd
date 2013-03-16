@@ -165,12 +165,12 @@ static void klog_cb(struct ustream *s, int bytes)
 
 struct ustream_fd slog = {
 	.stream.string_data = true,
-        .stream.notify_read = slog_cb,
+	.stream.notify_read = slog_cb,
 };
 
 struct ustream_fd klog = {
 	.stream.string_data = true,
-        .stream.notify_read = klog_cb,
+	.stream.notify_read = klog_cb,
 };
 
 static int klog_open(void)
