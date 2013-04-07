@@ -58,12 +58,14 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 enum {
 	WDT_FREQUENCY,
 	WDT_TIMEOUT,
+	WDT_STOP,
 	__WDT_MAX
 };
 
 static const struct blobmsg_policy watchdog_policy[__WDT_MAX] = {
 	[WDT_FREQUENCY] = { .name = "frequency", .type = BLOBMSG_TYPE_INT32 },
 	[WDT_TIMEOUT] = { .name = "timeout", .type = BLOBMSG_TYPE_INT32 },
+	[WDT_STOP] = { .name = "stop", .type = BLOBMSG_TYPE_BOOL },
 };
 
 static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
@@ -71,6 +73,7 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 			struct blob_attr *msg)
 {
 	struct blob_attr *tb[__WDT_MAX];
+	const char *status;
 
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -96,8 +99,18 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 		 watchdog_timeout(timeout);
 	}
 
+	if (tb[WDT_STOP])
+		watchdog_set_stopped(blobmsg_get_bool(tb[WDT_STOP]));
+
+	if (watchdog_fd() < 0)
+		status = "offline";
+	else if (watchdog_get_stopped())
+		status = "stopped";
+	else
+		status = "running";
+
 	blob_buf_init(&b, 0);
-	blobmsg_add_string(&b, "status", (watchdog_fd() >= 0) ? ("running") : ("offline"));
+	blobmsg_add_string(&b, "status", status);
 	blobmsg_add_u32(&b, "timeout", watchdog_timeout(0));
 	blobmsg_add_u32(&b, "frequency", watchdog_frequency(0));
 	ubus_send_reply(ctx, req, b.head);

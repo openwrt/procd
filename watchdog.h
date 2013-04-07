@@ -19,5 +19,7 @@ void watchdog_init(void);
 char* watchdog_fd(void);
 int watchdog_timeout(int timeout);
 int watchdog_frequency(int frequency);
+void watchdog_set_stopped(bool val);
+bool watchdog_get_stopped(void);
 
 #endif

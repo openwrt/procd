@@ -40,6 +40,19 @@ static void watchdog_timeout_cb(struct uloop_timeout *t)
 	uloop_timeout_set(t, wdt_frequency * 1000);
 }
 
+void watchdog_set_stopped(bool val)
+{
+	if (val)
+		uloop_timeout_cancel(&wdt_timeout);
+	else
+		watchdog_timeout_cb(&wdt_timeout);
+}
+
+bool watchdog_get_stopped(void)
+{
+	return !wdt_timeout.pending;
+}
+
 int watchdog_timeout(int timeout)
 {
 	if (wdt_fd < 0)
