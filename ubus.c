@@ -23,6 +23,7 @@ char *ubus_socket = NULL;
 static struct ubus_context *ctx;
 static struct uloop_process ubus_proc;
 static bool ubus_connected = false;
+static int reconnect = 1;
 
 static void procd_ubus_connection_lost(struct ubus_context *old_ctx);
 
@@ -84,6 +85,9 @@ static void procd_ubus_try_connect(void)
 
 static void procd_ubus_connection_lost(struct ubus_context *old_ctx)
 {
+	if (!reconnect)
+		return;
+
 	procd_ubus_try_connect();
 	while (!ubus_connected) {
 		procd_restart_ubus();
@@ -99,5 +103,10 @@ void procd_connect_ubus(void)
 {
 	ubus_proc.cb = ubus_proc_cb;
 	procd_ubus_connection_lost(NULL);
+}
+
+void procd_reconnect_ubus(int _reconnect)
+{
+	reconnect = _reconnect;
 }
 

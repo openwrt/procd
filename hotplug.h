@@ -18,6 +18,7 @@
 #include <libubox/uloop.h>
 
 void hotplug(char *rules);
+void hotplug_shutdown(void);
 void hotplug_last_event(uloop_timeout_handler handler);
 
 #endif

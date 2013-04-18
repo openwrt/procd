@@ -276,3 +276,11 @@ void log_init(void)
 	klog_open();
 	openlog("procd", LOG_PID, LOG_DAEMON);
 }
+
+void log_shutdown(void)
+{
+	ustream_free(&slog.stream);
+	ustream_free(&klog.stream);
+	close(slog.fd.fd);
+	close(klog.fd.fd);
+}

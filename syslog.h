@@ -31,6 +31,7 @@ struct log_head {
 };
 
 void log_init(void);
+void log_shutdown(void);
 
 typedef void (*log_list_cb)(struct log_head *h);
 struct log_head* log_list(int count, struct log_head *h);

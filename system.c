@@ -24,6 +24,7 @@
 
 #include "procd.h"
 #include "watchdog.h"
+#include "hotplug.h"
 
 #define HOSTNAME_PATH	"/proc/sys/kernel/hostname"
 
@@ -51,6 +52,17 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!clock_gettime(CLOCK_MONOTONIC, &ts))
 		blobmsg_add_u32(&b, "uptime", ts.tv_sec);
 	ubus_send_reply(ctx, req, b.head);
+
+	return 0;
+}
+
+static int system_upgrade(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	procd_reconnect_ubus(0);
+	log_shutdown();
+	hotplug_shutdown();
 
 	return 0;
 }
@@ -120,6 +132,7 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("info", system_info),
+	UBUS_METHOD_NOARG("upgrade", system_upgrade),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
 };
 

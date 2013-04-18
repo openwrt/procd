@@ -434,3 +434,9 @@ void hotplug(char *rules)
 	queue_proc.cb = queue_proc_cb;
 	uloop_fd_add(&hotplug_fd, ULOOP_READ);
 }
+
+void hotplug_shutdown(void)
+{
+	uloop_fd_delete(&hotplug_fd);
+	close(hotplug_fd.fd);
+}
