@@ -36,6 +36,7 @@ static int usage(const char *prog)
 
 static int main_procd_init(int argc, char **argv)
 {
+	procd_signal_preinit();
 	procd_early();
 	debug_init();
 	watchdog_init();

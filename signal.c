@@ -19,10 +19,26 @@
 
 #include "procd.h"
 
+static int preinit;
+
+static void do_reboot(void)
+{
+	LOG("reboot\n");
+	fflush(stderr);
+	sync();
+	sleep(1);
+	reboot(RB_AUTOBOOT);
+	while (1)
+	;
+}
+
 static void signal_shutdown(int signal, siginfo_t *siginfo, void *data)
 {
 	int event = 0;
 	char *msg = NULL;
+
+	if (preinit)
+		do_reboot();
 
 	switch(signal) {
 	case SIGTERM:
@@ -49,12 +65,7 @@ struct sigaction sa_shutdown = {
 static void signal_crash(int signal, siginfo_t *siginfo, void *data)
 {
 	ERROR("Rebooting as procd has crashed\n");
-	fflush(stderr);
-	sync();
-	sleep(1);
-	reboot(RB_AUTOBOOT);
-	while (1)
-		;
+	do_reboot();
 }
 
 struct sigaction sa_crash = {
@@ -85,4 +96,12 @@ void procd_signal(void)
 	sigaction(SIGHUP, &sa_dummy, NULL);
 	sigaction(SIGKILL, &sa_dummy, NULL);
 	sigaction(SIGSTOP, &sa_dummy, NULL);
+}
+
+void procd_signal_preinit(void)
+{
+	preinit = 1;
+	sigaction(SIGTERM, &sa_shutdown, NULL);
+	sigaction(SIGUSR1, &sa_shutdown, NULL);
+	sigaction(SIGUSR2, &sa_shutdown, NULL);
 }
