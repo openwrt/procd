@@ -85,7 +85,7 @@ struct sigaction sa_dummy = {
 
 void procd_signal(void)
 {
-	sigaction(SIGPIPE, &sa_dummy, NULL);
+	signal(SIGPIPE, SIG_IGN);
 	if (getpid() != 1)
 		return;
 	sigaction(SIGTERM, &sa_shutdown, NULL);
