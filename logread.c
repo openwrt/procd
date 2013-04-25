@@ -130,7 +130,7 @@ static void read_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 		if (!tb[LOG_MSG] || !tb[LOG_ID] || !tb[LOG_PRIO] || !tb[LOG_SOURCE] || !tb[LOG_TIME])
 			continue;
 
-		t = blobmsg_get_u64(tb[LOG_TIME]) / 1000;
+		t = blobmsg_get_u64(tb[LOG_TIME]);
 		c = ctime(&t);
 		c[strlen(c) - 1] = '\0';
 		printf("%s - %s: %s\n",

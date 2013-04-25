@@ -12,6 +12,8 @@
  * GNU General Public License for more details.
  */
 
+#include <linux/types.h>
+
 #include <libubox/uloop.h>
 #include <libubox/blobmsg_json.h>
 
@@ -56,7 +58,7 @@ static int read_log(struct ubus_context *ctx, struct ubus_object *obj,
 		blobmsg_add_u32(&b, "id", l->id);
 		blobmsg_add_u32(&b, "priority", l->priority);
 		blobmsg_add_u32(&b, "source", l->source);
-		blobmsg_add_u64(&b, "time", (l->ts.tv_sec * 1000) + (l->ts.tv_nsec / 1000000));
+		blobmsg_add_u64(&b, "time", l->ts.tv_sec);
 		blobmsg_close_table(&b, entry);
 		l = log_list(count, l);
 	}
@@ -116,7 +118,7 @@ void ubus_notify_log(struct log_head *l)
 	blobmsg_add_u32(&b, "id", l->id);
 	blobmsg_add_u32(&b, "priority", l->priority);
 	blobmsg_add_u32(&b, "source", l->source);
-	blobmsg_add_u64(&b, "time", (l->ts.tv_sec * 1000) + (l->ts.tv_nsec / 1000000));
+	blobmsg_add_u64(&b, "time", (((__u64) l->ts.tv_sec) * 1000) + (l->ts.tv_nsec / 1000000));
 
 	ret = ubus_notify(_ctx, &log_object, l->data, b.head, -1);
 	if (ret)
