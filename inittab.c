@@ -25,6 +25,7 @@
 #include <libubox/list.h>
 
 #include "procd.h"
+#include "rcS.h"
 
 #define TAG_ID		0
 #define TAG_RUNLVL	1
@@ -39,7 +40,7 @@ const char *console;
 struct init_handler {
 	const char *name;
 	void (*cb) (struct init_action *a);
-	int atomic;
+	int multi;
 };
 
 struct init_action {
@@ -52,7 +53,6 @@ struct init_action {
 	struct init_handler *handler;
 	struct uloop_process proc;
 
-	int pending;
 	int respawn;
 	struct uloop_timeout tout;
 };
@@ -60,11 +60,9 @@ struct init_action {
 static const char *tab = "/etc/inittab";
 static char *ask = "/sbin/askfirst";
 
-static struct init_action *pending;
-
 static LIST_HEAD(actions);
 
-static void fork_script(struct init_action *a)
+static void fork_worker(struct init_action *a)
 {
 	a->proc.pid = fork();
 	if (!a->proc.pid) {
@@ -86,25 +84,27 @@ static void child_exit(struct uloop_process *proc, int ret)
 	struct init_action *a = container_of(proc, struct init_action, proc);
 
 	DEBUG(2, "pid:%d\n", proc->pid);
-	if (a->tout.cb) {
-	        uloop_timeout_set(&a->tout, a->respawn);
-	} else {
-		a->pending = 0;
-		pending = NULL;
-		procd_state_next();
-	}
+        uloop_timeout_set(&a->tout, a->respawn);
 }
 
 static void respawn(struct uloop_timeout *tout)
 {
 	struct init_action *a = container_of(tout, struct init_action, tout);
-	fork_script(a);
+	fork_worker(a);
 }
 
-static void runscript(struct init_action *a)
+static void rcdone(struct runqueue *q)
 {
-	a->proc.cb = child_exit;
-	fork_script(a);
+	procd_state_next();
+}
+
+static void runrc(struct init_action *a)
+{
+	if (!a->argv[1] || !a->argv[2]) {
+		ERROR("valid format is rcS <S|K> <param>\n");
+		return;
+	}
+	rcS(a->argv[1], a->argv[2], rcdone);
 }
 
 static void askfirst(struct init_action *a)
@@ -128,7 +128,7 @@ static void askfirst(struct init_action *a)
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
-	fork_script(a);
+	fork_worker(a);
 }
 
 static void askconsole(struct init_action *a)
@@ -169,7 +169,8 @@ static void askconsole(struct init_action *a)
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
-	fork_script(a);
+	fork_worker(a);
+
 err_out:
 	regfree(&pat_cmdline);
 }
@@ -177,18 +178,18 @@ err_out:
 static struct init_handler handlers[] = {
 	{
 		.name = "sysinit",
-		.cb = runscript,
+		.cb = runrc,
 	}, {
 		.name = "shutdown",
-		.cb = runscript,
+		.cb = runrc,
 	}, {
 		.name = "askfirst",
 		.cb = askfirst,
-		.atomic = 1,
+		.multi = 1,
 	}, {
 		.name = "askconsole",
 		.cb = askconsole,
-		.atomic = 1,
+		.multi = 1,
 	}
 };
 
@@ -212,15 +213,12 @@ void procd_inittab_run(const char *handler)
 
 	list_for_each_entry(a, &actions, list)
 		if (!strcmp(a->handler->name, handler)) {
-			if (a->handler->atomic) {
+			if (a->handler->multi) {
 				a->handler->cb(a);
 				continue;
 			}
-			if (pending || a->pending)
-				break;
-			a->pending = 1;
-			pending = a;
 			a->handler->cb(a);
+			break;
 		}
 }
 

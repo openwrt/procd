@@ -274,7 +274,7 @@ void log_init(void)
 
 	syslog_open();
 	klog_open();
-	openlog("procd", LOG_PID, LOG_DAEMON);
+	openlog("sysinit", LOG_CONS, LOG_DAEMON);
 }
 
 void log_shutdown(void)
