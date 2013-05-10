@@ -17,6 +17,7 @@
 #include <stdio.h>
 
 #include <libubox/blobmsg_json.h>
+#include <libubox/usock.h>
 #include <libubox/uloop.h>
 #include "libubus.h"
 
@@ -44,6 +45,7 @@ enum {
 };
 
 static struct ubus_subscriber log_event;
+static struct uloop_fd sender;
 
 static void log_handle_remove(struct ubus_context *ctx, struct ubus_subscriber *s,
 			uint32_t id)
@@ -56,6 +58,7 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 			struct blob_attr *msg)
 {
 	struct blob_attr *tb[__LOG_MAX];
+	char buf[256];
 	char *str;
 	time_t t;
 	char *c;
@@ -68,14 +71,16 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 	c = ctime(&t);
 	c[strlen(c) - 1] = '\0';
 	str = blobmsg_format_json(msg, true);
-	printf("%s - %s: %s\n",
+	snprintf(buf, sizeof(buf), "%s - %s: %s\n",
 		c, (blobmsg_get_u32(tb[LOG_SOURCE])) ? ("syslog") : ("kernel"), method);
+	write(sender.fd, buf, strlen(buf));
+
 	free(str);
 
 	return 0;
 }
 
-static void follow_log(struct ubus_context *ctx, int id)
+static void follow_log(struct ubus_context *ctx, int id, const char *url, const char *port)
 {
 	int ret;
 
@@ -91,6 +96,18 @@ static void follow_log(struct ubus_context *ctx, int id)
 	ret = ubus_subscribe(ctx, &log_event, id);
 	if (ret)
 		fprintf(stderr, "Failed to add watch handler: %s\n", ubus_strerror(ret));
+
+	if (url && port) {
+		sender.fd = usock(USOCK_TCP | USOCK_NUMERIC, url, port);
+		if (sender.fd < 0) {
+			fprintf(stderr, "failed to connect: %s\n", strerror(errno));
+			exit(-1);
+		} else {
+			uloop_fd_add(&sender, ULOOP_READ);
+		}
+	} else {
+		sender.fd = STDOUT_FILENO;
+	}
 
 	uloop_run();
 	ubus_free(ctx);
@@ -145,6 +162,7 @@ static int usage(const char *prog)
 		"Options:\n"
 		"    -s <path>		Path to ubus socket\n"
 		"    -l	<count>		Got only the last 'count' messages\n"
+		"    -r	<server> <port>	Stream message to a server\n"
 		"    -f			Follow log messages\n"
 		"\n", prog);
 	return 1;
@@ -154,14 +172,18 @@ int main(int argc, char **argv)
 {
 	struct ubus_context *ctx;
 	uint32_t id;
-	const char *ubus_socket = NULL;
+	const char *ubus_socket = NULL, *url = NULL, *port = NULL;
 	int ch, ret, subscribe = 0, lines = 0;
 	static struct blob_buf b;
 
-	while ((ch = getopt(argc, argv, "fs:l:")) != -1) {
+	while ((ch = getopt(argc, argv, "fs:l:r:")) != -1) {
 		switch (ch) {
 		case 's':
 			ubus_socket = optarg;
+			break;
+		case 'r':
+			url = optarg++;
+			port = argv[optind++];
 			break;
 		case 'f':
 			subscribe = 1;
@@ -170,8 +192,7 @@ int main(int argc, char **argv)
 			lines = atoi(optarg);
 			break;
 		default:
-			usage(*argv);
-			break;
+			return usage(*argv);
 		}
 	}
 
@@ -193,7 +214,7 @@ int main(int argc, char **argv)
 	}
 
 	if (subscribe)
-		follow_log(ctx, id);
+		follow_log(ctx, id, url, port);
 
 	return 0;
 }
