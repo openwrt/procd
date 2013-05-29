@@ -92,9 +92,9 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 	exit(1);
 }
 
-static void q_initd_complete(struct runqueue *q, struct runqueue_process *p, int ret)
+static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 {
-	struct initd *s = container_of(p, struct initd, proc);
+	struct initd *s = container_of(p, struct initd, proc.task);
 
 	DEBUG(1, "stop %s %s \n", s->file, s->param);
 	ustream_free(&s->fd.stream);
@@ -113,7 +113,7 @@ static void add_initd(char *file, char *param)
 
 	s = calloc(1, sizeof(*s));
 	s->proc.task.type = &initd_type;
-	s->proc.complete = q_initd_complete;
+	s->proc.task.complete = q_initd_complete;
 	s->param = param;
 	s->file = file;
 	runqueue_task_add(&q, &s->proc.task, false);
