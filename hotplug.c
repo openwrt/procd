@@ -66,6 +66,18 @@ static char *hotplug_msg_find_var(struct blob_attr *msg, const char *name)
 	return NULL;
 }
 
+static void mkdir_p(char *dir)
+{
+	char *l = strrchr(dir, '/');
+
+	if (l) {
+		*l = '\0';
+		mkdir_p(dir);
+		*l = '/';
+		mkdir(dir, 0755);
+	}
+}
+
 static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 {
 	static struct blobmsg_policy mkdev_policy[2] = {
@@ -80,6 +92,12 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 	blobmsg_parse_array(mkdev_policy, 2, tb, blobmsg_data(data), blobmsg_data_len(data));
 	if (tb[0] && tb[1] && minor && major && subsystem) {
 		mode_t m = S_IFCHR;
+		char *d = strdup(blobmsg_get_string(tb[0]));
+
+		d = dirname(d);
+		mkdir_p(d);
+		free(d);
+
 		if (!strcmp(subsystem, "block"))
 			m = S_IFBLK;
 		mknod(blobmsg_get_string(tb[0]),
