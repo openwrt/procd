@@ -322,13 +322,20 @@ bool
 instance_update(struct service_instance *in, struct service_instance *in_new)
 {
 	bool changed = instance_config_changed(in, in_new);
+	bool running = in->proc.pending;
 
-	if (!changed)
+	if (!changed && running)
 		return false;
 
-	in->restart = true;
-	instance_stop(in, true);
-	instance_config_move(in, in_new);
+	if (!running) {
+		if (changed)
+			instance_config_move(in, in_new);
+		instance_start(in);
+	} else {
+		in->restart = true;
+		instance_stop(in, true);
+		instance_config_move(in, in_new);
+	}
 	return true;
 }
 
