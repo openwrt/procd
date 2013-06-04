@@ -13,6 +13,7 @@
  */
 
 #include <sys/utsname.h>
+#include <sys/sysinfo.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -29,31 +30,159 @@
 #define HOSTNAME_PATH	"/proc/sys/kernel/hostname"
 
 static struct blob_buf b;
-static char *board_name;
-static char *board_model;
 
-static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
-			struct ubus_request_data *req, const char *method,
-			struct blob_attr *msg)
+static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
+                 struct ubus_request_data *req, const char *method,
+                 struct blob_attr *msg)
 {
-	struct timespec ts;
-	struct utsname uts;
+	void *c;
+	char line[256];
+	char *key, *val;
+	struct utsname utsname;
+	FILE *f;
 
 	blob_buf_init(&b, 0);
-	if (board_name && board_model) {
-		blobmsg_add_string(&b, "boardname", board_name);
-		blobmsg_add_string(&b, "boardmodel", board_model);
+
+	if (uname(&utsname) >= 0)
+	{
+		blobmsg_add_string(&b, "kernel", utsname.release);
+		blobmsg_add_string(&b, "hostname", utsname.nodename);
 	}
-	if (!uname(&uts)) {
-		blobmsg_add_string(&b, "hostname", uts.nodename);
-		blobmsg_add_string(&b, "machine", uts.machine);
-		blobmsg_add_string(&b, "kernel", uts.release);
+
+	if ((f = fopen("/proc/cpuinfo", "r")) != NULL)
+	{
+		while(fgets(line, sizeof(line), f))
+		{
+			key = strtok(line, "\t:");
+			val = strtok(NULL, "\t\n");
+
+			if (!key || !val)
+				continue;
+
+			if (!strcasecmp(key, "system type") ||
+			    !strcasecmp(key, "processor") ||
+			    !strcasecmp(key, "model name"))
+			{
+				blobmsg_add_string(&b, "system", val + 2);
+				break;
+			}
+		}
+
+		fclose(f);
 	}
-	if (!clock_gettime(CLOCK_MONOTONIC, &ts))
-		blobmsg_add_u32(&b, "uptime", ts.tv_sec);
+
+	if ((f = fopen("/tmp/sysinfo/model", "r")) != NULL)
+	{
+		if (fgets(line, sizeof(line), f))
+		{
+			val = strtok(line, "\t\n");
+
+			if (val)
+				blobmsg_add_string(&b, "model", val);
+		}
+
+		fclose(f);
+	}
+	else if ((f = fopen("/proc/cpuinfo", "r")) != NULL)
+	{
+		while(fgets(line, sizeof(line), f))
+		{
+			key = strtok(line, "\t:");
+			val = strtok(NULL, "\t\n");
+
+			if (!key || !val)
+				continue;
+
+			if (!strcasecmp(key, "machine") ||
+			    !strcasecmp(key, "hardware"))
+			{
+				blobmsg_add_string(&b, "model", val + 2);
+				break;
+			}
+		}
+
+		fclose(f);
+	}
+
+	if ((f = fopen("/etc/openwrt_release", "r")) != NULL)
+	{
+		c = blobmsg_open_table(&b, "release");
+
+		while (fgets(line, sizeof(line), f))
+		{
+			key = strtok(line, "=\"");
+			val = strtok(NULL, "\"\n");
+
+			if (!key || !val)
+				continue;
+
+			if (!strcasecmp(key, "DISTRIB_ID"))
+				blobmsg_add_string(&b, "distribution", val);
+			else if (!strcasecmp(key, "DISTRIB_RELEASE"))
+				blobmsg_add_string(&b, "version", val);
+			else if (!strcasecmp(key, "DISTRIB_REVISION"))
+				blobmsg_add_string(&b, "revision", val);
+			else if (!strcasecmp(key, "DISTRIB_CODENAME"))
+				blobmsg_add_string(&b, "codename", val);
+			else if (!strcasecmp(key, "DISTRIB_TARGET"))
+				blobmsg_add_string(&b, "target", val);
+			else if (!strcasecmp(key, "DISTRIB_DESCRIPTION"))
+				blobmsg_add_string(&b, "description", val);
+		}
+
+		blobmsg_close_array(&b, c);
+
+		fclose(f);
+	}
+
 	ubus_send_reply(ctx, req, b.head);
 
-	return 0;
+	return UBUS_STATUS_OK;
+}
+
+static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
+                struct ubus_request_data *req, const char *method,
+                struct blob_attr *msg)
+{
+	void *c;
+	time_t now;
+	struct tm *tm;
+	struct sysinfo info;
+
+	now = time(NULL);
+
+	if (!(tm = localtime(&now)))
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	if (sysinfo(&info))
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	blob_buf_init(&b, 0);
+
+	blobmsg_add_u32(&b, "uptime",    info.uptime);
+	blobmsg_add_u32(&b, "localtime", mktime(tm));
+
+	c = blobmsg_open_array(&b, "load");
+	blobmsg_add_u32(&b, NULL, info.loads[0]);
+	blobmsg_add_u32(&b, NULL, info.loads[1]);
+	blobmsg_add_u32(&b, NULL, info.loads[2]);
+	blobmsg_close_array(&b, c);
+
+	c = blobmsg_open_table(&b, "memory");
+	blobmsg_add_u32(&b, "total",    info.mem_unit * info.totalram);
+	blobmsg_add_u32(&b, "free",     info.mem_unit * info.freeram);
+	blobmsg_add_u32(&b, "shared",   info.mem_unit * info.sharedram);
+	blobmsg_add_u32(&b, "buffered", info.mem_unit * info.bufferram);
+	blobmsg_close_table(&b, c);
+
+	c = blobmsg_open_table(&b, "swap");
+	blobmsg_add_u32(&b, "total",    info.mem_unit * info.totalswap);
+	blobmsg_add_u32(&b, "free",     info.mem_unit * info.freeswap);
+	blobmsg_close_table(&b, c);
+
+	ubus_send_reply(ctx, req, b.head);
+
+	return UBUS_STATUS_OK;
 }
 
 static int system_upgrade(struct ubus_context *ctx, struct ubus_object *obj,
@@ -131,7 +260,8 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 }
 
 static const struct ubus_method system_methods[] = {
-	UBUS_METHOD_NOARG("info", system_info),
+	UBUS_METHOD_NOARG("board", system_board),
+	UBUS_METHOD_NOARG("info",  system_info),
 	UBUS_METHOD_NOARG("upgrade", system_upgrade),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
 };
@@ -146,34 +276,10 @@ static struct ubus_object system_object = {
 	.n_methods = ARRAY_SIZE(system_methods),
 };
 
-static char* load_file_content(const char *file)
-{
-	char buf[32];
-	int fd, r;
-
-	fd = open(file, O_RDONLY);
-	if (!fd)
-		return NULL;
-	r = read(fd, buf, sizeof(buf) - 1);
-	close(fd);
-	if (r < 1)
-		return NULL;
-	if (buf[r - 1] == '\n')
-		buf[r - 1] = '\0';
-	else
-		buf[r] = '\0';
-
-	return strdup(buf);
-}
-
 void ubus_init_system(struct ubus_context *ctx)
 {
 	int ret;
 
-	if (!board_model)
-		board_model = load_file_content("/tmp/sysinfo/model");
-	if (!board_name);
-		board_name = load_file_content("/tmp/sysinfo/board_name");
 	ret = ubus_add_object(ctx, &system_object);
 	if (ret)
 		ERROR("Failed to add object: %s\n", ubus_strerror(ret));
