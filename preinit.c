@@ -29,6 +29,11 @@ static void spawn_procd(struct uloop_process *proc, int ret)
 {
 	char *wdt_fd = watchdog_fd();
 	char *argv[] = { "/sbin/procd", NULL };
+	struct stat s;
+
+	if (!stat("/tmp/sysupgrade", &s))
+		while (true)
+			sleep(1);
 
 	unsetenv("INITRAMFS");
 	unsetenv("PREINIT");
