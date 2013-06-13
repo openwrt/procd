@@ -77,10 +77,9 @@ static void procd_ubus_try_connect(void)
 	ctx->connection_lost = procd_ubus_connection_lost;
 	ubus_connected = true;
 	ubus_init_service(ctx);
-	if (getpid() == 1) {
+	ubus_init_system(ctx);
+	if (getpid() == 1)
 		ubus_init_log(ctx);
-		ubus_init_system(ctx);
-	}
 }
 
 static void procd_ubus_connection_lost(struct ubus_context *old_ctx)
