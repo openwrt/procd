@@ -65,7 +65,7 @@ static void state_enter(void)
 		break;
 
 	case STATE_HALT:
-		LOG("- reboot -\nprocd says good bye !\n");
+		LOG("- reboot -\n");
 		sync();
 		sleep(1);
 		reboot(reboot_event);
