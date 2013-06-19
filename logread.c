@@ -16,6 +16,9 @@
 #include <unistd.h>
 #include <stdio.h>
 
+#define SYSLOG_NAMES
+#include <syslog.h>
+
 #include <libubox/blobmsg_json.h>
 #include <libubox/usock.h>
 #include <libubox/uloop.h>
@@ -59,6 +62,7 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	struct blob_attr *tb[__LOG_MAX];
 	char buf[256];
+	uint32_t p;
 	char *str;
 	time_t t;
 	char *c;
@@ -69,10 +73,13 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 
 	t = blobmsg_get_u64(tb[LOG_TIME]) / 1000;
 	c = ctime(&t);
+	p = blobmsg_get_u32(tb[LOG_PRIO]);
 	c[strlen(c) - 1] = '\0';
 	str = blobmsg_format_json(msg, true);
-	snprintf(buf, sizeof(buf), "%s - %s: %s\n",
-		c, (blobmsg_get_u32(tb[LOG_SOURCE])) ? ("syslog") : ("kernel"), method);
+	snprintf(buf, sizeof(buf), "%s %s.%s%s %s\n",
+		c, facilitynames[LOG_FAC(p)].c_name, prioritynames[LOG_PRI(p)].c_name,
+		(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : (" kernel:"),
+		method);
 	write(sender.fd, buf, strlen(buf));
 
 	free(str);
@@ -138,6 +145,7 @@ static void read_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 		return;
 	blobmsg_for_each_attr(cur, _tb[READ_LINE], rem) {
 		struct blob_attr *tb[__LOG_MAX];
+		uint32_t p;
 		char *c;
 
 		if (blobmsg_type(cur) != BLOBMSG_TYPE_TABLE)
@@ -148,10 +156,13 @@ static void read_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 			continue;
 
 		t = blobmsg_get_u64(tb[LOG_TIME]);
+		p = blobmsg_get_u32(tb[LOG_PRIO]);
 		c = ctime(&t);
 		c[strlen(c) - 1] = '\0';
-		printf("%s - %s: %s\n",
-			c, (blobmsg_get_u32(tb[LOG_SOURCE])) ? ("syslog") : ("kernel"),
+
+		printf("%s %s.%s%s %s\n",
+			c, facilitynames[LOG_FAC(p)].c_name, prioritynames[LOG_PRI(p)].c_name,
+			(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : (" kernel:"),
 			blobmsg_get_string(tb[LOG_MSG]));
 	}
 }
