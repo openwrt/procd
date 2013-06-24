@@ -14,6 +14,7 @@
 
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 
 #include <unistd.h>
 #include <getopt.h>
@@ -67,6 +68,7 @@ int main(int argc, char **argv)
 			return usage(argv[0]);
 		}
 	}
+	umask(0);
 	uloop_init();
 	procd_signal();
 	if (getpid() != 1)
