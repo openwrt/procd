@@ -175,6 +175,15 @@ err_out:
 	regfree(&pat_cmdline);
 }
 
+static void rcrespawn(struct init_action *a)
+{
+	a->tout.cb = respawn;
+	a->respawn = 500;
+
+	a->proc.cb = child_exit;
+	fork_worker(a);
+}
+
 static struct init_handler handlers[] = {
 	{
 		.name = "sysinit",
@@ -189,6 +198,10 @@ static struct init_handler handlers[] = {
 	}, {
 		.name = "askconsole",
 		.cb = askconsole,
+		.multi = 1,
+	}, {
+		.name = "respawn",
+		.cb = rcrespawn,
 		.multi = 1,
 	}
 };

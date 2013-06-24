@@ -50,6 +50,7 @@ static void state_enter(void)
 		log_init();
 		procd_connect_ubus();
 		procd_inittab();
+		procd_inittab_run("respawn");
 		procd_inittab_run("askconsole");
 		procd_inittab_run("askfirst");
 		procd_inittab_run("sysinit");
