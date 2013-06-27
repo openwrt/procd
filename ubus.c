@@ -23,6 +23,7 @@ char *ubus_socket = NULL;
 static struct ubus_context *ctx;
 static struct uloop_process ubus_proc;
 static bool ubus_connected = false;
+static struct uloop_timeout retry;
 static int reconnect = 1;
 
 static void procd_ubus_connection_lost(struct ubus_context *old_ctx);
@@ -67,9 +68,9 @@ static void procd_ubus_try_connect(void)
 		ubus_connected = !ubus_reconnect(ctx, ubus_socket);
 		return;
 	}
-
 	ctx = ubus_connect(ubus_socket);
 	if (!ctx) {
+		ubus_connected = false;
 		DEBUG(2, "Connection to ubus failed\n");
 		return;
 	}
@@ -82,20 +83,25 @@ static void procd_ubus_try_connect(void)
 		ubus_init_log(ctx);
 }
 
-static void procd_ubus_connection_lost(struct ubus_context *old_ctx)
+static void
+procd_ubus_reconnect_timer(struct uloop_timeout *timeout)
 {
-	if (!reconnect)
-		return;
-
 	procd_ubus_try_connect();
-	while (!ubus_connected) {
-		procd_restart_ubus();
-		sleep(1);
-		procd_ubus_try_connect();
+	if (ubus_connected) {
+		DEBUG(1, "Connected to ubus, id=%08x\n", ctx->local_id);
+		ubus_add_uloop(ctx);
+		return;
 	}
 
-	DEBUG(1, "Connected to ubus, id=%08x\n", ctx->local_id);
-	ubus_add_uloop(ctx);
+	uloop_timeout_set(&retry, 1000);
+	procd_restart_ubus();
+}
+
+static void procd_ubus_connection_lost(struct ubus_context *old_ctx)
+{
+	retry.cb = procd_ubus_reconnect_timer;
+	procd_restart_ubus();
+	uloop_timeout_set(&retry, 1000);
 }
 
 void procd_connect_ubus(void)
