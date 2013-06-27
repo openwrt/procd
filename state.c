@@ -63,12 +63,11 @@ static void state_enter(void)
 	case STATE_SHUTDOWN:
 		LOG("- shutdown -\n");
 		procd_inittab_run("shutdown");
+		sync();
 		break;
 
 	case STATE_HALT:
 		LOG("- reboot -\n");
-		sync();
-		sleep(1);
 		reboot(reboot_event);
 		break;
 
