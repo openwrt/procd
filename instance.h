@@ -33,6 +33,7 @@ struct service_instance {
 	struct uloop_timeout timeout;
 
 	struct blob_attr *command;
+	struct blob_attr *trigger;
 	struct blobmsg_list env;
 	struct blobmsg_list data;
 	struct blobmsg_list netdev;
@@ -44,6 +45,6 @@ void instance_stop(struct service_instance *in, bool restart);
 bool instance_update(struct service_instance *in, struct service_instance *in_new);
 void instance_init(struct service_instance *in, struct service *s, struct blob_attr *config);
 void instance_free(struct service_instance *in);
-void instance_dump(struct blob_buf *b, struct service_instance *in);
+void instance_dump(struct blob_buf *b, struct service_instance *in, int debug);
 
 #endif

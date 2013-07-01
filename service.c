@@ -83,6 +83,7 @@ enum {
 	SERVICE_SET_NAME,
 	SERVICE_SET_SCRIPT,
 	SERVICE_SET_INSTANCES,
+	SERVICE_SET_TRIGGER,
 	__SERVICE_SET_MAX
 };
 
@@ -90,14 +91,16 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 	[SERVICE_SET_NAME] = { "name", BLOBMSG_TYPE_STRING },
 	[SERVICE_SET_SCRIPT] = { "script", BLOBMSG_TYPE_STRING },
 	[SERVICE_SET_INSTANCES] = { "instances", BLOBMSG_TYPE_TABLE },
+	[SERVICE_SET_TRIGGER] = { "triggers", BLOBMSG_TYPE_ARRAY },
 };
-
 
 static int
 service_update(struct service *s, struct blob_attr *config, struct blob_attr **tb, bool add)
 {
 	struct blob_attr *cur;
 	int rem;
+
+	s->trigger = tb[SERVICE_SET_TRIGGER];
 
 	if (tb[SERVICE_SET_INSTANCES]) {
 		if (!add)
@@ -141,6 +144,25 @@ static const struct blobmsg_policy service_del_attrs[__SERVICE_DEL_ATTR_MAX] = {
 	[SERVICE_DEL_ATTR_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
 };
 
+enum {
+	SERVICE_LIST_ATTR_VERBOSE,
+	__SERVICE_LIST_ATTR_MAX,
+};
+
+static const struct blobmsg_policy service_list_attrs[__SERVICE_LIST_ATTR_MAX] = {
+	[SERVICE_LIST_ATTR_VERBOSE] = { "verbose", BLOBMSG_TYPE_INT32 },
+};
+
+enum {
+	EVENT_TYPE,
+	EVENT_DATA,
+	__EVENT_MAX
+};
+
+static const struct blobmsg_policy event_policy[__EVENT_MAX] = {
+	[EVENT_TYPE] = { .name = "type", .type = BLOBMSG_TYPE_STRING },
+	[EVENT_DATA] = { .name = "data", .type = BLOBMSG_TYPE_TABLE },
+};
 
 static int
 service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
@@ -185,15 +207,17 @@ free:
 }
 
 static void
-service_dump(struct service *s)
+service_dump(struct service *s, int verbose)
 {
 	struct service_instance *in;
 	void *c, *i;
 
 	c = blobmsg_open_table(&b, s->name);
 	i = blobmsg_open_table(&b, "instances");
+	if (verbose && s->trigger)
+		blobmsg_add_blob(&b, s->trigger);
 	vlist_for_each_element(&s->instances, in, node)
-		instance_dump(&b, in);
+		instance_dump(&b, in, verbose);
 	blobmsg_close_table(&b, i);
 	blobmsg_close_table(&b, c);
 }
@@ -203,11 +227,18 @@ service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 		    struct ubus_request_data *req, const char *method,
 		    struct blob_attr *msg)
 {
+	struct blob_attr *tb[__SERVICE_LIST_ATTR_MAX];
 	struct service *s;
+	int verbose = 0;
+
+	blobmsg_parse(service_list_attrs, __SERVICE_LIST_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+
+	if (tb[SERVICE_LIST_ATTR_VERBOSE] && blobmsg_get_u32(tb[SERVICE_LIST_ATTR_VERBOSE]))
+		verbose = 1;
 
 	blob_buf_init(&b, 0);
 	avl_for_each_element(&services, s, avl)
-		service_dump(s);
+		service_dump(s, verbose);
 
 	ubus_send_reply(ctx, req, b.head);
 
@@ -279,6 +310,52 @@ service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+static int
+service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct blob_attr *tb[__EVENT_MAX];
+
+	if (!msg)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	blobmsg_parse(event_policy, __EVENT_MAX, tb, blob_data(msg), blob_len(msg));
+	if (!tb[EVENT_TYPE] || !tb[EVENT_DATA])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	trigger_event(blobmsg_get_string(tb[EVENT_TYPE]), tb[EVENT_DATA]);
+
+	return 0;
+}
+
+enum {
+	TRIGGER_ATTR,
+	__TRIGGER_MAX
+};
+
+static const struct blobmsg_policy trigger_policy[__TRIGGER_MAX] = {
+	[TRIGGER_ATTR] = { .name = "triggers", .type = BLOBMSG_TYPE_ARRAY },
+};
+
+static int service_handle_trigger(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct blob_attr *tb[__TRIGGER_MAX];
+
+	if (!msg)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	blobmsg_parse(trigger_policy, __TRIGGER_MAX, tb, blob_data(msg), blob_len(msg));
+	if (!tb[TRIGGER_ATTR])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	trigger_add(tb[TRIGGER_ATTR], NULL);
+
+	return 0;
+}
+
 static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
@@ -286,6 +363,8 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
 	UBUS_METHOD("update_start", service_handle_update, service_attrs),
 	UBUS_METHOD("update_complete", service_handle_update, service_attrs),
+	UBUS_METHOD("event", service_handle_event, event_policy),
+	UBUS_METHOD("trigger", service_handle_trigger, trigger_policy),
 };
 
 static struct ubus_object_type main_object_type =

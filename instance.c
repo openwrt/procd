@@ -31,6 +31,7 @@ enum {
 	INSTANCE_ATTR_DATA,
 	INSTANCE_ATTR_NETDEV,
 	INSTANCE_ATTR_FILE,
+	INSTANCE_ATTR_TRIGGER,
 	INSTANCE_ATTR_NICE,
 	__INSTANCE_ATTR_MAX
 };
@@ -41,6 +42,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_DATA] = { "data", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_NETDEV] = { "netdev", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_FILE] = { "file", BLOBMSG_TYPE_ARRAY },
+	[INSTANCE_ATTR_TRIGGER] = { "triggers", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
 };
 
@@ -272,7 +274,11 @@ instance_config_parse(struct service_instance *in)
 		return false;
 
 	in->command = cur;
+	in->trigger = tb[INSTANCE_ATTR_TRIGGER];
 
+	if (in->trigger) {
+		trigger_add(in->trigger, in);
+	}
 	if ((cur = tb[INSTANCE_ATTR_NICE])) {
 		in->nice = (int8_t) blobmsg_get_u32(cur);
 		if (in->nice < -20 || in->nice > 20)
@@ -309,6 +315,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	blobmsg_list_move(&in->env, &in_src->env);
 	blobmsg_list_move(&in->data, &in_src->data);
 	blobmsg_list_move(&in->netdev, &in_src->netdev);
+	in->trigger = in_src->trigger;
 	in->command = in_src->command;
 	in->name = in_src->name;
 	in->node.avl.key = in_src->node.avl.key;
@@ -344,6 +351,7 @@ instance_free(struct service_instance *in)
 {
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
+	trigger_del(in);
 	instance_config_cleanup(in);
 	free(in->config);
 	free(in);
@@ -366,7 +374,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->valid = instance_config_parse(in);
 }
 
-void instance_dump(struct blob_buf *b, struct service_instance *in)
+void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 {
 	void *i;
 
@@ -375,5 +383,7 @@ void instance_dump(struct blob_buf *b, struct service_instance *in)
 	if (in->proc.pending)
 		blobmsg_add_u32(b, "pid", in->proc.pid);
 	blobmsg_add_blob(b, in->command);
+	if (verbose && in->trigger)
+		blobmsg_add_blob(b, in->trigger);
 	blobmsg_close_table(b, i);
 }

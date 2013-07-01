@@ -259,41 +259,11 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
-enum {
-	EVENT_TYPE,
-	EVENT_DATA,
-	__EVENT_MAX
-};
-
-static const struct blobmsg_policy event_policy[__WDT_MAX] = {
-	[EVENT_TYPE] = { .name = "frequency", .type = BLOBMSG_TYPE_INT32 },
-	[EVENT_DATA] = { .name = "timeout", .type = BLOBMSG_TYPE_INT32 },
-};
-
-static int system_event(struct ubus_context *ctx, struct ubus_object *obj,
-			struct ubus_request_data *req, const char *method,
-			struct blob_attr *msg)
-{
-	struct blob_attr *tb[__EVENT_MAX];
-
-	if (!msg)
-		return UBUS_STATUS_INVALID_ARGUMENT;
-
-	blobmsg_parse(event_policy, __EVENT_MAX, tb, blob_data(msg), blob_len(msg));
-	if (!tb[EVENT_TYPE])
-		return UBUS_STATUS_INVALID_ARGUMENT;
-
-	fprintf(stderr, "%s\n", blobmsg_get_string(tb[EVENT_TYPE]));
-
-	return 0;
-}
-
 static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("board", system_board),
 	UBUS_METHOD_NOARG("info",  system_info),
 	UBUS_METHOD_NOARG("upgrade", system_upgrade),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
-	UBUS_METHOD("event", system_event, event_policy),
 };
 
 static struct ubus_object_type system_object_type =

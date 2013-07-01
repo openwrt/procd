@@ -69,4 +69,10 @@ void procd_inittab_run(const char *action);
 
 int mkdev(const char *progname, int progmode);
 
+struct trigger;
+void trigger_init(void);
+void trigger_event(char *type, struct blob_attr *data);
+void trigger_add(struct blob_attr *rule, void *id);
+void trigger_del(void *id);
+
 #endif

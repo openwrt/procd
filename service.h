@@ -25,6 +25,7 @@ struct service {
 	const char *name;
 
 	struct blob_attr *config;
+	struct blob_attr *trigger;
 	struct vlist_tree instances;
 };
 

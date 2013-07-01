@@ -70,6 +70,7 @@ int main(int argc, char **argv)
 	}
 	uloop_init();
 	procd_signal();
+	trigger_init();
 	if (getpid() != 1)
 		procd_connect_ubus();
 	else
