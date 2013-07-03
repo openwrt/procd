@@ -80,6 +80,7 @@ static void mkdir_p(char *dir)
 
 static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 {
+	unsigned int oldumask = umask(0);
 	static struct blobmsg_policy mkdev_policy[2] = {
 		{ .type = BLOBMSG_TYPE_STRING },
 		{ .type = BLOBMSG_TYPE_STRING },
@@ -104,6 +105,7 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 				m | strtoul(blobmsg_data(tb[1]), NULL, 8),
 				makedev(atoi(major), atoi(minor)));
 	}
+	umask(oldumask);
 }
 
 static void handle_rm(struct blob_attr *msg, struct blob_attr *data)
