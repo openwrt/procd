@@ -26,6 +26,7 @@ static void do_reboot(void)
 	LOG("reboot\n");
 	fflush(stderr);
 	sync();
+	sleep(2);
 	reboot(RB_AUTOBOOT);
 	while (1)
 	;
