@@ -139,7 +139,7 @@ static void askconsole(struct init_action *a)
 	regex_t pat_cmdline;
 	regmatch_t matches[2];
 
-	if (!fd)
+	if (fd < 0)
 		return;
 
 	r = read(fd, line, sizeof(line) - 1);

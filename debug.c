@@ -29,7 +29,7 @@ void debug_init(void)
 	regex_t pat_cmdline;
 	regmatch_t matches[2];
 
-	if (!fd)
+	if (fd < 0)
 		return;
 
 	r = read(fd, line, sizeof(line) - 1);
