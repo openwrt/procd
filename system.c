@@ -27,8 +27,6 @@
 #include "watchdog.h"
 #include "hotplug.h"
 
-#define HOSTNAME_PATH	"/proc/sys/kernel/hostname"
-
 static struct blob_buf b;
 
 static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
