@@ -81,6 +81,9 @@ instance_run(struct service_instance *in)
 		argv[argc++] = blobmsg_data(cur);
 
 	argv[argc] = NULL;
+	close(STDIN_FILENO);
+	close(STDOUT_FILENO);
+	close(STDERR_FILENO);
 	execvp(argv[0], argv);
 	exit(127);
 }
