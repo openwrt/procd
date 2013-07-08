@@ -212,6 +212,9 @@ service_dump(struct service *s, int verbose)
 	struct service_instance *in;
 	void *c, *i;
 
+	if (avl_is_empty(&s->instances.avl))
+		return;
+
 	c = blobmsg_open_table(&b, s->name);
 	i = blobmsg_open_table(&b, "instances");
 	if (verbose && s->trigger)
