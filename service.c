@@ -254,17 +254,14 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 		    struct blob_attr *msg)
 {
 	struct blob_attr *tb[__SERVICE_DEL_ATTR_MAX], *cur;
-	struct service *s, *tmp;
+	struct service *s;
 	struct service_instance *in;
 
 	blobmsg_parse(service_del_attrs, __SERVICE_DEL_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
 
 	cur = tb[SERVICE_DEL_ATTR_NAME];
-	if (!cur) {
-		avl_for_each_element_safe(&services, s, avl, tmp)
-			service_delete(s);
-		return 0;
-	}
+	if (!cur)
+		return UBUS_STATUS_NOT_FOUND;
 
 	s = avl_find_element(&services, blobmsg_data(cur), s, avl);
 	if (!s)
