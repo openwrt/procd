@@ -116,7 +116,7 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 			rename(log_file, old);
 			free(old);
 		}
-		sender.fd = open(log_file, O_CREAT | O_WRONLY | O_TRUNC);
+		sender.fd = open(log_file, O_CREAT | O_WRONLY | O_APPEND, 0600);
 		if (sender.fd < 0) {
 //			fprintf(stderr, "failed to open %s: %s\n", log_file, strerror(errno));
 			exit(-1);
@@ -184,7 +184,7 @@ static void follow_log(struct ubus_context *ctx, int id)
 		uloop_timeout_set(&retry, 1000);
 	} else if (log_file) {
 		log_type = LOG_FILE;
-		sender.fd = open(log_file, O_CREAT | O_WRONLY);
+		sender.fd = open(log_file, O_CREAT | O_WRONLY| O_APPEND, 0600);
 		if (sender.fd < 0) {
 			fprintf(stderr, "failed to open %s: %s\n", log_file, strerror(errno));
 			exit(-1);
