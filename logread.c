@@ -58,11 +58,11 @@ static struct uloop_timeout retry;
 static struct uloop_fd sender;
 static const char *log_file, *log_ip, *log_port, *pid_file;
 static int log_type = LOG_STDOUT;
-static int log_size;
+static int log_size, log_udp;
 
 static void log_handle_reconnect(struct uloop_timeout *timeout)
 {
-	sender.fd = usock(USOCK_TCP | USOCK_NUMERIC, log_ip, log_port);
+	sender.fd = usock((log_udp) ? (USOCK_UDP) : (USOCK_TCP), log_ip, log_port);
 	if (sender.fd < 0) {
 		fprintf(stderr, "failed to connect: %s\n", strerror(errno));
 		uloop_timeout_set(&retry, 1000);
@@ -128,14 +128,18 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 	p = blobmsg_get_u32(tb[LOG_PRIO]);
 	c[strlen(c) - 1] = '\0';
 	str = blobmsg_format_json(msg, true);
-	snprintf(buf, sizeof(buf), "%s %s.%s%s %s\n",
-		c, facilitynames[LOG_FAC(p)].c_name, prioritynames[LOG_PRI(p)].c_name,
-		(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : (" kernel:"),
-		method);
-	if (log_type == LOG_NET)
+	if (log_type == LOG_NET) {
+		snprintf(buf, sizeof(buf), "%s%s\n",
+			(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : ("kernel: "),
+			method);
 		send(sender.fd, buf, strlen(buf), 0);
-	else
+	} else {
+		snprintf(buf, sizeof(buf), "%s %s.%s%s %s\n",
+			c, facilitynames[LOG_FAC(p)].c_name, prioritynames[LOG_PRI(p)].c_name,
+			(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : (" kernel:"),
+			method);
 		write(sender.fd, buf, strlen(buf));
+	}
 
 	free(str);
 	if (log_type == LOG_FILE)
@@ -251,6 +255,7 @@ static int usage(const char *prog)
 		"    -S	<bytes>		Log size\n"
 		"    -p	<file>		PID file\n"
 		"    -f			Follow log messages\n"
+		"    -u			Use UDP as the protocol\n"
 		"\n", prog);
 	return 1;
 }
@@ -263,8 +268,11 @@ int main(int argc, char **argv)
 	int ch, ret, subscribe = 0, lines = 0;
 	static struct blob_buf b;
 
-	while ((ch = getopt(argc, argv, "fcs:l:r:F:p:S:")) != -1) {
+	while ((ch = getopt(argc, argv, "ufcs:l:r:F:p:S:")) != -1) {
 		switch (ch) {
+		case 'u':
+			log_udp = 1;
+			break;
 		case 's':
 			ubus_socket = optarg;
 			break;
