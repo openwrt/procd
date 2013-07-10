@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 
+#include <libubox/blobmsg_json.h>
 #include <libubox/avl-cmp.h>
 #include "procd.h"
 #include "service.h"
@@ -100,7 +101,13 @@ service_update(struct service *s, struct blob_attr *config, struct blob_attr **t
 	struct blob_attr *cur;
 	int rem;
 
-	s->trigger = tb[SERVICE_SET_TRIGGER];
+	if (s->trigger)
+		trigger_del(s);
+
+	if (tb[SERVICE_SET_TRIGGER] && blobmsg_data_len(tb[SERVICE_SET_TRIGGER])) {
+		s->trigger = tb[SERVICE_SET_TRIGGER];
+		trigger_add(s->trigger, s);
+	}
 
 	if (tb[SERVICE_SET_INSTANCES]) {
 		if (!add)
@@ -120,6 +127,7 @@ service_delete(struct service *s)
 {
 	vlist_flush_all(&s->instances);
 	avl_delete(&services, &s->avl);
+	trigger_del(s);
 	free(s->config);
 	free(s);
 }
@@ -216,9 +224,9 @@ service_dump(struct service *s, int verbose)
 		return;
 
 	c = blobmsg_open_table(&b, s->name);
-	i = blobmsg_open_table(&b, "instances");
 	if (verbose && s->trigger)
 		blobmsg_add_blob(&b, s->trigger);
+	i = blobmsg_open_table(&b, "instances");
 	vlist_for_each_element(&s->instances, in, node)
 		instance_dump(&b, in, verbose);
 	blobmsg_close_table(&b, i);

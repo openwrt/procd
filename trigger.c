@@ -84,7 +84,7 @@ static void q_job_run(struct runqueue *q, struct runqueue_task *t)
 {
 	struct job *j = container_of(t, struct job, proc.task);
 
-	LOG("handle event %s\n", j->cmd->name);
+	DEBUG(2, "handle event %s\n", j->cmd->name);
 	j->cmd->handler(j, j->exec, j->env);
 }
 
