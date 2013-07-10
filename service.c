@@ -150,7 +150,7 @@ enum {
 };
 
 static const struct blobmsg_policy service_list_attrs[__SERVICE_LIST_ATTR_MAX] = {
-	[SERVICE_LIST_ATTR_VERBOSE] = { "verbose", BLOBMSG_TYPE_INT32 },
+	[SERVICE_LIST_ATTR_VERBOSE] = { "verbose", BLOBMSG_TYPE_BOOL },
 };
 
 enum {
@@ -236,7 +236,7 @@ service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 
 	blobmsg_parse(service_list_attrs, __SERVICE_LIST_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
 
-	if (tb[SERVICE_LIST_ATTR_VERBOSE] && blobmsg_get_u32(tb[SERVICE_LIST_ATTR_VERBOSE]))
+	if (tb[SERVICE_LIST_ATTR_VERBOSE] && blobmsg_get_bool(tb[SERVICE_LIST_ATTR_VERBOSE]))
 		verbose = 1;
 
 	blob_buf_init(&b, 0);
