@@ -94,7 +94,7 @@ static void q_job_complete(struct runqueue *q, struct runqueue_task *p)
 
 	if (j->trigger->remove) {
 		list_del(&j->trigger->list);
-		free(&j->trigger);
+		free(j->trigger);
 	} else {
 		j->trigger->pending = 0;
 	}
