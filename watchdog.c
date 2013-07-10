@@ -95,20 +95,19 @@ void watchdog_init(void)
 {
 	char *env = getenv("WDTFD");
 
+
 	wdt_timeout.cb = watchdog_timeout_cb;
 	if (env) {
-		LOG("- watchdog -\n");
 		DEBUG(1, "Watchdog handover: fd=%s\n", env);
 		wdt_fd = atoi(env);
-		fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
 		unsetenv("WDTFD");
 	} else {
 		wdt_fd = open("/dev/watchdog", O_WRONLY);
-		if (getpid() != 1)
-			fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
 	}
 	if (wdt_fd < 0)
 		return;
+	fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
+	LOG("- watchdog -\n");
 	watchdog_timeout(30);
 	watchdog_timeout_cb(&wdt_timeout);
 

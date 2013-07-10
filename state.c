@@ -46,6 +46,9 @@ static void state_enter(void)
 		break;
 
 	case STATE_INIT:
+		// check if the wdt appeared during coldplug
+		if (!watchdog_fd())
+			watchdog_init();
 		LOG("- init -\n");
 		log_init();
 		procd_connect_ubus();
