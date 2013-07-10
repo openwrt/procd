@@ -329,33 +329,6 @@ service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
-enum {
-	TRIGGER_ATTR,
-	__TRIGGER_MAX
-};
-
-static const struct blobmsg_policy trigger_policy[__TRIGGER_MAX] = {
-	[TRIGGER_ATTR] = { .name = "triggers", .type = BLOBMSG_TYPE_ARRAY },
-};
-
-static int service_handle_trigger(struct ubus_context *ctx, struct ubus_object *obj,
-			struct ubus_request_data *req, const char *method,
-			struct blob_attr *msg)
-{
-	struct blob_attr *tb[__TRIGGER_MAX];
-
-	if (!msg)
-		return UBUS_STATUS_INVALID_ARGUMENT;
-
-	blobmsg_parse(trigger_policy, __TRIGGER_MAX, tb, blob_data(msg), blob_len(msg));
-	if (!tb[TRIGGER_ATTR])
-		return UBUS_STATUS_INVALID_ARGUMENT;
-
-	trigger_add(tb[TRIGGER_ATTR], NULL);
-
-	return 0;
-}
-
 static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
@@ -364,7 +337,6 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("update_start", service_handle_update, service_attrs),
 	UBUS_METHOD("update_complete", service_handle_update, service_attrs),
 	UBUS_METHOD("event", service_handle_event, event_policy),
-	UBUS_METHOD("trigger", service_handle_trigger, trigger_policy),
 };
 
 static struct ubus_object_type main_object_type =
