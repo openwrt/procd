@@ -20,8 +20,6 @@
 #include "procd.h"
 #include "syslog.h"
 
-static struct ubus_subscriber log_event;
-
 static int notify;
 struct ubus_context *_ctx;
 static struct blob_buf b;
@@ -134,8 +132,4 @@ void ubus_init_log(struct ubus_context *ctx)
 	ret = ubus_add_object(ctx, &log_object);
 	if (ret)
 		ERROR("Failed to add object: %s\n", ubus_strerror(ret));
-
-	ret = ubus_register_subscriber(ctx, &log_event);
-	if (ret)
-		ERROR("Failed to add watch handler: %s\n", ubus_strerror(ret));
 }
