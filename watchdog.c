@@ -101,12 +101,14 @@ void watchdog_init(void)
 		DEBUG(1, "Watchdog handover: fd=%s\n", env);
 		wdt_fd = atoi(env);
 		unsetenv("WDTFD");
+		fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
 	} else {
 		wdt_fd = open("/dev/watchdog", O_WRONLY);
+		if ((getpid() != 1) && (wdt_fd >= 0))
+			fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
 	}
 	if (wdt_fd < 0)
 		return;
-	fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
 	LOG("- watchdog -\n");
 	watchdog_timeout(30);
 	watchdog_timeout_cb(&wdt_timeout);
