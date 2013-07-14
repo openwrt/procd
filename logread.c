@@ -129,10 +129,24 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 	c[strlen(c) - 1] = '\0';
 	str = blobmsg_format_json(msg, true);
 	if (log_type == LOG_NET) {
+		int err;
+
 		snprintf(buf, sizeof(buf), "%s%s\n",
 			(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : ("kernel: "),
 			method);
-		send(sender.fd, buf, strlen(buf), 0);
+		if (log_udp)
+			err = write(sender.fd, buf, strlen(buf));
+		else
+			err = send(sender.fd, buf, strlen(buf), 0);
+
+		if (err < 0) {
+			syslog(0, "failed to send log data to %s:%s via %s\n",
+				log_ip, log_port, (log_udp) ? ("udp") : ("tcp"));
+			uloop_fd_delete(&sender);
+			close(sender.fd);
+			sender.fd = -1;
+			uloop_timeout_set(&retry, 1000);
+		}
 	} else {
 		snprintf(buf, sizeof(buf), "%s %s.%s%s %s\n",
 			c, facilitynames[LOG_FAC(p)].c_name, prioritynames[LOG_PRI(p)].c_name,
