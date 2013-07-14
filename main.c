@@ -40,7 +40,7 @@ static int main_procd_init(int argc, char **argv)
 	procd_signal_preinit();
 	procd_early();
 	debug_init();
-	watchdog_init();
+	watchdog_init(1);
 	system("/sbin/kmodloader /etc/modules-boot.d/");
 	uloop_init();
 	hotplug("/etc/hotplug-preinit.json");

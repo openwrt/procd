@@ -15,7 +15,7 @@
 #ifndef __PROCD_WATCHDOG_H
 #define __PROCD_WATCHDOG_H
 
-void watchdog_init(void);
+void watchdog_init(int preinit);
 char* watchdog_fd(void);
 int watchdog_timeout(int timeout);
 int watchdog_frequency(int frequency);

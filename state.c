@@ -40,15 +40,14 @@ static void state_enter(void)
 	switch (state) {
 	case STATE_EARLY:
 		LOG("- early -\n");
-		watchdog_init();
+		watchdog_init(0);
 		hotplug("/etc/hotplug.json");
 		procd_coldplug();
 		break;
 
 	case STATE_INIT:
-		// check if the wdt appeared during coldplug
-		if (!watchdog_fd())
-			watchdog_init();
+		// try to reopen incase the wdt was not available before coldplug
+		watchdog_init(0);
 		LOG("- init -\n");
 		log_init();
 		procd_connect_ubus();
