@@ -53,10 +53,6 @@ static void early_console(const char *dev)
 		mkdev("*console", 0600);
 
 	dd = open(dev, O_RDWR);
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
-	close(STDERR_FILENO);
-
 	if (dd < 0) {
 		ERROR("Failed to open %s\n", dev);
 		return;
