@@ -65,7 +65,11 @@ static void early_console(const char *dev)
 	dup2(dd, STDIN_FILENO);
 	dup2(dd, STDOUT_FILENO);
 	dup2(dd, STDERR_FILENO);
-	close(dd);
+
+	if (dd != STDIN_FILENO &&
+	    dd != STDOUT_FILENO &&
+	    dd != STDERR_FILENO)
+		close(dd);
 }
 
 static void early_env(void)
