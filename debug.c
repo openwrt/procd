@@ -36,7 +36,7 @@ void debug_init(void)
 	line[r] = '\0';
 	close(fd);
 
-	regcomp(&pat_cmdline, "init_debug=([0-9]*)", REG_EXTENDED);
+	regcomp(&pat_cmdline, "init_debug=([0-9]+)", REG_EXTENDED);
 	if (!regexec(&pat_cmdline, line, 2, matches, 0)) {
 		line[matches[1].rm_eo] = '\0';
 		debug = atoi(&line[matches[1].rm_so]);
