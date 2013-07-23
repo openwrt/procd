@@ -31,10 +31,6 @@ static int redirect_output(const char *dev)
 	if (fd < 0)
 		return -1;
 
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
-	close(STDERR_FILENO);
-
 	dup2(fd, STDIN_FILENO);
 	dup2(fd, STDOUT_FILENO);
 	dup2(fd, STDERR_FILENO);
