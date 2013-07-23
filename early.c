@@ -49,8 +49,10 @@ static void early_console(const char *dev)
 	struct stat s;
 	int dd;
 
-	if (stat(dev, &s))
-		mkdev("*console", 0600);
+	if (stat(dev, &s)) {
+		ERROR("Failed to stat %s\n", dev);
+		return;
+	}
 
 	dd = open(dev, O_RDWR);
 	if (dd < 0) {
