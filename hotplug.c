@@ -124,7 +124,7 @@ static void handle_exec(struct blob_attr *msg, struct blob_attr *data)
 {
 	char *argv[8];
 	struct blob_attr *cur;
-	int rem;
+	int rem, fd;
 	int i = 0;
 
 	blobmsg_for_each_attr(cur, msg, rem)
@@ -138,9 +138,14 @@ static void handle_exec(struct blob_attr *msg, struct blob_attr *data)
 	}
 
 	if (debug < 2) {
-		close(STDIN_FILENO);
-		close(STDOUT_FILENO);
-		close(STDERR_FILENO);
+		fd = open("/dev/null", O_RDWR);
+		if (fd > -1) {
+			dup2(fd, STDIN_FILENO);
+			dup2(fd, STDOUT_FILENO);
+			dup2(fd, STDERR_FILENO);
+			if (fd > STDERR_FILENO)
+				close(fd);
+		}
 	}
 
 	if (i > 0) {
@@ -263,6 +268,7 @@ static void queue_next(void)
 
 	queue_proc.pid = fork();
 	if (!queue_proc.pid) {
+		uloop_done();
 		c->handler(c->msg, c->data);
 		exit(0);
 	}
