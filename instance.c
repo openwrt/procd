@@ -63,7 +63,7 @@ instance_run(struct service_instance *in)
 	struct blob_attr *cur;
 	char **argv;
 	int argc = 1; /* NULL terminated */
-	int rem;
+	int rem, fd;
 
 	if (in->nice)
 		setpriority(PRIO_PROCESS, 0, in->nice);
@@ -81,9 +81,14 @@ instance_run(struct service_instance *in)
 		argv[argc++] = blobmsg_data(cur);
 
 	argv[argc] = NULL;
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
-	close(STDERR_FILENO);
+	fd = open("/dev/null", O_RDWR);
+	if (fd > -1) {
+		dup2(fd, STDIN_FILENO);
+		dup2(fd, STDOUT_FILENO);
+		dup2(fd, STDERR_FILENO);
+		if (fd > STDERR_FILENO)
+			close(fd);
+	}
 	execvp(argv[0], argv);
 	exit(127);
 }
@@ -105,6 +110,7 @@ instance_start(struct service_instance *in)
 		return;
 
 	if (!pid) {
+		uloop_done();
 		instance_run(in);
 		return;
 	}
