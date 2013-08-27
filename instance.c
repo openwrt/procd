@@ -422,6 +422,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 {
 	void *i;
+	struct pid_info pi;
 
 	i = blobmsg_open_table(b, in->name);
 	blobmsg_add_u8(b, "running", in->proc.pending);
@@ -430,5 +431,18 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 	blobmsg_add_blob(b, in->command);
 	if (verbose && in->trigger)
 		blobmsg_add_blob(b, in->trigger);
+	if (!measure_process(in->proc.pid, &pi)) {
+		struct timespec tp;
+		long uptime;
+
+		clock_gettime(CLOCK_MONOTONIC, &tp);
+		uptime = tp.tv_sec - in->start.tv_sec;
+
+		blobmsg_add_u8(b, "ppid", pi.ppid);
+		blobmsg_add_u16(b, "uid", pi.uid);
+		blobmsg_add_u32(b, "fdcount", pi.fdcount);
+		blobmsg_add_u32(b, "vmsize", pi.vmsize);
+		blobmsg_add_u32(b, "uptime", uptime);
+	}
 	blobmsg_close_table(b, i);
 }

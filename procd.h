@@ -75,4 +75,13 @@ void trigger_event(char *type, struct blob_attr *data);
 void trigger_add(struct blob_attr *rule, void *id);
 void trigger_del(void *id);
 
+struct pid_info {
+	char stat;
+	uint32_t ppid;
+	uint32_t fdcount;
+	uint32_t vmsize;
+	uint16_t uid;
+};
+int measure_process(pid_t pid, struct pid_info *pi);
+
 #endif
