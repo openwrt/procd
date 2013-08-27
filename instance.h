@@ -19,6 +19,8 @@
 #include <libubox/uloop.h>
 #include "utils.h"
 
+#define RESPAWN_ERROR	(5 * 60)
+
 struct service_instance {
 	struct vlist_node node;
 	struct service *srv;
@@ -26,7 +28,16 @@ struct service_instance {
 
 	int8_t nice;
 	bool valid;
+
+	bool halt;
 	bool restart;
+	bool respawn;
+	int respawn_count;
+	struct timespec start;
+
+	int respawn_timeout;
+	int respawn_threshold;
+	int respawn_retry;
 
 	struct blob_attr *config;
 	struct uloop_process proc;
@@ -41,7 +52,7 @@ struct service_instance {
 };
 
 void instance_start(struct service_instance *in);
-void instance_stop(struct service_instance *in, bool restart);
+void instance_stop(struct service_instance *in);
 bool instance_update(struct service_instance *in, struct service_instance *in_new);
 void instance_init(struct service_instance *in, struct service *s, struct blob_attr *config);
 void instance_free(struct service_instance *in);

@@ -32,6 +32,7 @@ enum {
 	INSTANCE_ATTR_NETDEV,
 	INSTANCE_ATTR_FILE,
 	INSTANCE_ATTR_TRIGGER,
+	INSTANCE_ATTR_RESPAWN,
 	INSTANCE_ATTR_NICE,
 	__INSTANCE_ATTR_MAX
 };
@@ -43,6 +44,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_NETDEV] = { "netdev", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_FILE] = { "file", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_TRIGGER] = { "triggers", BLOBMSG_TYPE_ARRAY },
+	[INSTANCE_ATTR_RESPAWN] = { "respawn", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
 };
 
@@ -102,6 +104,8 @@ instance_start(struct service_instance *in)
 		return;
 
 	in->restart = false;
+	in->halt = !in->respawn;
+
 	if (!in->valid)
 		return;
 
@@ -117,6 +121,7 @@ instance_start(struct service_instance *in)
 
 	DEBUG(1, "Started instance %s::%s\n", in->srv->name, in->name);
 	in->proc.pid = pid;
+	clock_gettime(CLOCK_MONOTONIC, &in->start);
 	uloop_process_add(&in->proc);
 }
 
@@ -126,29 +131,58 @@ instance_timeout(struct uloop_timeout *t)
 	struct service_instance *in;
 
 	in = container_of(t, struct service_instance, timeout);
-	kill(in->proc.pid, SIGKILL);
-	uloop_process_delete(&in->proc);
-	in->proc.cb(&in->proc, -1);
+
+	if (!in->halt && (in->restart || in->respawn))
+		instance_start(in);
 }
 
 static void
 instance_exit(struct uloop_process *p, int ret)
 {
 	struct service_instance *in;
+	struct timespec tp;
+	long runtime;
 
 	in = container_of(p, struct service_instance, proc);
-	DEBUG(1, "Instance %s::%s exit with error code %d\n", in->srv->name, in->name, ret);
+
+	clock_gettime(CLOCK_MONOTONIC, &tp);
+	runtime = tp.tv_sec - in->start.tv_sec;
+
+	DEBUG(1, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
 	uloop_timeout_cancel(&in->timeout);
-	if (in->restart)
+	if (in->halt) {
+		/* no action */
+	} else if (in->restart) {
 		instance_start(in);
+	} else if (in->respawn) {
+		if (runtime < RESPAWN_ERROR)
+			in->respawn_count++;
+		else
+			in->respawn_count = 0;
+		if (in->respawn_count > 5)
+			DEBUG(1, "Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
+								in->srv->name, in->name, in->respawn_count, runtime);
+		uloop_timeout_set(&in->timeout, 5000);
+	}
 }
 
 void
-instance_stop(struct service_instance *in, bool restart)
+instance_stop(struct service_instance *in)
 {
 	if (!in->proc.pending)
 		return;
+	in->halt = true;
+	in->restart = in->respawn = false;
+	kill(in->proc.pid, SIGTERM);
+}
 
+static void
+instance_restart(struct service_instance *in)
+{
+	if (!in->proc.pending)
+		return;
+	in->halt = false;
+	in->restart = true;
 	kill(in->proc.pid, SIGTERM);
 }
 
@@ -348,9 +382,9 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 			instance_config_move(in, in_new);
 		instance_start(in);
 	} else {
-		in->restart = true;
-		instance_stop(in, true);
+		instance_restart(in);
 		instance_config_move(in, in_new);
+		/* restart happens in the child callback handler */
 	}
 	return true;
 }
@@ -375,6 +409,8 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->config = config;
 	in->timeout.cb = instance_timeout;
 	in->proc.cb = instance_exit;
+	in->respawn = true;
+	in->respawn_count = 0;
 
 	blobmsg_list_init(&in->netdev, struct instance_netdev, node, instance_netdev_cmp);
 	blobmsg_list_init(&in->file, struct instance_file, node, instance_file_cmp);
