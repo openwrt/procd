@@ -319,9 +319,9 @@ instance_config_parse(struct service_instance *in)
 	in->command = cur;
 	in->trigger = tb[INSTANCE_ATTR_TRIGGER];
 
-	if (in->trigger) {
+	if (in->trigger)
 		trigger_add(in->trigger, in);
-	}
+
 	if ((cur = tb[INSTANCE_ATTR_NICE])) {
 		in->nice = (int8_t) blobmsg_get_u32(cur);
 		if (in->nice < -20 || in->nice > 20)
