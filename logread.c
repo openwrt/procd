@@ -60,6 +60,16 @@ static const char *log_file, *log_ip, *log_port, *pid_file;
 static int log_type = LOG_STDOUT;
 static int log_size, log_udp;
 
+static const char* getcodetext(int value, CODE *codetable) {
+	CODE *i;
+
+	if (value >= 0)
+		for (i = codetable; i->c_val != -1; i++)
+			if (i->c_val == value)
+				return (i->c_name);
+	return "<unknown>";
+};
+
 static void log_handle_reconnect(struct uloop_timeout *timeout)
 {
 	sender.fd = usock((log_udp) ? (USOCK_UDP) : (USOCK_TCP), log_ip, log_port);
@@ -149,7 +159,7 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 		}
 	} else {
 		snprintf(buf, sizeof(buf), "%s %s.%s%s %s\n",
-			c, facilitynames[LOG_FAC(p)].c_name, prioritynames[LOG_PRI(p)].c_name,
+			c, getcodetext(LOG_FAC(p) << 3, facilitynames), getcodetext(LOG_PRI(p), prioritynames),
 			(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : (" kernel:"),
 			method);
 		write(sender.fd, buf, strlen(buf));
@@ -217,6 +227,8 @@ enum {
 	__READ_MAX
 };
 
+
+
 static const struct blobmsg_policy read_policy[] = {
 	[READ_LINE] = { .name = "lines", .type = BLOBMSG_TYPE_ARRAY },
 };
@@ -252,7 +264,7 @@ static void read_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 		c[strlen(c) - 1] = '\0';
 
 		printf("%s %s.%s%s %s\n",
-			c, facilitynames[LOG_FAC(p)].c_name, prioritynames[LOG_PRI(p)].c_name,
+			c, getcodetext(LOG_FAC(p) << 3, facilitynames), getcodetext(LOG_PRI(p), prioritynames),
 			(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : (" kernel:"),
 			blobmsg_get_string(tb[LOG_MSG]));
 	}
