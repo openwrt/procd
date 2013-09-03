@@ -434,6 +434,15 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 	if (in->proc.pending)
 		blobmsg_add_u32(b, "pid", in->proc.pid);
 	blobmsg_add_blob(b, in->command);
+
+	if (!avl_is_empty(&in->env.avl)) {
+		struct blobmsg_list_node *var;
+		void *e = blobmsg_open_table(b, "env");
+		blobmsg_list_for_each(&in->env, var)
+			blobmsg_add_string(b, blobmsg_name(var->data), blobmsg_data(var->data));
+		blobmsg_close_table(b, e);
+	}
+
 	if (verbose && in->trigger)
 		blobmsg_add_blob(b, in->trigger);
 	if (!measure_process(in->proc.pid, &pi)) {
