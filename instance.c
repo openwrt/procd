@@ -155,14 +155,18 @@ instance_exit(struct uloop_process *p, int ret)
 	} else if (in->restart) {
 		instance_start(in);
 	} else if (in->respawn) {
-		if (runtime < RESPAWN_ERROR)
+		if (runtime < in->respawn_threshold)
 			in->respawn_count++;
 		else
 			in->respawn_count = 0;
-		if (in->respawn_count > 5)
-			DEBUG(1, "Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
+		if (in->respawn_count > in->respawn_retry) {
+			LOG("Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
 								in->srv->name, in->name, in->respawn_count, runtime);
-		uloop_timeout_set(&in->timeout, 5000);
+			in->restart = in->respawn = 0;
+			in->halt = 1;
+		} else {
+			uloop_timeout_set(&in->timeout, in->respawn_timeout * 1000);
+		}
 	}
 }
 
@@ -318,6 +322,22 @@ instance_config_parse(struct service_instance *in)
 
 	in->command = cur;
 
+	if (tb[INSTANCE_ATTR_RESPAWN]) {
+		int i = 0;
+		uint32_t vals[3] = { 3600, 5, 5};
+
+		blobmsg_for_each_attr(cur2, tb[INSTANCE_ATTR_RESPAWN], rem) {
+			if ((i >= 3) && (blobmsg_type(cur2) == BLOBMSG_TYPE_STRING))
+				continue;
+			vals[i] = atoi(blobmsg_get_string(cur2));
+			i++;
+		}
+		in->respawn = true;
+		in->respawn_count = 0;
+		in->respawn_timeout = vals[0];
+		in->respawn_threshold = vals[1];
+		in->respawn_retry = vals[2];
+	}
 	if (tb[INSTANCE_ATTR_TRIGGER]) {
 		in->trigger = malloc(blob_len(tb[INSTANCE_ATTR_TRIGGER]));
 		if (!in->trigger)
@@ -414,8 +434,6 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->config = config;
 	in->timeout.cb = instance_timeout;
 	in->proc.cb = instance_exit;
-	in->respawn = true;
-	in->respawn_count = 0;
 
 	blobmsg_list_init(&in->netdev, struct instance_netdev, node, instance_netdev_cmp);
 	blobmsg_list_init(&in->file, struct instance_file, node, instance_file_cmp);
@@ -441,6 +459,14 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_list_for_each(&in->env, var)
 			blobmsg_add_string(b, blobmsg_name(var->data), blobmsg_data(var->data));
 		blobmsg_close_table(b, e);
+	}
+
+	if (in->respawn) {
+		void *r = blobmsg_open_table(b, "respawn");
+		blobmsg_add_u32(b, "timeout", in->respawn_timeout);
+		blobmsg_add_u32(b, "threshold", in->respawn_threshold);
+		blobmsg_add_u32(b, "retry", in->respawn_retry);
+		blobmsg_close_table(b, r);
 	}
 
 	if (verbose && in->trigger)

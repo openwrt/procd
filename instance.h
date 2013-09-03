@@ -35,9 +35,9 @@ struct service_instance {
 	int respawn_count;
 	struct timespec start;
 
-	int respawn_timeout;
-	int respawn_threshold;
-	int respawn_retry;
+	uint32_t respawn_timeout;
+	uint32_t respawn_threshold;
+	uint32_t respawn_retry;
 
 	struct blob_attr *config;
 	struct uloop_process proc;
