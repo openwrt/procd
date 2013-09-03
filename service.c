@@ -101,11 +101,17 @@ service_update(struct service *s, struct blob_attr *config, struct blob_attr **t
 	struct blob_attr *cur;
 	int rem;
 
-	if (s->trigger)
+	if (s->trigger) {
 		trigger_del(s);
+		free(s->trigger);
+		s->trigger = NULL;
+	}
 
 	if (tb[SERVICE_SET_TRIGGER] && blobmsg_data_len(tb[SERVICE_SET_TRIGGER])) {
-		s->trigger = tb[SERVICE_SET_TRIGGER];
+		s->trigger = malloc(blob_len(tb[SERVICE_SET_TRIGGER]));
+		if (!s->trigger)
+			return -1;
+		memcpy(s->trigger, tb[SERVICE_SET_TRIGGER], blob_len(tb[SERVICE_SET_TRIGGER]));
 		trigger_add(s->trigger, s);
 	}
 
@@ -128,6 +134,8 @@ service_delete(struct service *s)
 	vlist_flush_all(&s->instances);
 	avl_delete(&services, &s->avl);
 	trigger_del(s);
+	s->trigger = NULL;
+	free(s->trigger);
 	free(s->config);
 	free(s);
 }

@@ -317,10 +317,14 @@ instance_config_parse(struct service_instance *in)
 		return false;
 
 	in->command = cur;
-	in->trigger = tb[INSTANCE_ATTR_TRIGGER];
 
-	if (in->trigger)
+	if (tb[INSTANCE_ATTR_TRIGGER]) {
+		in->trigger = malloc(blob_len(tb[INSTANCE_ATTR_TRIGGER]));
+		if (!in->trigger)
+			return -1;
+		memcpy(in->trigger, tb[INSTANCE_ATTR_TRIGGER], blob_len(tb[INSTANCE_ATTR_TRIGGER]));
 		trigger_add(in->trigger, in);
+	}
 
 	if ((cur = tb[INSTANCE_ATTR_NICE])) {
 		in->nice = (int8_t) blobmsg_get_u32(cur);
@@ -395,6 +399,7 @@ instance_free(struct service_instance *in)
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	trigger_del(in);
+	free(in->trigger);
 	instance_config_cleanup(in);
 	free(in->config);
 	free(in);
