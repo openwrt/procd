@@ -108,10 +108,10 @@ service_update(struct service *s, struct blob_attr *config, struct blob_attr **t
 	}
 
 	if (tb[SERVICE_SET_TRIGGER] && blobmsg_data_len(tb[SERVICE_SET_TRIGGER])) {
-		s->trigger = malloc(blob_len(tb[SERVICE_SET_TRIGGER]));
+		s->trigger = malloc(blob_pad_len(tb[SERVICE_SET_TRIGGER]));
 		if (!s->trigger)
 			return -1;
-		memcpy(s->trigger, tb[SERVICE_SET_TRIGGER], blob_len(tb[SERVICE_SET_TRIGGER]));
+		memcpy(s->trigger, tb[SERVICE_SET_TRIGGER], blob_pad_len(tb[SERVICE_SET_TRIGGER]));
 		trigger_add(s->trigger, s);
 	}
 
