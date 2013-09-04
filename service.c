@@ -17,6 +17,7 @@
 #include "procd.h"
 #include "service.h"
 #include "instance.h"
+#include "rcS.h"
 
 struct avl_tree services;
 static struct blob_buf b;
@@ -124,6 +125,8 @@ service_update(struct service *s, struct blob_attr *config, struct blob_attr **t
 		if (!add)
 			vlist_flush(&s->instances);
 	}
+
+	rc(s->name, "running");
 
 	return 0;
 }
