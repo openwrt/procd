@@ -334,8 +334,8 @@ instance_config_parse(struct service_instance *in)
 		}
 		in->respawn = true;
 		in->respawn_count = 0;
-		in->respawn_timeout = vals[0];
-		in->respawn_threshold = vals[1];
+		in->respawn_threshold = vals[0];
+		in->respawn_timeout = vals[1];
 		in->respawn_retry = vals[2];
 	}
 	if (tb[INSTANCE_ATTR_TRIGGER]) {
