@@ -136,7 +136,6 @@ service_delete(struct service *s)
 	trigger_del(s);
 	s->trigger = NULL;
 	free(s->trigger);
-	free(s->config);
 	free(s);
 }
 
