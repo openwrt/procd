@@ -31,7 +31,7 @@
 #include "procd.h"
 #include "rcS.h"
 
-static struct runqueue q;
+static struct runqueue q, r;
 
 struct initd {
 	struct ustream_fd fd;
@@ -102,7 +102,7 @@ static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 	free(s);
 }
 
-static void add_initd(char *file, char *param)
+static void add_initd(struct runqueue *q, char *file, char *param)
 {
 	static const struct runqueue_task_type initd_type = {
 		.run = q_initd_run,
@@ -116,28 +116,50 @@ static void add_initd(char *file, char *param)
 	s->proc.task.complete = q_initd_complete;
 	s->param = param;
 	s->file = file;
-	runqueue_task_add(&q, &s->proc.task, false);
+	runqueue_task_add(q, &s->proc.task, false);
 }
 
-int rcS(char *pattern, char *param, void (*q_empty)(struct runqueue *))
+static int _rc(struct runqueue *q, char *path, const char *file, char *pattern, char *param)
 {
-	char dir[16];
+	char dir[64];
 	glob_t gl;
 	int j;
 
-	runqueue_init(&q);
-	q.empty_cb = q_empty;
-	q.max_running_tasks = 1;
 
-	DEBUG(1, "running /etc/rc.d/%s %s\n", pattern, param);
-	snprintf(dir, sizeof(dir), "/etc/rc.d/%s*", pattern);
+	DEBUG(1, "running %s/%s%s %s\n", path, file, pattern, param);
+	snprintf(dir, sizeof(dir), "%s/%s%s", path, file, pattern);
 	if (glob(dir, GLOB_NOESCAPE | GLOB_MARK, NULL, &gl)) {
 		printf("glob failed on %s\n", dir);
 		return -1;
 	}
 
 	for (j = 0; j < gl.gl_pathc; j++)
-		add_initd(gl.gl_pathv[j], param);
+		add_initd(q, gl.gl_pathv[j], param);
 
 	return 0;
+}
+
+int rcS(char *pattern, char *param, void (*q_empty)(struct runqueue *))
+{
+	runqueue_init(&q);
+	q.empty_cb = q_empty;
+	q.max_running_tasks = 1;
+
+	return _rc(&q, "/etc/rc.d", pattern, "*", param);
+}
+
+int rc(const char *file, char *param)
+{
+	return _rc(&r, "/etc/init.d", file, "", param);
+}
+
+static void r_empty(struct runqueue *q)
+{
+
+}
+
+static void __attribute__((constructor)) measure_init() {
+	runqueue_init(&r);
+	r.empty_cb = r_empty;
+	r.max_running_tasks = 1;
 }
