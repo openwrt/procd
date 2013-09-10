@@ -179,25 +179,25 @@ static int device_list_insert(const char *path)
 	return 0;
 }
 
-static void scan_subdir(const char *dirname)
+static void scan_subdir(const char *base)
 {
-	DIR *dir2;
-	struct dirent *dent2;
+	DIR *dir;
+	struct dirent *dent;
 
-	dir2 = opendir(dirname);
-	if (dir2 != NULL) {
-		for (dent2 = readdir(dir2); dent2 != NULL; dent2 = readdir(dir2)) {
-			char dirname2[PATH_SIZE];
+	dir = opendir(base);
+	if (dir != NULL) {
+		for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
+			char dirname[PATH_SIZE];
 
-			if (dent2->d_name[0] == '.')
+			if (dent->d_name[0] == '.')
 				continue;
 
-			strlcpy(dirname2, dirname, sizeof(dirname2));
-			strlcat(dirname2, "/", sizeof(dirname2));
-			strlcat(dirname2, dent2->d_name, sizeof(dirname2));
-			device_list_insert(dirname2);
+			strlcpy(dirname, base, sizeof(dirname));
+			strlcat(dirname, "/", sizeof(dirname));
+			strlcat(dirname, dent->d_name, sizeof(dirname));
+			device_list_insert(dirname);
 		}
-		closedir(dir2);
+		closedir(dir);
 	}
 }
 
