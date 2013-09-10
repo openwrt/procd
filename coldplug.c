@@ -17,7 +17,6 @@
 #include <sys/mount.h>
 
 #include <unistd.h>
-#include <unistd.h>
 
 #include "procd.h"
 #include "hotplug.h"
