@@ -161,8 +161,9 @@ static int device_list_insert(const char *path)
 
 	dbg("add '%s'" , path);
 
-	/* we only have a device, if we have an uevent file */
-	if (!device_has_attribute(path, "/uevent", S_IWUSR))
+	/* we only have a device, if we have a dev and an uevent file */
+	if (!device_has_attribute(path, "/dev", S_IRUSR) ||
+	    !device_has_attribute(path, "/uevent", S_IWUSR))
 		return -1;
 
 	strlcpy(devpath, &path[4], sizeof(devpath));
