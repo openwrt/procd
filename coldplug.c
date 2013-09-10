@@ -34,6 +34,7 @@ static void coldplug_complete(struct uloop_timeout *t)
 static void udevtrigger_complete(struct uloop_process *proc, int ret)
 {
 	DEBUG(2, "Finished udevtrigger\n");
+	hotplug_last_event(coldplug_complete);
 }
 
 void procd_coldplug(void)
@@ -59,7 +60,6 @@ void procd_coldplug(void)
 		return;
 	}
 
-	hotplug_last_event(coldplug_complete);
 	uloop_process_add(&udevtrigger);
 
 	DEBUG(2, "Launched coldplug instance, pid=%d\n", (int) udevtrigger.pid);
