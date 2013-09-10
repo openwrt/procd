@@ -179,6 +179,27 @@ static int device_list_insert(const char *path)
 	return 0;
 }
 
+static void scan_subdir(const char *dirname)
+{
+	DIR *dir2;
+	struct dirent *dent2;
+
+	dir2 = opendir(dirname);
+	if (dir2 != NULL) {
+		for (dent2 = readdir(dir2); dent2 != NULL; dent2 = readdir(dir2)) {
+			char dirname2[PATH_SIZE];
+
+			if (dent2->d_name[0] == '.')
+				continue;
+
+			strlcpy(dirname2, dirname, sizeof(dirname2));
+			strlcat(dirname2, "/", sizeof(dirname2));
+			strlcat(dirname2, dent2->d_name, sizeof(dirname2));
+			device_list_insert(dirname2);
+		}
+		closedir(dir2);
+	}
+}
 
 static void scan_subsystem(const char *subsys)
 {
@@ -193,8 +214,6 @@ static void scan_subsystem(const char *subsys)
 	if (dir != NULL) {
 		for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
 			char dirname[PATH_SIZE];
-			DIR *dir2;
-			struct dirent *dent2;
 
 			if (dent->d_name[0] == '.')
 				continue;
@@ -205,21 +224,7 @@ static void scan_subsystem(const char *subsys)
 			strlcat(dirname, "/devices", sizeof(dirname));
 
 			/* look for devices */
-			dir2 = opendir(dirname);
-			if (dir2 != NULL) {
-				for (dent2 = readdir(dir2); dent2 != NULL; dent2 = readdir(dir2)) {
-					char dirname2[PATH_SIZE];
-
-					if (dent2->d_name[0] == '.')
-						continue;
-
-					strlcpy(dirname2, dirname, sizeof(dirname2));
-					strlcat(dirname2, "/", sizeof(dirname2));
-					strlcat(dirname2, dent2->d_name, sizeof(dirname2));
-					device_list_insert(dirname2);
-				}
-				closedir(dir2);
-			}
+			scan_subdir(dirname);
 		}
 		closedir(dir);
 	}
@@ -237,8 +242,6 @@ static void scan_block(void)
 	if (dir != NULL) {
 		for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
 			char dirname[PATH_SIZE];
-			DIR *dir2;
-			struct dirent *dent2;
 
 			if (dent->d_name[0] == '.')
 				continue;
@@ -250,24 +253,7 @@ static void scan_block(void)
 				continue;
 
 			/* look for partitions */
-			dir2 = opendir(dirname);
-			if (dir2 != NULL) {
-				for (dent2 = readdir(dir2); dent2 != NULL; dent2 = readdir(dir2)) {
-					char dirname2[PATH_SIZE];
-
-					if (dent2->d_name[0] == '.')
-						continue;
-
-					if (!strcmp(dent2->d_name,"device"))
-						continue;
-
-					strlcpy(dirname2, dirname, sizeof(dirname2));
-					strlcat(dirname2, "/", sizeof(dirname2));
-					strlcat(dirname2, dent2->d_name, sizeof(dirname2));
-					device_list_insert(dirname2);
-				}
-				closedir(dir2);
-			}
+			scan_subdir(dirname);
 		}
 		closedir(dir);
 	}
@@ -285,8 +271,6 @@ static void scan_class(void)
 	if (dir != NULL) {
 		for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
 			char dirname[PATH_SIZE];
-			DIR *dir2;
-			struct dirent *dent2;
 
 			if (dent->d_name[0] == '.')
 				continue;
@@ -294,24 +278,8 @@ static void scan_class(void)
 			strlcpy(dirname, base, sizeof(dirname));
 			strlcat(dirname, "/", sizeof(dirname));
 			strlcat(dirname, dent->d_name, sizeof(dirname));
-			dir2 = opendir(dirname);
-			if (dir2 != NULL) {
-				for (dent2 = readdir(dir2); dent2 != NULL; dent2 = readdir(dir2)) {
-					char dirname2[PATH_SIZE];
 
-					if (dent2->d_name[0] == '.')
-						continue;
-
-					if (!strcmp(dent2->d_name, "device"))
-						continue;
-
-					strlcpy(dirname2, dirname, sizeof(dirname2));
-					strlcat(dirname2, "/", sizeof(dirname2));
-					strlcat(dirname2, dent2->d_name, sizeof(dirname2));
-					device_list_insert(dirname2);
-				}
-				closedir(dir2);
-			}
+			scan_subdir(dirname);
 		}
 		closedir(dir);
 	}
