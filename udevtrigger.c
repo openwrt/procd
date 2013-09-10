@@ -185,20 +185,19 @@ static void scan_subdir(const char *base)
 	struct dirent *dent;
 
 	dir = opendir(base);
-	if (dir != NULL) {
-		for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
-			char dirname[PATH_SIZE];
+	if (dir == NULL)
+		return;
 
-			if (dent->d_name[0] == '.')
-				continue;
+	for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
+		char dirname[PATH_SIZE];
 
-			strlcpy(dirname, base, sizeof(dirname));
-			strlcat(dirname, "/", sizeof(dirname));
-			strlcat(dirname, dent->d_name, sizeof(dirname));
-			device_list_insert(dirname);
-		}
-		closedir(dir);
+		strlcpy(dirname, base, sizeof(dirname));
+		strlcat(dirname, "/", sizeof(dirname));
+		strlcat(dirname, dent->d_name, sizeof(dirname));
+		device_list_insert(dirname);
 	}
+
+	closedir(dir);
 }
 
 static void scan_subsystem(const char *subsys)
@@ -211,23 +210,25 @@ static void scan_subsystem(const char *subsys)
 	strlcat(base, subsys, sizeof(base));
 
 	dir = opendir(base);
-	if (dir != NULL) {
-		for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
-			char dirname[PATH_SIZE];
+	if (dir == NULL)
+		return;
 
-			if (dent->d_name[0] == '.')
-				continue;
+	for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
+		char dirname[PATH_SIZE];
 
-			strlcpy(dirname, base, sizeof(dirname));
-			strlcat(dirname, "/", sizeof(dirname));
-			strlcat(dirname, dent->d_name, sizeof(dirname));
-			strlcat(dirname, "/devices", sizeof(dirname));
+		if (dent->d_name[0] == '.')
+			continue;
 
-			/* look for devices */
-			scan_subdir(dirname);
-		}
-		closedir(dir);
+		strlcpy(dirname, base, sizeof(dirname));
+		strlcat(dirname, "/", sizeof(dirname));
+		strlcat(dirname, dent->d_name, sizeof(dirname));
+		strlcat(dirname, "/devices", sizeof(dirname));
+
+		/* look for devices */
+		scan_subdir(dirname);
 	}
+
+	closedir(dir);
 }
 
 static void scan_block(void)
@@ -239,24 +240,26 @@ static void scan_block(void)
 	strlcpy(base, "/sys/block", sizeof(base));
 
 	dir = opendir(base);
-	if (dir != NULL) {
-		for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
-			char dirname[PATH_SIZE];
+	if (dir == NULL)
+		return;
 
-			if (dent->d_name[0] == '.')
-				continue;
+	for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
+		char dirname[PATH_SIZE];
 
-			strlcpy(dirname, base, sizeof(dirname));
-			strlcat(dirname, "/", sizeof(dirname));
-			strlcat(dirname, dent->d_name, sizeof(dirname));
-			if (device_list_insert(dirname) != 0)
-				continue;
+		if (dent->d_name[0] == '.')
+			continue;
 
-			/* look for partitions */
-			scan_subdir(dirname);
-		}
-		closedir(dir);
+		strlcpy(dirname, base, sizeof(dirname));
+		strlcat(dirname, "/", sizeof(dirname));
+		strlcat(dirname, dent->d_name, sizeof(dirname));
+		if (device_list_insert(dirname) != 0)
+			continue;
+
+		/* look for partitions */
+		scan_subdir(dirname);
 	}
+
+	closedir(dir);
 }
 
 static void scan_class(void)
@@ -268,21 +271,23 @@ static void scan_class(void)
 	strlcpy(base, "/sys/class", sizeof(base));
 
 	dir = opendir(base);
-	if (dir != NULL) {
-		for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
-			char dirname[PATH_SIZE];
+	if (dir == NULL)
+		return;
 
-			if (dent->d_name[0] == '.')
-				continue;
+	for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
+		char dirname[PATH_SIZE];
 
-			strlcpy(dirname, base, sizeof(dirname));
-			strlcat(dirname, "/", sizeof(dirname));
-			strlcat(dirname, dent->d_name, sizeof(dirname));
+		if (dent->d_name[0] == '.')
+			continue;
 
-			scan_subdir(dirname);
-		}
-		closedir(dir);
+		strlcpy(dirname, base, sizeof(dirname));
+		strlcat(dirname, "/", sizeof(dirname));
+		strlcat(dirname, dent->d_name, sizeof(dirname));
+
+		scan_subdir(dirname);
 	}
+
+	closedir(dir);
 }
 
 int main(int argc, char *argv[], char *envp[])
