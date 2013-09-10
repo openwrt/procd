@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <getopt.h>
 #include <errno.h>
@@ -135,21 +136,33 @@ static int sysfs_resolve_link(char *devpath, size_t size)
 	return 0;
 }
 
+static bool device_has_attribute(const char *path, const char *attr,
+				 mode_t mode)
+{
+	char filename[PATH_SIZE];
+	struct stat statbuf;
+
+	strlcpy(filename, path, sizeof(filename));
+	strlcat(filename, attr, sizeof(filename));
+
+	if (stat(filename, &statbuf) < 0)
+		return false;
+
+	if (!(statbuf.st_mode & mode))
+		return false;
+
+	return true;
+}
 
 static int device_list_insert(const char *path)
 {
-	char filename[PATH_SIZE];
 	char devpath[PATH_SIZE];
 	struct stat statbuf;
 
 	dbg("add '%s'" , path);
 
 	/* we only have a device, if we have an uevent file */
-	strlcpy(filename, path, sizeof(filename));
-	strlcat(filename, "/uevent", sizeof(filename));
-	if (stat(filename, &statbuf) < 0)
-		return -1;
-	if (!(statbuf.st_mode & S_IWUSR))
+	if (!device_has_attribute(path, "/uevent", S_IWUSR))
 		return -1;
 
 	strlcpy(devpath, &path[4], sizeof(devpath));
