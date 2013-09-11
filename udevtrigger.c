@@ -230,32 +230,10 @@ static void scan_subsystem(const char *subsys)
 static void scan_block(void)
 {
 	char base[PATH_SIZE];
-	DIR *dir;
-	struct dirent *dent;
 
 	strlcpy(base, "/sys/block", sizeof(base));
 
-	dir = opendir(base);
-	if (dir == NULL)
-		return;
-
-	for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
-		char dirname[PATH_SIZE];
-
-		if (dent->d_name[0] == '.')
-			continue;
-
-		strlcpy(dirname, base, sizeof(dirname));
-		strlcat(dirname, "/", sizeof(dirname));
-		strlcat(dirname, dent->d_name, sizeof(dirname));
-		if (device_list_insert(dirname) != 0)
-			continue;
-
-		/* look for partitions */
-		scan_subdir(dirname, NULL, true, 0);
-	}
-
-	closedir(dir);
+	scan_subdir("/sys/block", NULL, true, 1);
 }
 
 static void scan_class(void)
