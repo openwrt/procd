@@ -239,29 +239,10 @@ static void scan_block(void)
 static void scan_class(void)
 {
 	char base[PATH_SIZE];
-	DIR *dir;
-	struct dirent *dent;
 
 	strlcpy(base, "/sys/class", sizeof(base));
 
-	dir = opendir(base);
-	if (dir == NULL)
-		return;
-
-	for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
-		char dirname[PATH_SIZE];
-
-		if (dent->d_name[0] == '.')
-			continue;
-
-		strlcpy(dirname, base, sizeof(dirname));
-		strlcat(dirname, "/", sizeof(dirname));
-		strlcat(dirname, dent->d_name, sizeof(dirname));
-
-		scan_subdir(dirname, NULL, true, 0);
-	}
-
-	closedir(dir);
+	scan_subdir("/sys/class", NULL, false, 1);
 }
 
 int main(int argc, char *argv[], char *envp[])
