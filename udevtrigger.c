@@ -179,7 +179,8 @@ static int device_list_insert(const char *path)
 	return 0;
 }
 
-static void scan_subdir(const char *base)
+static void scan_subdir(const char *base, const char *subdir,
+		        bool insert, int depth)
 {
 	DIR *dir;
 	struct dirent *dent;
@@ -197,7 +198,20 @@ static void scan_subdir(const char *base)
 		strlcpy(dirname, base, sizeof(dirname));
 		strlcat(dirname, "/", sizeof(dirname));
 		strlcat(dirname, dent->d_name, sizeof(dirname));
-		device_list_insert(dirname);
+
+		if (insert) {
+			int err;
+
+			err = device_list_insert(dirname);
+			if (err)
+				continue;
+		}
+
+		if (subdir)
+			strlcat(dirname, subdir, sizeof(base));
+
+		if (depth)
+			scan_subdir(dirname, NULL, true, depth - 1);
 	}
 
 	closedir(dir);
@@ -228,7 +242,7 @@ static void scan_subsystem(const char *subsys)
 		strlcat(dirname, "/devices", sizeof(dirname));
 
 		/* look for devices */
-		scan_subdir(dirname);
+		scan_subdir(dirname, NULL, true, 0);
 	}
 
 	closedir(dir);
@@ -259,7 +273,7 @@ static void scan_block(void)
 			continue;
 
 		/* look for partitions */
-		scan_subdir(dirname);
+		scan_subdir(dirname, NULL, true, 0);
 	}
 
 	closedir(dir);
@@ -287,7 +301,7 @@ static void scan_class(void)
 		strlcat(dirname, "/", sizeof(dirname));
 		strlcat(dirname, dent->d_name, sizeof(dirname));
 
-		scan_subdir(dirname);
+		scan_subdir(dirname, NULL, true, 0);
 	}
 
 	closedir(dir);
