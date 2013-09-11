@@ -295,7 +295,6 @@ static void scan_class(void)
 
 int main(int argc, char *argv[], char *envp[])
 {
-	char base[PATH_SIZE];
 	struct stat statbuf;
 	int option;
 
@@ -331,8 +330,7 @@ int main(int argc, char *argv[], char *envp[])
 	scan_class();
 
 	/* scan "block" if it isn't a "class" */
-	strlcpy(base, "/sys/class/block", sizeof(base));
-	if (stat(base, &statbuf) != 0)
+	if (stat("/sys/class/block", &statbuf) != 0)
 		scan_block();
 
 exit:
