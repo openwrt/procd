@@ -217,34 +217,6 @@ static void scan_subdir(const char *base, const char *subdir,
 	closedir(dir);
 }
 
-static void scan_subsystem(const char *subsys)
-{
-	char base[PATH_SIZE];
-
-	strlcpy(base, "/sys/", sizeof(base));
-	strlcat(base, subsys, sizeof(base));
-
-	scan_subdir(base, "/devices", false, 1);
-}
-
-static void scan_block(void)
-{
-	char base[PATH_SIZE];
-
-	strlcpy(base, "/sys/block", sizeof(base));
-
-	scan_subdir("/sys/block", NULL, true, 1);
-}
-
-static void scan_class(void)
-{
-	char base[PATH_SIZE];
-
-	strlcpy(base, "/sys/class", sizeof(base));
-
-	scan_subdir("/sys/class", NULL, false, 1);
-}
-
 int main(int argc, char *argv[], char *envp[])
 {
 	struct stat statbuf;
@@ -278,12 +250,12 @@ int main(int argc, char *argv[], char *envp[])
 
 
 	/* if we have /sys/subsystem, forget all the old stuff */
-	scan_subsystem("bus");
-	scan_class();
+	scan_subdir("/sys/bus", "/devices", false, 1);
+	scan_subdir("/sys/class", NULL, false, 1);
 
 	/* scan "block" if it isn't a "class" */
 	if (stat("/sys/class/block", &statbuf) != 0)
-		scan_block();
+		scan_subdir("/sys/block", NULL, true, 1);
 
 exit:
 
