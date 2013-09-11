@@ -191,6 +191,9 @@ static void scan_subdir(const char *base)
 	for (dent = readdir(dir); dent != NULL; dent = readdir(dir)) {
 		char dirname[PATH_SIZE];
 
+		if (dent->d_name[0] == '.')
+			continue;
+
 		strlcpy(dirname, base, sizeof(dirname));
 		strlcat(dirname, "/", sizeof(dirname));
 		strlcat(dirname, dent->d_name, sizeof(dirname));
