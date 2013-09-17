@@ -42,12 +42,19 @@ static int redirect_output(const char *dev)
 
 int main(int argc, char **argv)
 {
+	int c;
+
 	if (redirect_output(argv[1]))
 		fprintf(stderr, "%s: Failed to open %s\n", argv[0], argv[1]);
 
 	printf("Please press Enter to activate this console.\n");
-	while (getchar() != 0xA)
-		;
+	do {
+		c = getchar();
+		if (c == EOF)
+			return -1;
+	}
+	while (c != 0xA);
+
 	execvp(argv[2], &argv[2]);
 	printf("%s: Failed to execute %s\n", argv[0], argv[2]);
 
