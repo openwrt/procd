@@ -63,6 +63,12 @@ void log_add(char *buf, int size, int source)
 	int priority = 0;
 	int ret;
 
+	/* bounce out if we don't have init'ed yet (regmatch etc will blow) */
+	if (!log) {
+		fprintf(stderr, buf);
+		return;
+	}
+
 	/* strip trailing newline */
 	if (buf[size - 2] == '\n') {
 		buf[size - 2] = '\0';
@@ -119,6 +125,34 @@ void log_add(char *buf, int size, int source)
 	ubus_notify_log(newest);
 
 	newest = next;
+}
+
+void log_printf(char *fmt, ...)
+{
+	static int buffer_len = 128;
+	static char *buffer;
+	va_list ap;
+	int n = 0;
+
+	do {
+		if (n)
+			buffer_len = n + 1;
+		if (!buffer)
+			buffer = malloc(buffer_len);
+		if (!buffer)
+			return;
+		va_start(ap, fmt);
+		n = vsnprintf(buffer, sizeof(buffer), fmt, ap);
+		va_end(ap);
+		if (n < 1)
+			return;
+		if (n >= buffer_len) {
+			free(buffer);
+			buffer = NULL;
+		}
+	} while (n >= buffer_len);
+
+	log_add(buffer, n, SOURCE_INTERNAL);
 }
 
 static void slog_cb(struct ustream *s, int bytes)

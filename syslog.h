@@ -18,6 +18,7 @@
 enum {
 	SOURCE_KLOG = 0,
 	SOURCE_SYSLOG = 1,
+	SOURCE_INTERNAL = 2,
 	SOURCE_ANY = 0xff,
 };
 
@@ -37,5 +38,6 @@ typedef void (*log_list_cb)(struct log_head *h);
 struct log_head* log_list(int count, struct log_head *h);
 int log_buffer_init(int size);
 void log_add(char *buf, int size, int source);
+void log_printf(char *fmt, ...);
 
 #endif

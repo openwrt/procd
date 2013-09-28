@@ -55,7 +55,7 @@ static void pipe_cb(struct ustream *s, int bytes)
 			break;
 		*newline = 0;
 		len = newline + 1 - str;
-		SYSLOG(6, buf->data);
+		log_printf(buf->data);
 		ustream_consume(s, len);
 	} while (1);
 }
