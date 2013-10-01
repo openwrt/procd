@@ -142,7 +142,7 @@ void log_printf(char *fmt, ...)
 		if (!buffer)
 			return;
 		va_start(ap, fmt);
-		n = vsnprintf(buffer, sizeof(buffer), fmt, ap);
+		n = vsnprintf(buffer, buffer_len, fmt, ap);
 		va_end(ap);
 		if (n < 1)
 			return;
