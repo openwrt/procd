@@ -29,6 +29,7 @@
 #include <libubox/usock.h>
 #include <libubox/uloop.h>
 #include "libubus.h"
+#include "syslog.h"
 
 enum {
 	LOG_STDOUT,
@@ -56,7 +57,7 @@ static const struct blobmsg_policy log_policy[] = {
 static struct ubus_subscriber log_event;
 static struct uloop_timeout retry;
 static struct uloop_fd sender;
-static const char *log_file, *log_ip, *log_port, *log_prefix, *pid_file;
+static const char *log_file, *log_ip, *log_port, *log_prefix, *pid_file, *hostname;
 static int log_type = LOG_STDOUT;
 static int log_size, log_udp;
 
@@ -140,17 +141,17 @@ static int log_notify(struct ubus_context *ctx, struct ubus_object *obj,
 	str = blobmsg_format_json(msg, true);
 	if (log_type == LOG_NET) {
 		int err;
-		int len;
 
 		*buf = '\0';
-		if (log_prefix)
-			snprintf(buf, sizeof(buf), "%s: ", log_prefix);
-
-		len = strlen(buf);
-
-		snprintf(&buf[len], sizeof(buf) - len, "%s%s\n",
-			(blobmsg_get_u32(tb[LOG_SOURCE])) ? ("") : ("kernel: "),
-			method);
+		if (hostname)
+			snprintf(buf, sizeof(buf), "%s ", hostname);
+		if (log_prefix) {
+			strncat(buf, log_prefix, sizeof(buf));
+			strncat(buf, ": ", sizeof(buf));
+		}
+		if (blobmsg_get_u32(tb[LOG_SOURCE]) == SOURCE_KLOG)
+			strncat(buf, "kernel: ", sizeof(buf));
+		strncat(buf, method, sizeof(buf));
 		if (log_udp)
 			err = write(sender.fd, buf, strlen(buf));
 		else
@@ -287,6 +288,7 @@ static int usage(const char *prog)
 		"    -F	<file>		Log file\n"
 		"    -S	<bytes>		Log size\n"
 		"    -p	<file>		PID file\n"
+		"    -h	<hostname>	Add hostname to the message\n"
 		"    -P	<prefix>	Prefix custom text to streamed messages\n"
 		"    -f			Follow log messages\n"
 		"    -u			Use UDP as the protocol\n"
@@ -302,7 +304,7 @@ int main(int argc, char **argv)
 	int ch, ret, subscribe = 0, lines = 0;
 	static struct blob_buf b;
 
-	while ((ch = getopt(argc, argv, "ufcs:l:r:F:p:S:P:")) != -1) {
+	while ((ch = getopt(argc, argv, "ufcs:l:r:F:p:S:P:h:")) != -1) {
 		switch (ch) {
 		case 'u':
 			log_udp = 1;
@@ -334,6 +336,9 @@ int main(int argc, char **argv)
 			if (log_size < 1)
 				log_size = 1;
 			log_size *= 1024;
+			break;
+		case 'h':
+			hostname = optarg;
 			break;
 		default:
 			return usage(*argv);
