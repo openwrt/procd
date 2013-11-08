@@ -29,6 +29,8 @@
 
 static struct blob_buf b;
 
+int upgrade_running = 0;
+
 static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
                  struct ubus_request_data *req, const char *method,
                  struct blob_attr *msg)
@@ -190,6 +192,8 @@ static int system_upgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	procd_reconnect_ubus(0);
 	log_shutdown();
 	hotplug_shutdown();
+
+	upgrade_running = 1;
 
 	return 0;
 }

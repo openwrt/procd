@@ -42,6 +42,7 @@
 	} while (0)
 
 extern char *ubus_socket;
+extern int upgrade_running;
 
 extern unsigned int debug;
 void debug_init(void);

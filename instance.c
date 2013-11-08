@@ -149,6 +149,9 @@ instance_exit(struct uloop_process *p, int ret)
 	runtime = tp.tv_sec - in->start.tv_sec;
 
 	DEBUG(1, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
+	if (upgrade_running)
+		return;
+
 	uloop_timeout_cancel(&in->timeout);
 	if (in->halt) {
 		/* no action */
