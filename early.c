@@ -42,6 +42,7 @@ static void early_mounts(void)
 static void early_dev(void)
 {
 	mkdev("*", 0600);
+	mknod("/dev/null", 0666, makedev(1, 3));
 }
 
 static void early_console(const char *dev)
@@ -55,10 +56,8 @@ static void early_console(const char *dev)
 	}
 
 	dd = open(dev, O_RDWR);
-	if (dd < 0) {
-		ERROR("Failed to open %s\n", dev);
-		return;
-	}
+	if (dd < 0)
+		dd = open("/dev/null", O_RDWR);
 
 	dup2(dd, STDIN_FILENO);
 	dup2(dd, STDOUT_FILENO);
