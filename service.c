@@ -77,6 +77,7 @@ service_alloc(const char *name)
 	s->instances.keep_old = true;
 	s->name = new_name;
 	s->avl.key = s->name;
+	INIT_LIST_HEAD(&s->validators);
 
 	return s;
 }
@@ -86,6 +87,7 @@ enum {
 	SERVICE_SET_SCRIPT,
 	SERVICE_SET_INSTANCES,
 	SERVICE_SET_TRIGGER,
+	SERVICE_SET_VALIDATE,
 	__SERVICE_SET_MAX
 };
 
@@ -94,6 +96,7 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 	[SERVICE_SET_SCRIPT] = { "script", BLOBMSG_TYPE_STRING },
 	[SERVICE_SET_INSTANCES] = { "instances", BLOBMSG_TYPE_TABLE },
 	[SERVICE_SET_TRIGGER] = { "triggers", BLOBMSG_TYPE_ARRAY },
+	[SERVICE_SET_VALIDATE] = { "validate", BLOBMSG_TYPE_ARRAY },
 };
 
 static int
@@ -108,12 +111,19 @@ service_update(struct service *s, struct blob_attr *config, struct blob_attr **t
 		s->trigger = NULL;
 	}
 
+	service_validate_del(s);
+
 	if (tb[SERVICE_SET_TRIGGER] && blobmsg_data_len(tb[SERVICE_SET_TRIGGER])) {
 		s->trigger = malloc(blob_pad_len(tb[SERVICE_SET_TRIGGER]));
 		if (!s->trigger)
 			return -1;
 		memcpy(s->trigger, tb[SERVICE_SET_TRIGGER], blob_pad_len(tb[SERVICE_SET_TRIGGER]));
 		trigger_add(s->trigger, s);
+	}
+
+	if (tb[SERVICE_SET_VALIDATE] && blobmsg_data_len(tb[SERVICE_SET_VALIDATE])) {
+		blobmsg_for_each_attr(cur, tb[SERVICE_SET_VALIDATE], rem)
+			service_validate_add(s, cur);
 	}
 
 	if (tb[SERVICE_SET_INSTANCES]) {
@@ -140,6 +150,7 @@ service_delete(struct service *s)
 	s->trigger = NULL;
 	free(s->trigger);
 	free(s);
+	service_validate_del(s);
 }
 
 enum {
@@ -180,6 +191,19 @@ enum {
 static const struct blobmsg_policy event_policy[__EVENT_MAX] = {
 	[EVENT_TYPE] = { .name = "type", .type = BLOBMSG_TYPE_STRING },
 	[EVENT_DATA] = { .name = "data", .type = BLOBMSG_TYPE_TABLE },
+};
+
+enum {
+	VALIDATE_PACKAGE,
+	VALIDATE_TYPE,
+	VALIDATE_SERVICE,
+	__VALIDATE_MAX
+};
+
+static const struct blobmsg_policy validate_policy[__VALIDATE_MAX] = {
+	[VALIDATE_PACKAGE] = { .name = "package", .type = BLOBMSG_TYPE_STRING },
+	[VALIDATE_TYPE] = { .name = "type", .type = BLOBMSG_TYPE_STRING },
+	[VALIDATE_SERVICE] = { .name = "service", .type = BLOBMSG_TYPE_STRING },
 };
 
 static int
@@ -243,6 +267,8 @@ service_dump(struct service *s, int verbose)
 	blobmsg_close_table(&b, i);
 	if (verbose && s->trigger)
 		blobmsg_add_blob(&b, s->trigger);
+	if (verbose && !list_empty(&s->validators))
+		service_validate_dump(&b, s);
 	blobmsg_close_table(&b, c);
 }
 
@@ -350,6 +376,34 @@ service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+static int
+service_handle_validate(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct blob_attr *tb[__VALIDATE_MAX];
+	char *p = NULL, *t = NULL;
+
+	if (!msg)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	blobmsg_parse(validate_policy, __VALIDATE_MAX, tb, blob_data(msg), blob_len(msg));
+	if (tb[VALIDATE_SERVICE]) {
+		return 0;
+	}
+	if (tb[VALIDATE_PACKAGE])
+		p = blobmsg_get_string(tb[VALIDATE_PACKAGE]);
+
+	if (tb[VALIDATE_TYPE])
+		t = blobmsg_get_string(tb[VALIDATE_TYPE]);
+
+	blob_buf_init(&b, 0);
+	service_validate_dump_all(&b, p, t);
+	ubus_send_reply(ctx, req, b.head);
+
+	return 0;
+}
+
 static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
@@ -358,6 +412,7 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("update_start", service_handle_update, service_attrs),
 	UBUS_METHOD("update_complete", service_handle_update, service_attrs),
 	UBUS_METHOD("event", service_handle_event, event_policy),
+	UBUS_METHOD("validate", service_handle_validate, validate_policy),
 };
 
 static struct ubus_object_type main_object_type =
@@ -372,6 +427,13 @@ static struct ubus_object main_object = {
 
 void ubus_init_service(struct ubus_context *ctx)
 {
-	avl_init(&services, avl_strcmp, false, NULL);
 	ubus_add_object(ctx, &main_object);
 }
+
+void
+service_init(void)
+{
+	avl_init(&services, avl_strcmp, false, NULL);
+	service_validate_init();
+}
+

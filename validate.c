@@ -314,6 +314,12 @@ dt_type_bool(struct dt_state *s, int nargs)
 }
 
 static bool
+dt_type_string(struct dt_state *s, int nargs)
+{
+	return true;
+}
+
+static bool
 dt_type_ip4addr(struct dt_state *s, int nargs)
 {
 	struct in6_addr a;
@@ -682,6 +688,7 @@ static struct dt_fun dt_types[] = {
 	{ "float",			dt_type_float		},
 	{ "ufloat",			dt_type_ufloat		},
 	{ "bool",			dt_type_bool		},
+	{ "string",			dt_type_string		},
 	{ "ip4addr",		dt_type_ip4addr		},
 	{ "ip6addr",		dt_type_ip6addr		},
 	{ "ipaddr",			dt_type_ipaddr		},

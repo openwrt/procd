@@ -10,7 +10,7 @@ IF(APPLE)
   LINK_DIRECTORIES(/opt/local/lib)
 ENDIF()
 
-SET(SOURCES main.c ubus.c service.c instance.c utils.c md5.c hotplug.c state.c mkdev.c early.c inittab.c preinit.c coldplug.c syslog.c log.c watchdog.c signal.c system.c debug.c rcS.c trigger.c measure.c)
+SET(SOURCES main.c ubus.c service.c service_validate.c instance.c utils.c md5.c hotplug.c state.c mkdev.c early.c inittab.c preinit.c coldplug.c syslog.c log.c watchdog.c signal.c system.c debug.c rcS.c trigger.c measure.c)
 
 find_library(json NAMES json-c json)
 SET(LIBS ubox ubus ${json} blobmsg_json json_script)

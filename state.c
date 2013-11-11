@@ -20,6 +20,7 @@
 #include "syslog.h"
 #include "hotplug.h"
 #include "watchdog.h"
+#include "service.h"
 
 enum {
 	STATE_NONE = 0,
@@ -51,6 +52,7 @@ static void state_enter(void)
 		LOG("- init -\n");
 		log_init();
 		procd_connect_ubus();
+		service_init();
 		procd_inittab();
 		procd_inittab_run("respawn");
 		procd_inittab_run("askconsole");
