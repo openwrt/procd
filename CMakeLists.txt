@@ -19,9 +19,15 @@ IF(DEBUG)
   ADD_DEFINITIONS(-DDEBUG -g3)
 ENDIF()
 
+ADD_LIBRARY(validate SHARED validate.c)
+
+INSTALL(TARGETS validate
+	LIBRARY DESTINATION lib
+)
+
 ADD_EXECUTABLE(procd ${SOURCES})
 
-TARGET_LINK_LIBRARIES(procd ${LIBS})
+TARGET_LINK_LIBRARIES(procd ${LIBS} validate)
 
 INSTALL(TARGETS procd
 	RUNTIME DESTINATION sbin
@@ -43,5 +49,12 @@ ADD_EXECUTABLE(logread logread.c)
 TARGET_LINK_LIBRARIES(logread ${LIBS})
 
 INSTALL(TARGETS logread
+	RUNTIME DESTINATION sbin
+)
+
+ADD_EXECUTABLE(validate_data validate_data.c)
+TARGET_LINK_LIBRARIES(validate_data ${LIBS} validate)
+
+INSTALL(TARGETS validate_data
 	RUNTIME DESTINATION sbin
 )

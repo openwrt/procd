@@ -1,8 +1,10 @@
 procd
+validate_data
 logread
 askfirst
 udevtrigger
 .*
+*.so
 Makefile
 CMakeCache.txt
 CMakeFiles
