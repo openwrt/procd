@@ -22,37 +22,17 @@
 #include <stdio.h>
 #include <syslog.h>
 
-#include "syslog.h"
+#include "log.h"
 
 #define __init __attribute__((constructor))
-
-#define DEBUG(level, fmt, ...) do { \
-	if (debug >= level) \
-		fprintf(stderr, "procd: %s(%d): " fmt, __func__, __LINE__, ## __VA_ARGS__); \
-	} while (0)
-
-#define LOG(fmt, ...) do { \
-	log_printf(fmt, ## __VA_ARGS__); \
-	fprintf(stderr, "procd: "fmt, ## __VA_ARGS__); \
-	} while (0)
-
-#define ERROR(fmt, ...) do { \
-	log_printf(fmt, ## __VA_ARGS__); \
-	fprintf(stderr, "procd: "fmt, ## __VA_ARGS__); \
-	} while (0)
 
 extern char *ubus_socket;
 extern int upgrade_running;
 
-extern unsigned int debug;
-void debug_init(void);
-
 void procd_connect_ubus(void);
 void procd_reconnect_ubus(int reconnect);
 void ubus_init_service(struct ubus_context *ctx);
-void ubus_init_log(struct ubus_context *ctx);
 void ubus_init_system(struct ubus_context *ctx);
-void ubus_notify_log(struct log_head *l);
 
 void procd_state_next(void);
 void procd_shutdown(int event);
@@ -64,21 +44,10 @@ void procd_signal_preinit(void);
 void procd_inittab(void);
 void procd_inittab_run(const char *action);
 
-int mkdev(const char *progname, int progmode);
-
 struct trigger;
 void trigger_init(void);
 void trigger_event(char *type, struct blob_attr *data);
 void trigger_add(struct blob_attr *rule, void *id);
 void trigger_del(void *id);
-
-struct pid_info {
-	char stat;
-	uint32_t ppid;
-	uint32_t fdcount;
-	uint32_t vmsize;
-	uint16_t uid;
-};
-int measure_process(pid_t pid, struct pid_info *pi);
 
 #endif

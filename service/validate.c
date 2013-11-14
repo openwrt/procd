@@ -14,7 +14,8 @@
 #include <libubox/blobmsg_json.h>
 #include <libubox/avl-cmp.h>
 
-#include "procd.h"
+#include "../procd.h"
+
 #include "service.h"
 
 enum {

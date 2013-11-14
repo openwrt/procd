@@ -28,7 +28,8 @@
 #include <stdlib.h>
 #include <libgen.h>
 
-#include "procd.h"
+#include "../procd.h"
+
 #include "hotplug.h"
 
 #define HOTPLUG_WAIT	500
@@ -137,7 +138,7 @@ static void handle_exec(struct blob_attr *msg, struct blob_attr *data)
 			break;
 	}
 
-	if (debug < 2) {
+	if (debug < 3) {
 		fd = open("/dev/null", O_RDWR);
 		if (fd > -1) {
 			dup2(fd, STDIN_FILENO);
@@ -165,7 +166,7 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 	char *path, loadpath[256], syspath[256];
 	int fw, load, sys, len;
 
-	DEBUG(1, "Firmware request for %s/%s\n", dir, file);
+	DEBUG(2, "Firmware request for %s/%s\n", dir, file);
 
 	if (!file || !dir || !dev) {
 		ERROR("Request for unknown firmware %s/%s\n", dir, file);
@@ -230,7 +231,7 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 	write(load, "0", 1);
 	close(load);
 
-	DEBUG(1, "Done loading %s\n", path);
+	DEBUG(2, "Done loading %s\n", path);
 
 	exit(-1);
 }
@@ -283,12 +284,12 @@ static void queue_next(void)
 
 	uloop_process_add(&queue_proc);
 
-	DEBUG(2, "Launched hotplug exec instance, pid=%d\n", (int) queue_proc.pid);
+	DEBUG(4, "Launched hotplug exec instance, pid=%d\n", (int) queue_proc.pid);
 }
 
 static void queue_proc_cb(struct uloop_process *c, int ret)
 {
-	DEBUG(2, "Finished hotplug exec instance, pid=%d\n", (int) c->pid);
+	DEBUG(4, "Finished hotplug exec instance, pid=%d\n", (int) c->pid);
 
 	queue_next();
 }
@@ -356,16 +357,16 @@ static void rule_handle_command(struct json_script_ctx *ctx, const char *name,
 	struct blob_attr *cur;
 	int rem, i;
 
-	if (debug > 1) {
-		DEBUG(2, "Command: %s", name);
+	if (debug > 3) {
+		DEBUG(4, "Command: %s", name);
 		blobmsg_for_each_attr(cur, data, rem)
-			DEBUG(2, " %s", (char *) blobmsg_data(cur));
-		DEBUG(2, "\n");
+			DEBUG(4, " %s", (char *) blobmsg_data(cur));
+		DEBUG(4, "\n");
 
-		DEBUG(2, "Message:");
+		DEBUG(4, "Message:");
 		blobmsg_for_each_attr(cur, vars, rem)
-			DEBUG(2, " %s=%s", blobmsg_name(cur), (char *) blobmsg_data(cur));
-		DEBUG(2, "\n");
+			DEBUG(4, " %s=%s", blobmsg_name(cur), (char *) blobmsg_data(cur));
+		DEBUG(4, "\n");
 	}
 
 	for (i = 0; i < ARRAY_SIZE(handlers); i++)
@@ -459,6 +460,15 @@ void hotplug(char *rules)
 	json_script_init(&jctx);
 	queue_proc.cb = queue_proc_cb;
 	uloop_fd_add(&hotplug_fd, ULOOP_READ);
+}
+
+int hotplug_run(char *rules)
+{
+	uloop_init();
+	hotplug(rules);
+	uloop_run();
+
+	return 0;
 }
 
 void hotplug_shutdown(void)

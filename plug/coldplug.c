@@ -18,21 +18,22 @@
 
 #include <unistd.h>
 
-#include "procd.h"
+#include "../procd.h"
+
 #include "hotplug.h"
 
 static struct uloop_process udevtrigger;
 
 static void coldplug_complete(struct uloop_timeout *t)
 {
-	DEBUG(2, "Coldplug complete\n");
+	DEBUG(4, "Coldplug complete\n");
 	hotplug_last_event(NULL);
 	procd_state_next();
 }
 
 static void udevtrigger_complete(struct uloop_process *proc, int ret)
 {
-	DEBUG(2, "Finished udevtrigger\n");
+	DEBUG(4, "Finished udevtrigger\n");
 	hotplug_last_event(coldplug_complete);
 }
 
@@ -61,5 +62,5 @@ void procd_coldplug(void)
 
 	uloop_process_add(&udevtrigger);
 
-	DEBUG(2, "Launched coldplug instance, pid=%d\n", (int) udevtrigger.pid);
+	DEBUG(4, "Launched coldplug instance, pid=%d\n", (int) udevtrigger.pid);
 }

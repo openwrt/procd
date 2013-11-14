@@ -19,8 +19,6 @@
 
 #include "procd.h"
 
-static int preinit;
-
 static void do_reboot(void)
 {
 	LOG("reboot\n");
@@ -36,9 +34,6 @@ static void signal_shutdown(int signal, siginfo_t *siginfo, void *data)
 {
 	int event = 0;
 	char *msg = NULL;
-
-	if (preinit)
-		do_reboot();
 
 	switch(signal) {
 	case SIGTERM:
@@ -96,12 +91,4 @@ void procd_signal(void)
 	sigaction(SIGHUP, &sa_dummy, NULL);
 	sigaction(SIGKILL, &sa_dummy, NULL);
 	sigaction(SIGSTOP, &sa_dummy, NULL);
-}
-
-void procd_signal_preinit(void)
-{
-	preinit = 1;
-	sigaction(SIGTERM, &sa_shutdown, NULL);
-	sigaction(SIGUSR1, &sa_shutdown, NULL);
-	sigaction(SIGUSR2, &sa_shutdown, NULL);
 }

@@ -18,9 +18,9 @@
 
 #include "procd.h"
 #include "syslog.h"
-#include "hotplug.h"
+#include "plug/hotplug.h"
 #include "watchdog.h"
-#include "service.h"
+#include "service/service.h"
 
 enum {
 	STATE_NONE = 0,
@@ -49,10 +49,13 @@ static void state_enter(void)
 	case STATE_INIT:
 		// try to reopen incase the wdt was not available before coldplug
 		watchdog_init(0);
-		LOG("- init -\n");
-		log_init();
+		LOG("- ubus -\n");
 		procd_connect_ubus();
+
+		LOG("- init -\n");
 		service_init();
+		service_start_early("ubus", "/sbin/ubusd");
+
 		procd_inittab();
 		procd_inittab_run("respawn");
 		procd_inittab_run("askconsole");
@@ -83,14 +86,14 @@ static void state_enter(void)
 
 void procd_state_next(void)
 {
-	DEBUG(2, "Change state %d -> %d\n", state, state + 1);
+	DEBUG(4, "Change state %d -> %d\n", state, state + 1);
 	state++;
 	state_enter();
 }
 
 void procd_shutdown(int event)
 {
-	DEBUG(1, "Shutting down system with event %x\n", event);
+	DEBUG(2, "Shutting down system with event %x\n", event);
 	reboot_event = event;
 	state = STATE_SHUTDOWN;
 	state_enter();

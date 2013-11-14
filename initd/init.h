@@ -1,5 +1,4 @@
 /*
- * Copyright (C) 2013 Felix Fietkau <nbd@openwrt.org>
  * Copyright (C) 2013 John Crispin <blogic@openwrt.org>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -12,13 +11,13 @@
  * GNU General Public License for more details.
  */
 
-#ifndef __PROCD_HOTPLUG_H
-#define __PROCD_HOTPLUG_H
+#ifndef _INIT_H__
+#define _INIT_H__
 
-#include <libubox/uloop.h>
+#include "../log.h"
 
-void hotplug(char *rules);
-void hotplug_shutdown(void);
-void hotplug_last_event(uloop_timeout_handler handler);
+void preinit(void);
+void early(void);
+int mkdev(const char *progname, int progmode);
 
 #endif

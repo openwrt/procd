@@ -55,7 +55,7 @@ static void pipe_cb(struct ustream *s, int bytes)
 			break;
 		*newline = 0;
 		len = newline + 1 - str;
-		log_printf(buf->data);
+		syslog(0, buf->data);
 		ustream_consume(s, len);
 	} while (1);
 }
@@ -66,7 +66,7 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 	int pipefd[2];
 	pid_t pid;
 
-	DEBUG(1, "start %s %s \n", s->file, s->param);
+	DEBUG(2, "start %s %s \n", s->file, s->param);
 	if (pipe(pipefd) == -1) {
 		ERROR("Failed to create pipe\n");
 		return;
@@ -96,7 +96,7 @@ static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 {
 	struct initd *s = container_of(p, struct initd, proc.task);
 
-	DEBUG(1, "stop %s %s \n", s->file, s->param);
+	DEBUG(2, "stop %s %s \n", s->file, s->param);
 	ustream_free(&s->fd.stream);
 	close(s->fd.fd.fd);
 	free(s);
@@ -126,10 +126,10 @@ static int _rc(struct runqueue *q, char *path, const char *file, char *pattern, 
 	int j;
 
 
-	DEBUG(1, "running %s/%s%s %s\n", path, file, pattern, param);
+	DEBUG(2, "running %s/%s%s %s\n", path, file, pattern, param);
 	snprintf(dir, sizeof(dir), "%s/%s%s", path, file, pattern);
 	if (glob(dir, GLOB_NOESCAPE | GLOB_MARK, NULL, &gl)) {
-		printf("glob failed on %s\n", dir);
+		DEBUG(2, "glob failed on %s\n", dir);
 		return -1;
 	}
 

@@ -1,13 +1,10 @@
 procd
-validate_data
-logread
 askfirst
 udevtrigger
+init
 .*
-*.so
 Makefile
 CMakeCache.txt
 CMakeFiles
 *.cmake
 install_manifest.txt
-

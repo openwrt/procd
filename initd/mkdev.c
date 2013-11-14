@@ -26,7 +26,9 @@
 #include <limits.h>
 #include <fnmatch.h>
 
-#include "procd.h"
+#include "init.h"
+
+#include "../log.h"
 
 static char **patterns;
 static int n_patterns;
@@ -50,7 +52,7 @@ static void make_dev(const char *path, bool block, int major, int minor)
 	unsigned int oldumask = umask(0);
 	unsigned int _mode = mode | (block ? S_IFBLK : S_IFCHR);
 
-	DEBUG(2, "Creating %s device %s(%d,%d)\n",
+	DEBUG(4, "Creating %s device %s(%d,%d)\n",
 		block ? "block" : "character",
 		path, major, minor);
 

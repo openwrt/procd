@@ -10,7 +10,9 @@ IF(APPLE)
   LINK_DIRECTORIES(/opt/local/lib)
 ENDIF()
 
-SET(SOURCES main.c ubus.c service.c service_validate.c instance.c utils.c md5.c hotplug.c state.c mkdev.c early.c inittab.c preinit.c coldplug.c syslog.c log.c watchdog.c signal.c system.c debug.c rcS.c trigger.c measure.c)
+SET(SOURCES procd.c signal.c watchdog.c state.c	inittab.c rcS.c	ubus.c system.c
+	service/service.c service/instance.c service/validate.c service/trigger.c
+	plug/coldplug.c plug/hotplug.c utils/utils.c utils/md5.c)
 
 find_library(json NAMES json-c json)
 SET(LIBS ubox ubus ${json} blobmsg_json json_script)
@@ -19,42 +21,28 @@ IF(DEBUG)
   ADD_DEFINITIONS(-DDEBUG -g3)
 ENDIF()
 
-ADD_LIBRARY(validate SHARED validate.c)
-
-INSTALL(TARGETS validate
-	LIBRARY DESTINATION lib
-)
 
 ADD_EXECUTABLE(procd ${SOURCES})
-
-TARGET_LINK_LIBRARIES(procd ${LIBS} validate)
-
+TARGET_LINK_LIBRARIES(procd ${LIBS})
 INSTALL(TARGETS procd
 	RUNTIME DESTINATION sbin
 )
 
-ADD_EXECUTABLE(askfirst askfirst.c)
 
-INSTALL(TARGETS askfirst
+ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c watchdog.c)
+TARGET_LINK_LIBRARIES(init ${LIBS})
+INSTALL(TARGETS init
 	RUNTIME DESTINATION sbin
 )
 
-ADD_EXECUTABLE(udevtrigger udevtrigger.c)
 
+ADD_EXECUTABLE(udevtrigger plug/udevtrigger.c)
 INSTALL(TARGETS udevtrigger
 	RUNTIME DESTINATION sbin
 )
 
-ADD_EXECUTABLE(logread logread.c)
-TARGET_LINK_LIBRARIES(logread ${LIBS})
 
-INSTALL(TARGETS logread
-	RUNTIME DESTINATION sbin
-)
-
-ADD_EXECUTABLE(validate_data validate_data.c)
-TARGET_LINK_LIBRARIES(validate_data ${LIBS} validate)
-
-INSTALL(TARGETS validate_data
+ADD_EXECUTABLE(askfirst utils/askfirst.c)
+INSTALL(TARGETS askfirst
 	RUNTIME DESTINATION sbin
 )

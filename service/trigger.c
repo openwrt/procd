@@ -30,7 +30,7 @@
 #include <stdlib.h>
 #include <libgen.h>
 
-#include "procd.h"
+#include "../procd.h"
 
 struct trigger {
 	struct list_head list;
@@ -84,7 +84,7 @@ static void q_job_run(struct runqueue *q, struct runqueue_task *t)
 {
 	struct job *j = container_of(t, struct job, proc.task);
 
-	DEBUG(2, "handle event %s\n", j->cmd->name);
+	DEBUG(4, "handle event %s\n", j->cmd->name);
 	j->cmd->handler(j, j->exec, j->env);
 }
 
@@ -150,7 +150,7 @@ static void handle_run_script(struct job *j, struct blob_attr *exec, struct blob
 		return;
 	}
 
-	if (debug < 2) {
+	if (debug < 3) {
 		close(STDIN_FILENO);
 		close(STDOUT_FILENO);
 		close(STDERR_FILENO);

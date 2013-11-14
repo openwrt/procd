@@ -19,10 +19,13 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdlib.h>
 
-#include "procd.h"
+#include "../log.h"
+#include "init.h"
 
-static void early_mounts(void)
+static void
+early_mounts(void)
 {
 	mount("proc", "/proc", "proc", MS_NOATIME, 0);
 	mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
@@ -39,13 +42,15 @@ static void early_mounts(void)
 	mount("devpts", "/dev/pts", "devpts", MS_NOATIME, "mode=600");
 }
 
-static void early_dev(void)
+static void
+early_dev(void)
 {
 	mkdev("*", 0600);
 	mknod("/dev/null", 0666, makedev(1, 3));
 }
 
-static void early_console(const char *dev)
+static void
+early_console(const char *dev)
 {
 	struct stat s;
 	int dd;
@@ -69,12 +74,14 @@ static void early_console(const char *dev)
 		close(dd);
 }
 
-static void early_env(void)
+static void
+early_env(void)
 {
 	setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
 }
 
-void procd_early(void)
+void
+early(void)
 {
 	if (getpid() != 1)
 		return;

@@ -25,7 +25,6 @@
 
 #include "procd.h"
 #include "watchdog.h"
-#include "hotplug.h"
 
 static struct blob_buf b;
 
@@ -189,12 +188,7 @@ static int system_upgrade(struct ubus_context *ctx, struct ubus_object *obj,
 			struct ubus_request_data *req, const char *method,
 			struct blob_attr *msg)
 {
-	procd_reconnect_ubus(0);
-	log_shutdown();
-	hotplug_shutdown();
-
 	upgrade_running = 1;
-
 	return 0;
 }
 

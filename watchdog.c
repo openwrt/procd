@@ -34,7 +34,7 @@ static int wdt_frequency = 5;
 
 static void watchdog_timeout_cb(struct uloop_timeout *t)
 {
-	DEBUG(2, "Ping\n");
+	DEBUG(4, "Ping\n");
 	if (write(wdt_fd, "X", 1) < 0)
 		ERROR("WDT failed to write: %s\n", strerror(errno));
 	uloop_timeout_set(t, wdt_frequency * 1000);
@@ -59,7 +59,7 @@ int watchdog_timeout(int timeout)
 		return 0;
 
 	if (timeout) {
-		DEBUG(2, "Set watchdog timeout: %ds\n", timeout);
+		DEBUG(4, "Set watchdog timeout: %ds\n", timeout);
 		ioctl(wdt_fd, WDIOC_SETTIMEOUT, &timeout);
 	}
 	ioctl(wdt_fd, WDIOC_GETTIMEOUT, &timeout);
@@ -73,7 +73,7 @@ int watchdog_frequency(int frequency)
 		return 0;
 
 	if (frequency) {
-		DEBUG(2, "Set watchdog frequency: %ds\n", frequency);
+		DEBUG(4, "Set watchdog frequency: %ds\n", frequency);
 		wdt_frequency = frequency;
 	}
 
@@ -100,7 +100,7 @@ void watchdog_init(int preinit)
 
 	wdt_timeout.cb = watchdog_timeout_cb;
 	if (env) {
-		DEBUG(1, "Watchdog handover: fd=%s\n", env);
+		DEBUG(2, "Watchdog handover: fd=%s\n", env);
 		wdt_fd = atoi(env);
 		unsetenv("WDTFD");
 	} else {
@@ -117,5 +117,5 @@ void watchdog_init(int preinit)
 	watchdog_timeout(30);
 	watchdog_timeout_cb(&wdt_timeout);
 
-	DEBUG(2, "Opened watchdog with timeout %ds\n", watchdog_timeout(0));
+	DEBUG(4, "Opened watchdog with timeout %ds\n", watchdog_timeout(0));
 }

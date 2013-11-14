@@ -14,10 +14,13 @@
 
 #include <libubox/blobmsg_json.h>
 #include <libubox/avl-cmp.h>
-#include "procd.h"
+
+#include "../procd.h"
+
 #include "service.h"
 #include "instance.h"
-#include "rcS.h"
+
+#include "../rcS.h"
 
 struct avl_tree services;
 static struct blob_buf b;
@@ -51,15 +54,15 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		in_n = container_of(node_new, struct service_instance, node);
 
 	if (in_o && in_n) {
-		DEBUG(1, "Update instance %s::%s\n", in_o->srv->name, in_o->name);
+		DEBUG(2, "Update instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_update(in_o, in_n);
 		instance_free(in_n);
 	} else if (in_o) {
-		DEBUG(1, "Free instance %s::%s\n", in_o->srv->name, in_o->name);
+		DEBUG(2, "Free instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_stop(in_o);
 		instance_free(in_o);
 	} else if (in_n) {
-		DEBUG(1, "Create instance %s::%s\n", in_n->srv->name, in_n->name);
+		DEBUG(2, "Create instance %s::%s\n", in_n->srv->name, in_n->name);
 		instance_start(in_n);
 	}
 }
@@ -226,11 +229,11 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	s = avl_find_element(&services, name, s, avl);
 	if (s) {
-		DEBUG(1, "Update service %s\n", name);
+		DEBUG(2, "Update service %s\n", name);
 		return service_update(s, msg, tb, add);
 	}
 
-	DEBUG(1, "Create service %s\n", name);
+	DEBUG(2, "Create service %s\n", name);
 	s = service_alloc(name);
 	if (!s)
 		return UBUS_STATUS_UNKNOWN_ERROR;
@@ -424,6 +427,34 @@ static struct ubus_object main_object = {
 	.methods = main_object_methods,
 	.n_methods = ARRAY_SIZE(main_object_methods),
 };
+
+int
+service_start_early(char *name, char *cmdline)
+{
+	void *instances, *instance, *command, *respawn;
+	char *t;
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "name", name);
+	instances = blobmsg_open_table(&b, "instances");
+	instance = blobmsg_open_table(&b, "instance1");
+	command = blobmsg_open_array(&b, "command");
+	t = strtok(cmdline, " ");
+	while (t) {
+		blobmsg_add_string(&b, NULL, t);
+		t = strtok(NULL, " ");
+	}
+	blobmsg_close_array(&b, command);
+	respawn = blobmsg_open_array(&b, "respawn");
+	blobmsg_add_string(&b, NULL, "1");
+	blobmsg_add_string(&b, NULL, "3600");
+	blobmsg_add_string(&b, NULL, "10");
+	blobmsg_close_array(&b, respawn);
+	blobmsg_close_table(&b, instance);
+	blobmsg_close_table(&b, instances);
+
+	return service_handle_set(NULL, NULL, NULL, "add", b.head);
+}
 
 void ubus_init_service(struct ubus_context *ctx)
 {

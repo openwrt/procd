@@ -21,43 +21,30 @@
 #include <libgen.h>
 
 #include "procd.h"
-#include "hotplug.h"
 #include "watchdog.h"
+#include "plug/hotplug.h"
+
+unsigned int debug;
 
 static int usage(const char *prog)
 {
 	ERROR("Usage: %s [options]\n"
 		"Options:\n"
-		"    -s <path>:		Path to ubus socket\n"
-		"    -d:		Enable debug messages\n"
+		"\t-s <path>\tPath to ubus socket\n"
+		"\t-h <path>\trun as hotplug daemon\n"
+		"\td\t\tEnable debug messages\n"
 		"\n", prog);
 	return 1;
-}
-
-
-static int main_procd_init(int argc, char **argv)
-{
-	procd_signal_preinit();
-	procd_early();
-	debug_init();
-	watchdog_init(1);
-	system("/sbin/kmodloader /etc/modules-boot.d/");
-	uloop_init();
-	hotplug("/etc/hotplug-preinit.json");
-	procd_preinit();
-	uloop_run();
-	return 0;
 }
 
 int main(int argc, char **argv)
 {
 	int ch;
 
-	if (!strcmp(basename(*argv), "init"))
-		return main_procd_init(argc, argv);
-
-	while ((ch = getopt(argc, argv, "ds:")) != -1) {
+	while ((ch = getopt(argc, argv, "ds:h:")) != -1) {
 		switch (ch) {
+		case 'h':
+			return hotplug_run(optarg);
 		case 's':
 			ubus_socket = optarg;
 			break;

@@ -20,10 +20,12 @@
 #include <stdint.h>
 #include <fcntl.h>
 
-#include "procd.h"
+#include "../procd.h"
+
 #include "service.h"
 #include "instance.h"
-#include "md5.h"
+
+#include "../utils/md5.h"
 
 enum {
 	INSTANCE_ATTR_COMMAND,
@@ -119,7 +121,7 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
-	DEBUG(1, "Started instance %s::%s\n", in->srv->name, in->name);
+	DEBUG(2, "Started instance %s::%s\n", in->srv->name, in->name);
 	in->proc.pid = pid;
 	clock_gettime(CLOCK_MONOTONIC, &in->start);
 	uloop_process_add(&in->proc);
@@ -148,7 +150,7 @@ instance_exit(struct uloop_process *p, int ret)
 	clock_gettime(CLOCK_MONOTONIC, &tp);
 	runtime = tp.tv_sec - in->start.tv_sec;
 
-	DEBUG(1, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
+	DEBUG(2, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
 	if (upgrade_running)
 		return;
 
@@ -448,7 +450,6 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 {
 	void *i;
-	struct pid_info pi;
 
 	i = blobmsg_open_table(b, in->name);
 	blobmsg_add_u8(b, "running", in->proc.pending);
@@ -474,18 +475,6 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 
 	if (verbose && in->trigger)
 		blobmsg_add_blob(b, in->trigger);
-	if (!measure_process(in->proc.pid, &pi)) {
-		struct timespec tp;
-		long uptime;
 
-		clock_gettime(CLOCK_MONOTONIC, &tp);
-		uptime = tp.tv_sec - in->start.tv_sec;
-
-		blobmsg_add_u8(b, "ppid", pi.ppid);
-		blobmsg_add_u16(b, "uid", pi.uid);
-		blobmsg_add_u32(b, "fdcount", pi.fdcount);
-		blobmsg_add_u32(b, "vmsize", pi.vmsize);
-		blobmsg_add_u32(b, "uptime", uptime);
-	}
 	blobmsg_close_table(b, i);
 }

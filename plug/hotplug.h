@@ -12,32 +12,14 @@
  * GNU General Public License for more details.
  */
 
-#ifndef __SYSLOG_H
-#define __SYSLOG_H
+#ifndef __PROCD_HOTPLUG_H
+#define __PROCD_HOTPLUG_H
 
-enum {
-	SOURCE_KLOG = 0,
-	SOURCE_SYSLOG = 1,
-	SOURCE_INTERNAL = 2,
-	SOURCE_ANY = 0xff,
-};
+#include <libubox/uloop.h>
 
-struct log_head {
-	unsigned int size;
-	unsigned int id;
-	int priority;
-	int source;
-        struct timespec ts;
-	char data[];
-};
-
-void log_init(void);
-void log_shutdown(void);
-
-typedef void (*log_list_cb)(struct log_head *h);
-struct log_head* log_list(int count, struct log_head *h);
-int log_buffer_init(int size);
-void log_add(char *buf, int size, int source);
-void log_printf(char *fmt, ...);
+void hotplug(char *rules);
+int hotplug_run(char *rules);
+void hotplug_shutdown(void);
+void hotplug_last_event(uloop_timeout_handler handler);
 
 #endif

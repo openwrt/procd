@@ -72,7 +72,7 @@ static void fork_worker(struct init_action *a)
 	}
 
 	if (a->proc.pid > 0) {
-		DEBUG(2, "Launched new %s action, pid=%d\n",
+		DEBUG(4, "Launched new %s action, pid=%d\n",
 					a->handler->name,
 					(int) a->proc.pid);
 		uloop_process_add(&a->proc);
@@ -83,7 +83,7 @@ static void child_exit(struct uloop_process *proc, int ret)
 {
 	struct init_action *a = container_of(proc, struct init_action, proc);
 
-	DEBUG(2, "pid:%d\n", proc->pid);
+	DEBUG(4, "pid:%d\n", proc->pid);
         uloop_timeout_set(&a->tout, a->respawn);
 }
 
@@ -116,7 +116,7 @@ static void askfirst(struct init_action *a)
 	i = stat(a->id, &s);
 	chdir("/");
 	if (i || (console && !strcmp(console, a->id))) {
-		DEBUG(2, "Skipping %s\n", a->id);
+		DEBUG(4, "Skipping %s\n", a->id);
 		return;
 	}
 
@@ -156,7 +156,7 @@ static void askconsole(struct init_action *a)
 	i = stat(tty, &s);
 	chdir("/");
 	if (i) {
-		DEBUG(2, "skipping %s\n", tty);
+		DEBUG(4, "skipping %s\n", tty);
 		goto err_out;
 	}
 	console = strdup(tty);
@@ -265,7 +265,7 @@ void procd_inittab(void)
 		if (regexec(&pat_inittab, line, 5, matches, 0))
 			continue;
 
-		DEBUG(2, "Parsing inittab - %s", line);
+		DEBUG(4, "Parsing inittab - %s", line);
 
 		for (i = TAG_ID; i <= TAG_PROCESS; i++) {
 			line[matches[i].rm_eo] = '\0';
