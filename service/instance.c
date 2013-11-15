@@ -164,7 +164,7 @@ instance_exit(struct uloop_process *p, int ret)
 			in->respawn_count++;
 		else
 			in->respawn_count = 0;
-		if (in->respawn_count > in->respawn_retry) {
+		if (in->respawn_count > in->respawn_retry && in->respawn_retry > 0 ) {
 			LOG("Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
 								in->srv->name, in->name, in->respawn_count, runtime);
 			in->restart = in->respawn = 0;
