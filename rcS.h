@@ -19,5 +19,6 @@
 
 extern int rcS(char *pattern, char *param, void (*q_empty)(struct runqueue *));
 extern int rc(const char *file, char *param);
+extern int rcnow(const char *file, char *param);
 
 #endif

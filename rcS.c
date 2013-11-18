@@ -102,7 +102,7 @@ static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 	free(s);
 }
 
-static void add_initd(struct runqueue *q, char *file, char *param)
+static void add_initd(struct runqueue *q, char *file, char *param, int first)
 {
 	static const struct runqueue_task_type initd_type = {
 		.run = q_initd_run,
@@ -116,7 +116,10 @@ static void add_initd(struct runqueue *q, char *file, char *param)
 	s->proc.task.complete = q_initd_complete;
 	s->param = param;
 	s->file = file;
-	runqueue_task_add(q, &s->proc.task, false);
+	if (first)
+		runqueue_task_add_first(q, &s->proc.task, false);
+	else
+		runqueue_task_add(q, &s->proc.task, false);
 }
 
 static int _rc(struct runqueue *q, char *path, const char *file, char *pattern, char *param)
@@ -134,7 +137,7 @@ static int _rc(struct runqueue *q, char *path, const char *file, char *pattern, 
 	}
 
 	for (j = 0; j < gl.gl_pathc; j++)
-		add_initd(q, gl.gl_pathv[j], param);
+		add_initd(q, gl.gl_pathv[j], param, 0);
 
 	return 0;
 }
@@ -151,6 +154,16 @@ int rcS(char *pattern, char *param, void (*q_empty)(struct runqueue *))
 int rc(const char *file, char *param)
 {
 	return _rc(&r, "/etc/init.d", file, "", param);
+}
+
+int rcnow(const char *file, char *param)
+{
+	char path[64] = { 0 };
+
+	snprintf(path, sizeof(path), "/etc/init.d/%s", file);
+	add_initd(&r, path, param, 0);
+
+	return 0;
 }
 
 static void r_empty(struct runqueue *q)
