@@ -27,6 +27,8 @@
 #include "watchdog.h"
 
 static struct blob_buf b;
+static int notify;
+static struct ubus_context *_ctx;
 
 int upgrade_running = 0;
 
@@ -284,6 +286,12 @@ static int proc_signal(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+static void
+procd_subscribe_cb(struct ubus_context *ctx, struct ubus_object *obj)
+{
+	notify = obj->has_subscribers;
+}
+
 static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("board", system_board),
 	UBUS_METHOD_NOARG("info",  system_info),
@@ -300,12 +308,27 @@ static struct ubus_object system_object = {
 	.type = &system_object_type,
 	.methods = system_methods,
 	.n_methods = ARRAY_SIZE(system_methods),
+	.subscribe_cb = procd_subscribe_cb,
 };
+
+void
+procd_bcast_event(char *event, struct blob_attr *msg)
+{
+	int ret;
+
+	if (!notify)
+		return;
+
+	ret = ubus_notify(_ctx, &system_object, event, msg, -1);
+	if (ret)
+		fprintf(stderr, "Failed to notify log: %s\n", ubus_strerror(ret));
+}
 
 void ubus_init_system(struct ubus_context *ctx)
 {
 	int ret;
 
+	_ctx = ctx;
 	ret = ubus_add_object(ctx, &system_object);
 	if (ret)
 		ERROR("Failed to add object: %s\n", ubus_strerror(ret));
