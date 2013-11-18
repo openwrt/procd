@@ -139,7 +139,7 @@ service_update(struct service *s, struct blob_attr *config, struct blob_attr **t
 			vlist_flush(&s->instances);
 	}
 
-	rc(s->name, "running");
+	rcnow(s->name, "running");
 
 	return 0;
 }
