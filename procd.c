@@ -32,7 +32,7 @@ static int usage(const char *prog)
 		"Options:\n"
 		"\t-s <path>\tPath to ubus socket\n"
 		"\t-h <path>\trun as hotplug daemon\n"
-		"\td\t\tEnable debug messages\n"
+		"\t-d <level>\tEnable debug messages\n"
 		"\n", prog);
 	return 1;
 }
@@ -41,7 +41,7 @@ int main(int argc, char **argv)
 {
 	int ch;
 
-	while ((ch = getopt(argc, argv, "ds:h:")) != -1) {
+	while ((ch = getopt(argc, argv, "d:s:h:")) != -1) {
 		switch (ch) {
 		case 'h':
 			return hotplug_run(optarg);
@@ -49,7 +49,7 @@ int main(int argc, char **argv)
 			ubus_socket = optarg;
 			break;
 		case 'd':
-			debug++;
+			debug = atoi(optarg);
 			break;
 		default:
 			return usage(argv[0]);

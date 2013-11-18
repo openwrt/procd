@@ -34,7 +34,7 @@ static void
 spawn_procd(struct uloop_process *proc, int ret)
 {
 	char *wdt_fd = watchdog_fd();
-	char *argv[] = { "/sbin/procd", NULL };
+	char *argv[] = { "/sbin/procd", "-d", "0", NULL };
 	struct stat s;
 
 	if (plugd_proc.pid > 0)
@@ -49,6 +49,10 @@ spawn_procd(struct uloop_process *proc, int ret)
 	DEBUG(2, "Exec to real procd now\n");
 	if (wdt_fd)
 		setenv("WDTFD", wdt_fd, 1);
+	if (debug)
+		snprintf(argv[2], 2, "%d", debug & 0xf);
+	else
+		argv[1] = NULL;
 	execvp(argv[0], argv);
 }
 
