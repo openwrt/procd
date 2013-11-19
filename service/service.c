@@ -446,9 +446,9 @@ service_start_early(char *name, char *cmdline)
 	}
 	blobmsg_close_array(&b, command);
 	respawn = blobmsg_open_array(&b, "respawn");
-	blobmsg_add_string(&b, NULL, "1");
 	blobmsg_add_string(&b, NULL, "3600");
-	blobmsg_add_string(&b, NULL, "10");
+	blobmsg_add_string(&b, NULL, "1");
+	blobmsg_add_string(&b, NULL, "0");
 	blobmsg_close_array(&b, respawn);
 	blobmsg_close_table(&b, instance);
 	blobmsg_close_table(&b, instances);
