@@ -12,7 +12,7 @@ ENDIF()
 
 SET(SOURCES procd.c signal.c watchdog.c state.c	inittab.c rcS.c	ubus.c system.c
 	service/service.c service/instance.c service/validate.c service/trigger.c
-	plug/coldplug.c plug/hotplug.c utils/utils.c utils/md5.c)
+	plug/coldplug.c plug/hotplug.c utils/utils.c)
 
 find_library(json NAMES json-c json)
 SET(LIBS ubox ubus ${json} blobmsg_json json_script)

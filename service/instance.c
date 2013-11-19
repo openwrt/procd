@@ -20,12 +20,13 @@
 #include <stdint.h>
 #include <fcntl.h>
 
+#include <libubox/md5.h>
+
 #include "../procd.h"
 
 #include "service.h"
 #include "instance.h"
 
-#include "../utils/md5.h"
 
 enum {
 	INSTANCE_ATTR_COMMAND,
