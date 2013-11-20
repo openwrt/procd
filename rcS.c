@@ -102,7 +102,7 @@ static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 	free(s);
 }
 
-static void add_initd(struct runqueue *q, char *file, char *param, int first)
+static void add_initd(struct runqueue *q, char *file, char *param)
 {
 	static const struct runqueue_task_type initd_type = {
 		.run = q_initd_run,
@@ -110,34 +110,35 @@ static void add_initd(struct runqueue *q, char *file, char *param, int first)
 		.kill = runqueue_process_kill_cb,
 	};
 	struct initd *s;
+	char *p, *f;
 
-	s = calloc(1, sizeof(*s));
+	s = calloc_a(sizeof(*s), &f, strlen(file) + 1, &p, strlen(param) + 1);
 	s->proc.task.type = &initd_type;
 	s->proc.task.complete = q_initd_complete;
-	s->param = param;
-	s->file = file;
-	if (first)
-		runqueue_task_add_first(q, &s->proc.task, false);
-	else
-		runqueue_task_add(q, &s->proc.task, false);
+	s->param = p;
+	s->file = f;
+	strcpy(s->param, param);
+	strcpy(s->file, file);
+	runqueue_task_add(q, &s->proc.task, false);
 }
 
 static int _rc(struct runqueue *q, char *path, const char *file, char *pattern, char *param)
 {
-	char dir[64];
+	char *dir = alloca(2 + strlen(path) + strlen(file) + strlen(pattern));
 	glob_t gl;
 	int j;
 
-
 	DEBUG(2, "running %s/%s%s %s\n", path, file, pattern, param);
-	snprintf(dir, sizeof(dir), "%s/%s%s", path, file, pattern);
+	sprintf(dir, "%s/%s%s", path, file, pattern);
 	if (glob(dir, GLOB_NOESCAPE | GLOB_MARK, NULL, &gl)) {
 		DEBUG(2, "glob failed on %s\n", dir);
 		return -1;
 	}
 
 	for (j = 0; j < gl.gl_pathc; j++)
-		add_initd(q, gl.gl_pathv[j], param, 0);
+		add_initd(q, gl.gl_pathv[j], param);
+
+	globfree(&gl);
 
 	return 0;
 }
@@ -156,23 +157,13 @@ int rc(const char *file, char *param)
 	return _rc(&r, "/etc/init.d", file, "", param);
 }
 
-int rcnow(const char *file, char *param)
-{
-	char path[64] = { 0 };
-
-	snprintf(path, sizeof(path), "/etc/init.d/%s", file);
-	add_initd(&r, path, param, 0);
-
-	return 0;
-}
-
 static void r_empty(struct runqueue *q)
 {
 
 }
 
-static void __attribute__((constructor)) measure_init() {
+static void __attribute__((constructor)) rc_init() {
 	runqueue_init(&r);
 	r.empty_cb = r_empty;
-	r.max_running_tasks = 1;
+	r.max_running_tasks = 8;
 }
