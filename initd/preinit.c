@@ -31,11 +31,28 @@ static struct uloop_process preinit_proc;
 static struct uloop_process plugd_proc;
 
 static void
+check_dbglvl(void)
+{
+	FILE *fp = fopen("/tmp/debug_level", "r");
+	int lvl = 0;
+
+	if (!fp)
+		return;
+	fscanf(fp, "%d", &lvl);
+	fclose(fp);
+	unlink("/tmp/debug_level");
+
+	if (lvl > 0 && lvl < 5)
+		debug = lvl;
+}
+
+static void
 spawn_procd(struct uloop_process *proc, int ret)
 {
 	char *wdt_fd = watchdog_fd();
-	char *argv[] = { "/sbin/procd", "-d", "0", NULL };
+	char *argv[] = { "/sbin/procd", NULL};
 	struct stat s;
+	char dbg[2];
 
 	if (plugd_proc.pid > 0)
 		kill(plugd_proc.pid, SIGKILL);
@@ -49,10 +66,12 @@ spawn_procd(struct uloop_process *proc, int ret)
 	DEBUG(2, "Exec to real procd now\n");
 	if (wdt_fd)
 		setenv("WDTFD", wdt_fd, 1);
-	if (debug)
-		snprintf(argv[2], 2, "%d", debug & 0xf);
-	else
-		argv[1] = NULL;
+	check_dbglvl();
+	if (debug > 0) {
+		snprintf(dbg, 2, "%d", debug);
+		setenv("DBGLVL", dbg, 1);
+	}
+
 	execvp(argv[0], argv);
 }
 

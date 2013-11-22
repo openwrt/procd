@@ -40,6 +40,12 @@ static int usage(const char *prog)
 int main(int argc, char **argv)
 {
 	int ch;
+	char *dbglvl = getenv("DBGLVL");
+
+	if (dbglvl) {
+		debug = atoi(dbglvl);
+		unsetenv("DBGLVL");
+	}
 
 	while ((ch = getopt(argc, argv, "d:s:h:")) != -1) {
 		switch (ch) {
