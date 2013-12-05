@@ -37,6 +37,7 @@ enum {
 	INSTANCE_ATTR_TRIGGER,
 	INSTANCE_ATTR_RESPAWN,
 	INSTANCE_ATTR_NICE,
+	INSTANCE_ATTR_LIMITS,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -49,6 +50,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_TRIGGER] = { "triggers", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_RESPAWN] = { "respawn", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
+	[INSTANCE_ATTR_LIMITS] = { "limits", BLOBMSG_TYPE_TABLE },
 };
 
 struct instance_netdev {
@@ -60,6 +62,50 @@ struct instance_file {
 	struct blobmsg_list_node node;
 	uint32_t md5[4];
 };
+
+struct rlimit_name {
+	const char *name;
+	int resource;
+};
+
+static const struct rlimit_name rlimit_names[] = {
+	{ "as", RLIMIT_AS },
+	{ "core", RLIMIT_CORE },
+	{ "cpu", RLIMIT_CPU },
+	{ "data", RLIMIT_DATA },
+	{ "fsize", RLIMIT_FSIZE },
+	{ "memlock", RLIMIT_MEMLOCK },
+	{ "msgqueue", RLIMIT_MSGQUEUE },
+	{ "nice", RLIMIT_NICE },
+	{ "nofile", RLIMIT_NOFILE },
+	{ "nproc", RLIMIT_NPROC },
+	{ "rss", RLIMIT_RSS },
+	{ "rtprio", RLIMIT_RTPRIO },
+	{ "sigpending", RLIMIT_SIGPENDING },
+	{ "stack", RLIMIT_STACK },
+	{ NULL, 0 }
+};
+
+static void
+instance_limits(const char *limit, const char *value)
+{
+	int i;
+	struct rlimit rlim;
+
+	for (i = 0; rlimit_names[i].name != NULL; i++) {
+		if (strcmp(rlimit_names[i].name, limit))
+			continue;
+		if (!strcmp(value, "unlimited")) {
+			rlim.rlim_cur = RLIM_INFINITY;
+			rlim.rlim_max = RLIM_INFINITY;
+		}
+		else if (getrlimit(rlimit_names[i].resource, &rlim) ||
+			 sscanf(value, "%lu %lu", &rlim.rlim_cur, &rlim.rlim_max) == 0)
+			return;
+		setrlimit(rlimit_names[i].resource, &rlim);
+		return;
+	}
+}
 
 static void
 instance_run(struct service_instance *in)
@@ -78,6 +124,9 @@ instance_run(struct service_instance *in)
 
 	blobmsg_list_for_each(&in->env, var)
 		setenv(blobmsg_name(var->data), blobmsg_data(var->data), 1);
+
+	blobmsg_list_for_each(&in->limits, var)
+		instance_limits(blobmsg_name(var->data), blobmsg_data(var->data));
 
 	argv = alloca(sizeof(char *) * argc);
 	argc = 0;
@@ -218,6 +267,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 
 	if (in->nice != in_new->nice)
+		return true;
+
+	if (!blobmsg_list_equal(&in->limits, &in_new->limits))
 		return true;
 
 	return false;
@@ -370,6 +422,9 @@ instance_config_parse(struct service_instance *in)
 	if (!instance_fill_array(&in->file, tb[INSTANCE_ATTR_FILE], instance_file_update, true))
 		return false;
 
+	if (!instance_fill_array(&in->limits, tb[INSTANCE_ATTR_LIMITS], NULL, false))
+		return false;
+
 	return true;
 }
 
@@ -379,6 +434,7 @@ instance_config_cleanup(struct service_instance *in)
 	blobmsg_list_free(&in->env);
 	blobmsg_list_free(&in->data);
 	blobmsg_list_free(&in->netdev);
+	blobmsg_list_free(&in->limits);
 }
 
 static void
@@ -388,6 +444,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	blobmsg_list_move(&in->env, &in_src->env);
 	blobmsg_list_move(&in->data, &in_src->data);
 	blobmsg_list_move(&in->netdev, &in_src->netdev);
+	blobmsg_list_move(&in->limits, &in_src->limits);
 	in->trigger = in_src->trigger;
 	in->command = in_src->command;
 	in->name = in_src->name;
@@ -445,6 +502,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	blobmsg_list_init(&in->file, struct instance_file, node, instance_file_cmp);
 	blobmsg_list_simple_init(&in->env);
 	blobmsg_list_simple_init(&in->data);
+	blobmsg_list_simple_init(&in->limits);
 	in->valid = instance_config_parse(in);
 }
 
@@ -462,6 +520,14 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		struct blobmsg_list_node *var;
 		void *e = blobmsg_open_table(b, "env");
 		blobmsg_list_for_each(&in->env, var)
+			blobmsg_add_string(b, blobmsg_name(var->data), blobmsg_data(var->data));
+		blobmsg_close_table(b, e);
+	}
+
+	if (!avl_is_empty(&in->limits.avl)) {
+		struct blobmsg_list_node *var;
+		void *e = blobmsg_open_table(b, "limits");
+		blobmsg_list_for_each(&in->limits, var)
 			blobmsg_add_string(b, blobmsg_name(var->data), blobmsg_data(var->data));
 		blobmsg_close_table(b, e);
 	}
