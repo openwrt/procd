@@ -263,7 +263,7 @@ enum {
 	__SIGNAL_MAX
 };
 
-static const struct blobmsg_policy signal_policy[__WDT_MAX] = {
+static const struct blobmsg_policy signal_policy[__SIGNAL_MAX] = {
 	[SIGNAL_PID] = { .name = "pid", .type = BLOBMSG_TYPE_INT32 },
 	[SIGNAL_NUM] = { .name = "signum", .type = BLOBMSG_TYPE_INT32 },
 };
