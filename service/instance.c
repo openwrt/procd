@@ -434,6 +434,7 @@ instance_config_cleanup(struct service_instance *in)
 	blobmsg_list_free(&in->env);
 	blobmsg_list_free(&in->data);
 	blobmsg_list_free(&in->netdev);
+	blobmsg_list_free(&in->file);
 	blobmsg_list_free(&in->limits);
 }
 
@@ -444,6 +445,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	blobmsg_list_move(&in->env, &in_src->env);
 	blobmsg_list_move(&in->data, &in_src->data);
 	blobmsg_list_move(&in->netdev, &in_src->netdev);
+	blobmsg_list_move(&in->file, &in_src->file);
 	blobmsg_list_move(&in->limits, &in_src->limits);
 	in->trigger = in_src->trigger;
 	in->command = in_src->command;
