@@ -37,6 +37,7 @@ static int reboot_event;
 
 static void state_enter(void)
 {
+	char ubus_cmd[] = "/sbin/ubusd";
 
 	switch (state) {
 	case STATE_EARLY:
@@ -54,7 +55,7 @@ static void state_enter(void)
 
 		LOG("- init -\n");
 		service_init();
-		service_start_early("ubus", "/sbin/ubusd");
+		service_start_early("ubus", ubus_cmd);
 
 		procd_inittab();
 		procd_inittab_run("respawn");
