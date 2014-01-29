@@ -259,15 +259,12 @@ service_dump(struct service *s, int verbose)
 
 	c = blobmsg_open_table(&b, s->name);
 
-	if (avl_is_empty(&s->instances.avl)) {
-		blobmsg_close_table(&b, c);
-		return;
+	if (!avl_is_empty(&s->instances.avl)) {
+		i = blobmsg_open_table(&b, "instances");
+		vlist_for_each_element(&s->instances, in, node)
+			instance_dump(&b, in, verbose);
+		blobmsg_close_table(&b, i);
 	}
-
-	i = blobmsg_open_table(&b, "instances");
-	vlist_for_each_element(&s->instances, in, node)
-		instance_dump(&b, in, verbose);
-	blobmsg_close_table(&b, i);
 	if (verbose && s->trigger)
 		blobmsg_add_blob(&b, s->trigger);
 	if (verbose && !list_empty(&s->validators))
