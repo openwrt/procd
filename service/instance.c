@@ -91,6 +91,7 @@ instance_limits(const char *limit, const char *value)
 {
 	int i;
 	struct rlimit rlim;
+	unsigned long cur, max;
 
 	for (i = 0; rlimit_names[i].name != NULL; i++) {
 		if (strcmp(rlimit_names[i].name, limit))
@@ -98,10 +99,20 @@ instance_limits(const char *limit, const char *value)
 		if (!strcmp(value, "unlimited")) {
 			rlim.rlim_cur = RLIM_INFINITY;
 			rlim.rlim_max = RLIM_INFINITY;
+		} else {
+			if (getrlimit(rlimit_names[i].resource, &rlim))
+				return;
+
+			cur = rlim.rlim_cur;
+			max = rlim.rlim_max;
+
+			if (sscanf(value, "%lu %lu", &cur, &max) < 1)
+				return;
+
+			rlim.rlim_cur = cur;
+			rlim.rlim_max = max;
 		}
-		else if (getrlimit(rlimit_names[i].resource, &rlim) ||
-			 sscanf(value, "%lu %lu", &rlim.rlim_cur, &rlim.rlim_max) == 0)
-			return;
+
 		setrlimit(rlimit_names[i].resource, &rlim);
 		return;
 	}
