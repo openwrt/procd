@@ -42,7 +42,6 @@ struct initd {
 
 static void pipe_cb(struct ustream *s, int bytes)
 {
-	struct ustream_buf *buf = s->r.head;
 	char *newline, *str;
 	int len;
 
@@ -50,12 +49,12 @@ static void pipe_cb(struct ustream *s, int bytes)
 		str = ustream_get_read_buf(s, NULL);
 		if (!str)
 			break;
-		newline = strchr(buf->data, '\n');
+		newline = strchr(str, '\n');
 		if (!newline)
 			break;
 		*newline = 0;
 		len = newline + 1 - str;
-		syslog(0, buf->data);
+		syslog(0, str);
 		ustream_consume(s, len);
 	} while (1);
 }
