@@ -249,7 +249,7 @@ void procd_inittab(void)
 		return;
 	}
 
-	regcomp(&pat_inittab, "([a-zA-Z0-9]*):([a-zA-Z0-9]*):([a-zA-Z0-9]*):([a-zA-Z0-9/[.-.]. ]*)", REG_EXTENDED);
+	regcomp(&pat_inittab, "([a-zA-Z0-9]*):([a-zA-Z0-9]*):([a-zA-Z0-9]*):(.*)", REG_EXTENDED);
 	line = malloc(LINE_LEN);
 	a = malloc(sizeof(struct init_action));
 	memset(a, 0, sizeof(struct init_action));
