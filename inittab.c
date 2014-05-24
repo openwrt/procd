@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <regex.h>
+#include <ctype.h>
 
 #include <libubox/utils.h>
 #include <libubox/list.h>
@@ -258,6 +259,11 @@ void procd_inittab(void)
 		char *tags[TAG_PROCESS + 1];
 		char *tok;
 		int i;
+		int len = strlen(line);
+
+		while (isspace(line[len - 1]))
+			len--;
+		line[len] = 0;
 
 		if (*line == '#')
 			continue;
