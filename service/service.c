@@ -149,7 +149,6 @@ service_delete(struct service *s)
 	vlist_flush_all(&s->instances);
 	avl_delete(&services, &s->avl);
 	trigger_del(s);
-	s->trigger = NULL;
 	free(s->trigger);
 	free(s);
 	service_validate_del(s);
