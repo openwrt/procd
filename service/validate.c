@@ -66,6 +66,7 @@ service_validate_dump_all(struct blob_buf *b, char *p, char *s)
 			json_object_object_add(t, vr->option, json_object_new_string(vr->rule));
 	}
 	blobmsg_add_object(b, r);
+	json_object_put(r);
 }
 
 void
