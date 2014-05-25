@@ -323,8 +323,7 @@ void trigger_event(char *type, struct blob_attr *data)
 			continue;
 		if (!strcmp(t->type, type)) {
 			if (t->timeout) {
-				t->data = malloc(blob_pad_len(data));
-				memcpy(t->data, data, blob_pad_len(data));
+				t->data = blob_memdup(data);
 				uloop_timeout_set(&t->delay, t->timeout);
 			} else {
 				json_script_run(&t->jctx, "foo", data);

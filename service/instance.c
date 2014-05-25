@@ -408,10 +408,9 @@ instance_config_parse(struct service_instance *in)
 		in->respawn_retry = vals[2];
 	}
 	if (tb[INSTANCE_ATTR_TRIGGER]) {
-		in->trigger = malloc(blob_pad_len(tb[INSTANCE_ATTR_TRIGGER]));
+		in->trigger = blob_memdup(tb[INSTANCE_ATTR_TRIGGER]);
 		if (!in->trigger)
 			return -1;
-		memcpy(in->trigger, tb[INSTANCE_ATTR_TRIGGER], blob_pad_len(tb[INSTANCE_ATTR_TRIGGER]));
 		trigger_add(in->trigger, in);
 	}
 
