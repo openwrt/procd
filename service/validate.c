@@ -100,10 +100,9 @@ service_validate_del(struct service *s)
         list_for_each_entry_safe(v, n, &s->validators, list) {
 		struct vrule *vr, *a;
 
-		avl_for_each_element_safe(&v->rules, vr, avl, a) {
-			avl_delete(&v->rules, &vr->avl);
+		avl_remove_all_elements(&v->rules, vr, avl, a)
 			free(vr);
-		}
+
 		avl_delete(&validators, &v->avl);
 		list_del(&v->list);
 		free(v);
