@@ -88,13 +88,19 @@ static void q_job_run(struct runqueue *q, struct runqueue_task *t)
 	j->cmd->handler(j, j->exec, j->env);
 }
 
+static void trigger_free(struct trigger *t)
+{
+	free(t->data);
+	list_del(&t->list);
+	free(t);
+}
+
 static void q_job_complete(struct runqueue *q, struct runqueue_task *p)
 {
 	struct job *j = container_of(p, struct job, proc.task);
 
 	if (j->trigger->remove) {
-		list_del(&j->trigger->list);
-		free(j->trigger);
+		trigger_free(j->trigger);
 	} else {
 		j->trigger->pending = 0;
 	}
@@ -219,6 +225,7 @@ static void trigger_delay_cb(struct uloop_timeout *tout)
 
 	json_script_run(&t->jctx, "foo", t->data);
 	free(t->data);
+	t->data = NULL;
 }
 
 static struct trigger* _trigger_add(char *type, struct blob_attr *rule, int timeout, void *id)
@@ -302,8 +309,8 @@ void trigger_del(void *id)
 			t->remove = 1;
 			continue;
 		}
-		list_del(&t->list);
-		free(t);
+
+		trigger_free(t);
 	}
 }
 
@@ -323,6 +330,7 @@ void trigger_event(char *type, struct blob_attr *data)
 			continue;
 		if (!strcmp(t->type, type)) {
 			if (t->timeout) {
+				free(t->data);
 				t->data = blob_memdup(data);
 				uloop_timeout_set(&t->delay, t->timeout);
 			} else {
