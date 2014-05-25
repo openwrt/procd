@@ -216,13 +216,13 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *tb[__SERVICE_SET_MAX], *cur;
 	struct service *s = NULL;
 	const char *name;
-	int ret = UBUS_STATUS_INVALID_ARGUMENT;
 	bool add = !strcmp(method, "add");
+	int ret;
 
 	blobmsg_parse(service_set_attrs, __SERVICE_SET_MAX, tb, blob_data(msg), blob_len(msg));
 	cur = tb[SERVICE_ATTR_NAME];
 	if (!cur)
-		goto free;
+		return UBUS_STATUS_INVALID_ARGUMENT;
 
 	name = blobmsg_data(cur);
 
@@ -239,15 +239,11 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	ret = service_update(s, msg, tb, add);
 	if (ret)
-		goto free;
+		return ret;
 
 	avl_insert(&services, &s->avl);
 
 	return 0;
-
-free:
-	free(msg);
-	return ret;
 }
 
 static void
