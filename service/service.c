@@ -103,7 +103,7 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 };
 
 static int
-service_update(struct service *s, struct blob_attr *config, struct blob_attr **tb, bool add)
+service_update(struct service *s, struct blob_attr **tb, bool add)
 {
 	struct blob_attr *cur;
 	int rem;
@@ -229,7 +229,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	s = avl_find_element(&services, name, s, avl);
 	if (s) {
 		DEBUG(2, "Update service %s\n", name);
-		return service_update(s, msg, tb, add);
+		return service_update(s, tb, add);
 	}
 
 	DEBUG(2, "Create service %s\n", name);
@@ -237,7 +237,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!s)
 		return UBUS_STATUS_UNKNOWN_ERROR;
 
-	ret = service_update(s, msg, tb, add);
+	ret = service_update(s, tb, add);
 	if (ret)
 		return ret;
 
