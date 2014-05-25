@@ -90,6 +90,7 @@ static void q_job_run(struct runqueue *q, struct runqueue_task *t)
 
 static void trigger_free(struct trigger *t)
 {
+	uloop_timeout_cancel(&t->delay);
 	free(t->data);
 	list_del(&t->list);
 	free(t);
