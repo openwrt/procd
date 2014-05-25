@@ -399,6 +399,18 @@ static struct json_script_ctx jctx = {
 	.handle_file = rule_handle_file,
 };
 
+static void hotplug_handler_debug(struct blob_attr *data)
+{
+	char *str;
+
+	if (debug < 3)
+		return;
+
+	str = blobmsg_format_json(data, true);
+	DEBUG(3, "%s\n", str);
+	free(str);
+}
+
 static void hotplug_handler(struct uloop_fd *u, unsigned int ev)
 {
 	int i = 0;
@@ -421,7 +433,7 @@ static void hotplug_handler(struct uloop_fd *u, unsigned int ev)
 		i += l;
 	}
 	blobmsg_close_table(&b, index);
-	DEBUG(3, "%s\n", blobmsg_format_json(b.head, true));
+	hotplug_handler_debug(b.head);
 	json_script_run(&jctx, rule_file, blob_data(b.head));
 }
 
