@@ -11,7 +11,7 @@ IF(APPLE)
 ENDIF()
 
 SET(SOURCES procd.c signal.c watchdog.c state.c	inittab.c rcS.c	ubus.c system.c
-	service/service.c service/instance.c service/validate.c service/trigger.c
+	service/service.c service/instance.c service/validate.c service/trigger.c service/watch.c
 	plug/coldplug.c plug/hotplug.c utils/utils.c)
 
 find_library(json NAMES json-c json)
@@ -38,6 +38,13 @@ INSTALL(TARGETS init
 
 ADD_EXECUTABLE(udevtrigger plug/udevtrigger.c)
 INSTALL(TARGETS udevtrigger
+	RUNTIME DESTINATION sbin
+)
+
+
+ADD_EXECUTABLE(upgraded upgraded.c watchdog.c)
+TARGET_LINK_LIBRARIES(upgraded ubox)
+INSTALL(TARGETS upgraded
 	RUNTIME DESTINATION sbin
 )
 

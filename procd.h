@@ -47,8 +47,12 @@ void procd_bcast_event(char *event, struct blob_attr *msg);
 
 struct trigger;
 void trigger_init(void);
-void trigger_event(char *type, struct blob_attr *data);
+void trigger_event(const char *type, struct blob_attr *data);
 void trigger_add(struct blob_attr *rule, void *id);
 void trigger_del(void *id);
+
+void watch_add(const char *_name, void *id);
+void watch_del(void *id);
+void watch_ubus(struct ubus_context *ctx);
 
 #endif

@@ -53,6 +53,7 @@ ubus_connect_cb(struct uloop_timeout *timeout)
 	ctx->connection_lost = ubus_disconnect_cb;
 	ubus_init_service(ctx);
 	ubus_init_system(ctx);
+	watch_ubus(ctx);
 
 	DEBUG(2, "Connected to ubus, id=%08x\n", ctx->local_id);
 	ubus_add_uloop(ctx);

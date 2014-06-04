@@ -38,6 +38,7 @@ enum {
 	INSTANCE_ATTR_RESPAWN,
 	INSTANCE_ATTR_NICE,
 	INSTANCE_ATTR_LIMITS,
+	INSTANCE_ATTR_WATCH,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -51,6 +52,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_RESPAWN] = { "respawn", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
 	[INSTANCE_ATTR_LIMITS] = { "limits", BLOBMSG_TYPE_TABLE },
+	[INSTANCE_ATTR_WATCH] = { "watch", BLOBMSG_TYPE_ARRAY },
 };
 
 struct instance_netdev {
@@ -414,6 +416,15 @@ instance_config_parse(struct service_instance *in)
 		trigger_add(in->trigger, in);
 	}
 
+	if (tb[INSTANCE_ATTR_WATCH]) {
+		blobmsg_for_each_attr(cur2, tb[INSTANCE_ATTR_WATCH], rem) {
+			if (blobmsg_type(cur2) != BLOBMSG_TYPE_STRING)
+				continue;
+			DEBUG(3, "watch for %s\n", blobmsg_get_string(cur2));
+			watch_add(blobmsg_get_string(cur2), in);
+		}
+	}
+
 	if ((cur = tb[INSTANCE_ATTR_NICE])) {
 		in->nice = (int8_t) blobmsg_get_u32(cur);
 		if (in->nice < -20 || in->nice > 20)
@@ -494,6 +505,7 @@ instance_free(struct service_instance *in)
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	trigger_del(in);
+	watch_del(in);
 	free(in->trigger);
 	instance_config_cleanup(in);
 	free(in->config);

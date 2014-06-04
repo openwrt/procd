@@ -323,7 +323,7 @@ void trigger_init(void)
 	q.max_running_tasks = 1;
 }
 
-void trigger_event(char *type, struct blob_attr *data)
+void trigger_event(const char *type, struct blob_attr *data)
 {
 	struct trigger *t;
 
