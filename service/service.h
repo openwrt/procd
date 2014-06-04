@@ -53,5 +53,6 @@ int service_start_early(char *name, char *cmdline);
 void service_validate_del(struct service *s);
 void service_validate_init(void);
 void service_init(void);
+void service_event(const char *type, const char *service, const char *instance);
 
 #endif

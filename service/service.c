@@ -24,6 +24,7 @@
 
 struct avl_tree services;
 static struct blob_buf b;
+static struct ubus_context *ctx;
 
 static void
 service_instance_add(struct service *s, struct blob_attr *attr)
@@ -146,6 +147,7 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 static void
 service_delete(struct service *s)
 {
+	service_event("service.stop", s->name, NULL);
 	vlist_flush_all(&s->instances);
 	avl_delete(&services, &s->avl);
 	trigger_del(s);
@@ -241,6 +243,8 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		return ret;
 
 	avl_insert(&services, &s->avl);
+
+	service_event("service.start", s->name, NULL);
 
 	return 0;
 }
@@ -447,8 +451,18 @@ service_start_early(char *name, char *cmdline)
 	return service_handle_set(NULL, NULL, NULL, "add", b.head);
 }
 
-void ubus_init_service(struct ubus_context *ctx)
+void service_event(const char *type, const char *service, const char *instance)
 {
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "service", service);
+	if (instance)
+		blobmsg_add_string(&b, "instance", instance);
+	ubus_notify(ctx, &main_object, type, b.head, -1);
+}
+
+void ubus_init_service(struct ubus_context *_ctx)
+{
+	ctx = _ctx;
 	ubus_add_object(ctx, &main_object);
 }
 

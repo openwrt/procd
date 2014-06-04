@@ -188,6 +188,7 @@ instance_start(struct service_instance *in)
 	in->proc.pid = pid;
 	clock_gettime(CLOCK_MONOTONIC, &in->start);
 	uloop_process_add(&in->proc);
+	service_event("instance.start", in->srv->name, in->name);
 }
 
 static void
@@ -236,6 +237,7 @@ instance_exit(struct uloop_process *p, int ret)
 			uloop_timeout_set(&in->timeout, in->respawn_timeout * 1000);
 		}
 	}
+	service_event("instance.stop", in->srv->name, in->name);
 }
 
 void
