@@ -107,6 +107,8 @@ main(int argc, char **argv)
 	}
 	if (pid <= 0)
 		ERROR("Failed to start kmodloader instance\n");
+	else
+		waitpid(pid, NULL, 0);
 	uloop_init();
 	preinit();
 	uloop_run();
