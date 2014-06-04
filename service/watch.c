@@ -104,7 +104,7 @@ watch_notify_cb(struct ubus_context *ctx, struct ubus_object *obj,
 		char *str;
 
 		str = blobmsg_format_json(msg, true);
-		LOG("Received ubus notify '%s': %s\n", method, str);
+		DEBUG(3, "Received ubus notify '%s': %s\n", method, str);
 		free(str);
 	}
 
