@@ -117,8 +117,8 @@ watch_ubus(struct ubus_context *ctx)
 {
 	watch_event.cb = watch_subscribe_cb;
 	watch_subscribe.cb = watch_notify_cb;
-	if (ubus_register_event_handler(ctx, &watch_event, "ubus.object.add"))
-		ERROR("failed to add ubus event handler\n");
 	if (ubus_register_subscriber(ctx, &watch_subscribe))
 		ERROR("failed to register ubus subscriber\n");
+	if (ubus_register_event_handler(ctx, &watch_event, "ubus.object.add"))
+		ERROR("failed to add ubus event handler\n");
 }
