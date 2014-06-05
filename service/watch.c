@@ -65,7 +65,7 @@ static void watch_subscribe_cb(struct ubus_context *ctx, struct ubus_event_handl
 			continue;
 		if (!ubus_subscribe(ctx, &watch_subscribe, id))
 			return;
-		ERROR("failed to suscribe %d\n", id);
+		ERROR("failed to subscribe %d\n", id);
 	}
 }
 
