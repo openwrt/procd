@@ -39,6 +39,7 @@ enum {
 	INSTANCE_ATTR_NICE,
 	INSTANCE_ATTR_LIMITS,
 	INSTANCE_ATTR_WATCH,
+	INSTANCE_ATTR_ERROR,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -53,6 +54,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
 	[INSTANCE_ATTR_LIMITS] = { "limits", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_WATCH] = { "watch", BLOBMSG_TYPE_ARRAY },
+	[INSTANCE_ATTR_ERROR] = { "error", BLOBMSG_TYPE_ARRAY },
 };
 
 struct instance_netdev {
@@ -164,6 +166,11 @@ void
 instance_start(struct service_instance *in)
 {
 	int pid;
+
+	if (!avl_is_empty(&in->errors.avl)) {
+		LOG("Not starting instance %s::%s, an error was indicated\n", in->srv->name, in->name);
+		return;
+	}
 
 	if (in->proc.pending)
 		return;
@@ -285,6 +292,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 
 	if (!blobmsg_list_equal(&in->limits, &in_new->limits))
+		return true;
+
+	if (!blobmsg_list_equal(&in->errors, &in_new->errors))
 		return true;
 
 	return false;
@@ -448,6 +458,9 @@ instance_config_parse(struct service_instance *in)
 	if (!instance_fill_array(&in->limits, tb[INSTANCE_ATTR_LIMITS], NULL, false))
 		return false;
 
+	if (!instance_fill_array(&in->errors, tb[INSTANCE_ATTR_ERROR], NULL, true))
+		return false;
+
 	return true;
 }
 
@@ -459,6 +472,7 @@ instance_config_cleanup(struct service_instance *in)
 	blobmsg_list_free(&in->netdev);
 	blobmsg_list_free(&in->file);
 	blobmsg_list_free(&in->limits);
+	blobmsg_list_free(&in->errors);
 }
 
 static void
@@ -470,6 +484,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	blobmsg_list_move(&in->netdev, &in_src->netdev);
 	blobmsg_list_move(&in->file, &in_src->file);
 	blobmsg_list_move(&in->limits, &in_src->limits);
+	blobmsg_list_move(&in->errors, &in_src->errors);
 	in->trigger = in_src->trigger;
 	in->command = in_src->command;
 	in->name = in_src->name;
@@ -529,6 +544,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	blobmsg_list_simple_init(&in->env);
 	blobmsg_list_simple_init(&in->data);
 	blobmsg_list_simple_init(&in->limits);
+	blobmsg_list_simple_init(&in->errors);
 	in->valid = instance_config_parse(in);
 }
 
@@ -541,6 +557,14 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 	if (in->proc.pending)
 		blobmsg_add_u32(b, "pid", in->proc.pid);
 	blobmsg_add_blob(b, in->command);
+
+	if (!avl_is_empty(&in->errors.avl)) {
+		struct blobmsg_list_node *var;
+		void *e = blobmsg_open_array(b, "errors");
+		blobmsg_list_for_each(&in->errors, var)
+			blobmsg_add_string(b, NULL, blobmsg_data(var->data));
+		blobmsg_close_table(b, e);
+	}
 
 	if (!avl_is_empty(&in->env.avl)) {
 		struct blobmsg_list_node *var;

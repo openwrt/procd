@@ -50,6 +50,7 @@ struct service_instance {
 	struct blobmsg_list netdev;
 	struct blobmsg_list file;
 	struct blobmsg_list limits;
+	struct blobmsg_list errors;
 };
 
 void instance_start(struct service_instance *in);
