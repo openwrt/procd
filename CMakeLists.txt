@@ -42,13 +42,6 @@ INSTALL(TARGETS udevtrigger
 )
 
 
-ADD_EXECUTABLE(upgraded upgraded.c watchdog.c)
-TARGET_LINK_LIBRARIES(upgraded ubox)
-INSTALL(TARGETS upgraded
-	RUNTIME DESTINATION sbin
-)
-
-
 ADD_EXECUTABLE(askfirst utils/askfirst.c)
 INSTALL(TARGETS askfirst
 	RUNTIME DESTINATION sbin
