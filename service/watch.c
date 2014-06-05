@@ -100,7 +100,7 @@ watch_notify_cb(struct ubus_context *ctx, struct ubus_object *obj,
 		struct ubus_request_data *req, const char *method,
 		struct blob_attr *msg)
 {
-	if (1 || debug >= 3) {
+	if (debug >= 3) {
 		char *str;
 
 		str = blobmsg_format_json(msg, true);
