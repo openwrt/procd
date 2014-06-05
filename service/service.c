@@ -453,6 +453,9 @@ service_start_early(char *name, char *cmdline)
 
 void service_event(const char *type, const char *service, const char *instance)
 {
+	if (!ctx)
+		return;
+
 	blob_buf_init(&b, 0);
 	blobmsg_add_string(&b, "service", service);
 	if (instance)
