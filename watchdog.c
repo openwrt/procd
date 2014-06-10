@@ -119,3 +119,12 @@ void watchdog_init(int preinit)
 
 	DEBUG(4, "Opened watchdog with timeout %ds\n", watchdog_timeout(0));
 }
+
+
+void watchdog_no_cloexec(void)
+{
+	if (wdt_fd < 0)
+		return;
+
+	fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) & ~FD_CLOEXEC);
+}

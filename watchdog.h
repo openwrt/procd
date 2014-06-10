@@ -21,5 +21,6 @@ int watchdog_timeout(int timeout);
 int watchdog_frequency(int frequency);
 void watchdog_set_stopped(bool val);
 bool watchdog_get_stopped(void);
+void watchdog_no_cloexec(void);
 
 #endif

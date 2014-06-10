@@ -286,11 +286,55 @@ static int proc_signal(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+enum {
+	NAND_FOLDER,
+	__NAND_MAX
+};
+
+static const struct blobmsg_policy nand_policy[__NAND_MAX] = {
+	[NAND_FOLDER] = { .name = "folder", .type = BLOBMSG_TYPE_STRING },
+};
+
+static void
+procd_spawn_upgraded(char *folder)
+{
+	char *wdt_fd = watchdog_fd();
+	char *argv[] = { "/tmp/upgraded", NULL, NULL};
+
+	argv[1] = folder;
+
+	DEBUG(2, "Exec to upgraded now\n");
+	if (wdt_fd) {
+		watchdog_no_cloexec();
+		setenv("WDTFD", wdt_fd, 1);
+	}
+	execvp(argv[0], argv);
+}
+
+static int nand_set(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct blob_attr *tb[__NAND_MAX];
+
+	if (!msg)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	blobmsg_parse(nand_policy, __NAND_MAX, tb, blob_data(msg), blob_len(msg));
+	if (!tb[NAND_FOLDER])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	procd_spawn_upgraded(blobmsg_get_string(tb[NAND_FOLDER]));
+	fprintf(stderr, "Yikees, something went wrong. no /sbin/upgraded ?\n");
+	return 0;
+}
+
 static void
 procd_subscribe_cb(struct ubus_context *ctx, struct ubus_object *obj)
 {
 	notify = obj->has_subscribers;
 }
+
 
 static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("board", system_board),
@@ -298,6 +342,7 @@ static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("upgrade", system_upgrade),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
 	UBUS_METHOD("signal", proc_signal, signal_policy),
+	UBUS_METHOD("nandupgrade", nand_set, nand_policy),
 };
 
 static struct ubus_object_type system_object_type =
