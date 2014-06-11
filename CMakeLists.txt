@@ -43,7 +43,7 @@ INSTALL(TARGETS udevtrigger
 
 
 ADD_EXECUTABLE(upgraded upgraded.c watchdog.c)
-TARGET_LINK_LIBRARIES(upgraded ubox.a rt.a -static)
+TARGET_LINK_LIBRARIES(upgraded ubox.a rt.a -static -lc -lgcc)
 set_target_properties(upgraded PROPERTIES LINK_SEARCH_END_STATIC 1)
 INSTALL(TARGETS upgraded
 	RUNTIME DESTINATION sbin
