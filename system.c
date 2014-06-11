@@ -342,6 +342,8 @@ static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("upgrade", system_upgrade),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
 	UBUS_METHOD("signal", proc_signal, signal_policy),
+
+	/* must remain at the end as it ia not always loaded */
 	UBUS_METHOD("nandupgrade", nand_set, nand_policy),
 };
 
@@ -371,7 +373,11 @@ procd_bcast_event(char *event, struct blob_attr *msg)
 
 void ubus_init_system(struct ubus_context *ctx)
 {
+	struct stat s;
 	int ret;
+
+	if (stat("/sbin/upgraded", &s))
+		system_object.n_methods -= 1;
 
 	_ctx = ctx;
 	ret = ubus_add_object(ctx, &system_object);
