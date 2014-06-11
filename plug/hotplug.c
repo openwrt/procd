@@ -453,6 +453,7 @@ void hotplug_last_event(uloop_timeout_handler handler)
 void hotplug(char *rules)
 {
 	struct sockaddr_nl nls;
+	int nlbufsize = 512 * 1024;
 
 	rule_file = strdup(rules);
 	memset(&nls,0,sizeof(struct sockaddr_nl));
@@ -466,6 +467,11 @@ void hotplug(char *rules)
 	}
 	if (bind(hotplug_fd.fd, (void *)&nls, sizeof(struct sockaddr_nl))) {
 		ERROR("Failed to bind hotplug socket: %s\n", strerror(errno));
+		exit(1);
+	}
+
+	if (setsockopt(hotplug_fd.fd, SOL_SOCKET, SO_RCVBUFFORCE, &nlbufsize, sizeof(nlbufsize))) {
+		ERROR("Failed to resize receive buffer: %s\n", strerror(errno));
 		exit(1);
 	}
 

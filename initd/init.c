@@ -53,7 +53,7 @@ static struct sigaction sa_shutdown = {
 static void
 cmdline(void)
 {
-	char line[256];
+	char line[1024];
 	int r, fd = open("/proc/cmdline", O_RDONLY);
 	regex_t pat_cmdline;
 	regmatch_t matches[2];
