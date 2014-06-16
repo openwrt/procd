@@ -287,21 +287,21 @@ static int proc_signal(struct ubus_context *ctx, struct ubus_object *obj,
 }
 
 enum {
-	NAND_FOLDER,
+	NAND_PATH,
 	__NAND_MAX
 };
 
 static const struct blobmsg_policy nand_policy[__NAND_MAX] = {
-	[NAND_FOLDER] = { .name = "folder", .type = BLOBMSG_TYPE_STRING },
+	[NAND_PATH] = { .name = "path", .type = BLOBMSG_TYPE_STRING },
 };
 
 static void
-procd_spawn_upgraded(char *folder)
+procd_spawn_upgraded(char *path)
 {
 	char *wdt_fd = watchdog_fd();
 	char *argv[] = { "/tmp/upgraded", NULL, NULL};
 
-	argv[1] = folder;
+	argv[1] = path;
 
 	DEBUG(2, "Exec to upgraded now\n");
 	if (wdt_fd) {
@@ -321,10 +321,10 @@ static int nand_set(struct ubus_context *ctx, struct ubus_object *obj,
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
 	blobmsg_parse(nand_policy, __NAND_MAX, tb, blob_data(msg), blob_len(msg));
-	if (!tb[NAND_FOLDER])
+	if (!tb[NAND_PATH])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	procd_spawn_upgraded(blobmsg_get_string(tb[NAND_FOLDER]));
+	procd_spawn_upgraded(blobmsg_get_string(tb[NAND_PATH]));
 	fprintf(stderr, "Yikees, something went wrong. no /sbin/upgraded ?\n");
 	return 0;
 }
