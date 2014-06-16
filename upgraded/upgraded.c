@@ -21,7 +21,7 @@
 
 #include <libubox/uloop.h>
 
-#include "watchdog.h"
+#include "../watchdog.h"
 
 static struct uloop_process upgrade_proc;
 unsigned int debug = 2;

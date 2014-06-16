@@ -21,6 +21,7 @@ IF(DEBUG)
   ADD_DEFINITIONS(-DDEBUG -g3)
 ENDIF()
 
+add_subdirectory(upgraded)
 
 ADD_EXECUTABLE(procd ${SOURCES})
 TARGET_LINK_LIBRARIES(procd ${LIBS})
@@ -38,14 +39,6 @@ INSTALL(TARGETS init
 
 ADD_EXECUTABLE(udevtrigger plug/udevtrigger.c)
 INSTALL(TARGETS udevtrigger
-	RUNTIME DESTINATION sbin
-)
-
-
-ADD_EXECUTABLE(upgraded upgraded.c watchdog.c)
-TARGET_LINK_LIBRARIES(upgraded ubox.a rt.a -static -lc -lgcc)
-set_target_properties(upgraded PROPERTIES LINK_SEARCH_END_STATIC 1)
-INSTALL(TARGETS upgraded
 	RUNTIME DESTINATION sbin
 )
 
