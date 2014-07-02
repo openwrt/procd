@@ -209,6 +209,10 @@ static const struct blobmsg_policy validate_policy[__VALIDATE_MAX] = {
 	[VALIDATE_SERVICE] = { .name = "service", .type = BLOBMSG_TYPE_STRING },
 };
 
+static const struct blobmsg_policy get_data_policy[] = {
+	{ "type", BLOBMSG_TYPE_STRING }
+};
+
 static int
 service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		   struct ubus_request_data *req, const char *method,
@@ -402,6 +406,53 @@ service_handle_validate(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+static int
+service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
+		 struct ubus_request_data *req, const char *method,
+		 struct blob_attr *msg)
+{
+	struct service_instance *in;
+	struct service *s;
+	struct blob_attr *tb;
+	const char *type = NULL;
+
+	blobmsg_parse(get_data_policy, 1, &tb, blob_data(msg), blob_len(msg));
+	if (tb)
+		type = blobmsg_data(tb);
+
+	blob_buf_init(&b, 0);
+	avl_for_each_element(&services, s, avl) {
+		void *cs = NULL;
+
+		vlist_for_each_element(&s->instances, in, node) {
+			struct blobmsg_list_node *var;
+			void *ci = NULL;
+
+			blobmsg_list_for_each(&in->data, var) {
+				if (type &&
+				    strcmp(blobmsg_name(var->data), type) != 0)
+					continue;
+
+				if (!cs)
+					cs = blobmsg_open_table(&b, s->name);
+				if (!ci)
+					ci = blobmsg_open_table(&b, in->name);
+
+				blobmsg_add_blob(&b, var->data);
+			}
+
+			if (ci)
+				blobmsg_close_table(&b, ci);
+		}
+
+		if (cs)
+			blobmsg_close_table(&b, cs);
+	}
+
+	ubus_send_reply(ctx, req, b.head);
+	return 0;
+}
+
 static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
@@ -411,6 +462,7 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("update_complete", service_handle_update, service_attrs),
 	UBUS_METHOD("event", service_handle_event, event_policy),
 	UBUS_METHOD("validate", service_handle_validate, validate_policy),
+	UBUS_METHOD("get_data", service_get_data, get_data_policy),
 };
 
 static struct ubus_object_type main_object_type =
