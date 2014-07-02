@@ -359,6 +359,15 @@ instance_file_update(struct blobmsg_list_node *l)
 	close(fd);
 }
 
+static void
+instance_fill_any(struct blobmsg_list *l, struct blob_attr *cur)
+{
+	if (!cur)
+		return;
+
+	blobmsg_list_fill(l, blobmsg_data(cur), blobmsg_data_len(cur), false);
+}
+
 static bool
 instance_fill_array(struct blobmsg_list *l, struct blob_attr *cur, blobmsg_update_cb cb, bool array)
 {
@@ -443,10 +452,9 @@ instance_config_parse(struct service_instance *in)
 			return false;
 	}
 
-	if (!instance_fill_array(&in->env, tb[INSTANCE_ATTR_ENV], NULL, false))
-		return false;
+	instance_fill_any(&in->data, tb[INSTANCE_ATTR_DATA]);
 
-	if (!instance_fill_array(&in->data, tb[INSTANCE_ATTR_DATA], NULL, false))
+	if (!instance_fill_array(&in->env, tb[INSTANCE_ATTR_ENV], NULL, false))
 		return false;
 
 	if (!instance_fill_array(&in->netdev, tb[INSTANCE_ATTR_NETDEV], instance_netdev_update, true))
