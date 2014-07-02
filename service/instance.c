@@ -431,9 +431,7 @@ instance_config_parse(struct service_instance *in)
 		in->respawn_retry = vals[2];
 	}
 	if (tb[INSTANCE_ATTR_TRIGGER]) {
-		in->trigger = blob_memdup(tb[INSTANCE_ATTR_TRIGGER]);
-		if (!in->trigger)
-			return -1;
+		in->trigger = tb[INSTANCE_ATTR_TRIGGER];
 		trigger_add(in->trigger, in);
 	}
 
@@ -531,7 +529,6 @@ instance_free(struct service_instance *in)
 	uloop_timeout_cancel(&in->timeout);
 	trigger_del(in);
 	watch_del(in);
-	free(in->trigger);
 	instance_config_cleanup(in);
 	free(in->config);
 	free(in);
