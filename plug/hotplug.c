@@ -161,10 +161,10 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 	char *dir = blobmsg_get_string(blobmsg_data(data));
 	char *file = hotplug_msg_find_var(msg, "FIRMWARE");
 	char *dev = hotplug_msg_find_var(msg, "DEVPATH");
-	void *fw_data;
-	struct stat s;
+	struct stat s = { 0 };
 	char *path, loadpath[256], syspath[256];
-	int fw, load, sys, len;
+	int fw, src, load, len;
+	static char buf[4096];
 
 	DEBUG(2, "Firmware request for %s/%s\n", dir, file);
 
@@ -173,35 +173,24 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 		exit(-1);
 	}
 
-	path = malloc(strlen(dir) + strlen(file) + 2);
-	if (!path) {
-		ERROR("Failed to allocate memory\n");
-		exit(-1);
-	}
+	path = alloca(strlen(dir) + strlen(file) + 2);
 	sprintf(path, "%s/%s", dir, file);
 
 	if (stat(path, &s)) {
 		ERROR("Could not find firmware %s\n", path);
-		exit(-1);
+		src = -1;
+		s.st_size = 0;
+		goto send_to_kernel;
 	}
 
-	fw_data = malloc(s.st_size);
-	if (!fw_data) {
-		ERROR("Failed to allocate firmware data memory\n");
-		exit(-1);
-	}
-
-	fw = open(path, O_RDONLY);
-	if (!fw) {
+	src = open(path, O_RDONLY);
+	if (src < 0) {
 		ERROR("Failed to open %s\n", path);
-		exit(-1);
+		s.st_size = 0;
+		goto send_to_kernel;
 	}
-	if (read(fw, fw_data, s.st_size) != s.st_size) {
-		ERROR("Failed to read firmware data\n");
-		exit(-1);
-	}
-	close(fw);
 
+send_to_kernel:
 	snprintf(loadpath, sizeof(loadpath), "/sys/%s/loading", dev);
 	load = open(loadpath, O_WRONLY);
 	if (!load) {
@@ -212,19 +201,23 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 	close(load);
 
 	snprintf(syspath, sizeof(syspath), "/sys/%s/data", dev);
-	sys = open(syspath, O_WRONLY);
-	if (!sys) {
+	fw = open(syspath, O_WRONLY);
+	if (fw < 0) {
 		ERROR("Failed to open %s\n", syspath);
 		exit(-1);
 	}
 
 	len = s.st_size;
-	while (len > 4096) {
-		write(fw, fw_data, 4096);
-		len -= 4096;
+	while (len) {
+		len = read(src, buf, sizeof(buf));
+		if (len <= 0)
+			break;
+
+		write(fw, buf, len);
 	}
-	if (len)
-		write(fw, fw_data, len);
+
+	if (src >= 0)
+		close(src);
 	close(fw);
 
 	load = open(loadpath, O_WRONLY);
