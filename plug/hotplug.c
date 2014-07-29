@@ -463,10 +463,8 @@ void hotplug(char *rules)
 		exit(1);
 	}
 
-	if (setsockopt(hotplug_fd.fd, SOL_SOCKET, SO_RCVBUFFORCE, &nlbufsize, sizeof(nlbufsize))) {
+	if (setsockopt(hotplug_fd.fd, SOL_SOCKET, SO_RCVBUFFORCE, &nlbufsize, sizeof(nlbufsize)))
 		ERROR("Failed to resize receive buffer: %s\n", strerror(errno));
-		exit(1);
-	}
 
 	json_script_init(&jctx);
 	queue_proc.cb = queue_proc_cb;
