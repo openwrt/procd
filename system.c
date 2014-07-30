@@ -38,7 +38,7 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	void *c;
 	char line[256];
-	char *key, *val;
+	char *key, *val, *next;
 	struct utsname utsname;
 	FILE *f;
 
@@ -111,24 +111,53 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 
 		while (fgets(line, sizeof(line), f))
 		{
-			key = strtok(line, "=\"");
-			val = strtok(NULL, "\"\n");
+			char *dest;
+			char ch;
 
-			if (!key || !val)
+			key = line;
+			val = strchr(line, '=');
+			if (!val)
 				continue;
 
+			*(val++) = 0;
+
 			if (!strcasecmp(key, "DISTRIB_ID"))
-				blobmsg_add_string(&b, "distribution", val);
+				key = "distribution";
 			else if (!strcasecmp(key, "DISTRIB_RELEASE"))
-				blobmsg_add_string(&b, "version", val);
+				key = "version";
 			else if (!strcasecmp(key, "DISTRIB_REVISION"))
-				blobmsg_add_string(&b, "revision", val);
+				key = "revision";
 			else if (!strcasecmp(key, "DISTRIB_CODENAME"))
-				blobmsg_add_string(&b, "codename", val);
+				key = "codename";
 			else if (!strcasecmp(key, "DISTRIB_TARGET"))
-				blobmsg_add_string(&b, "target", val);
+				key = "target";
 			else if (!strcasecmp(key, "DISTRIB_DESCRIPTION"))
-				blobmsg_add_string(&b, "description", val);
+				key = "description";
+			else
+				continue;
+
+			dest = blobmsg_alloc_string_buffer(&b, key, strlen(val));
+			while (val && (ch = *(val++)) != 0) {
+				switch (ch) {
+				case '\'':
+				case '"':
+					next = strchr(val, ch);
+					if (next)
+						*next = 0;
+
+					strcpy(dest, val);
+
+					if (next)
+						val = next + 1;
+
+					dest += strlen(dest);
+					break;
+				case '\\':
+					*(dest++) = *(val++);
+					break;
+				}
+			}
+			blobmsg_add_string_buffer(&b);
 		}
 
 		blobmsg_close_array(&b, c);
