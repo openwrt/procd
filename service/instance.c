@@ -579,6 +579,14 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_close_table(b, e);
 	}
 
+	if (!avl_is_empty(&in->data.avl)) {
+		struct blobmsg_list_node *var;
+		void *e = blobmsg_open_table(b, "data");
+		blobmsg_list_for_each(&in->data, var)
+			blobmsg_add_blob(b, var->data);
+		blobmsg_close_table(b, e);
+	}
+
 	if (!avl_is_empty(&in->limits.avl)) {
 		struct blobmsg_list_node *var;
 		void *e = blobmsg_open_table(b, "limits");
