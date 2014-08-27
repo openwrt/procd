@@ -66,6 +66,8 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		DEBUG(2, "Create instance %s::%s\n", in_n->srv->name, in_n->name);
 		instance_start(in_n);
 	}
+	blob_buf_init(&b, 0);
+	trigger_event("instance.update", b.head);
 }
 
 static struct service *
