@@ -336,7 +336,7 @@ rule_handle_file(struct json_script_ctx *ctx, const char *name)
 	json_object *obj;
 
 	obj = json_object_from_file((char*)name);
-	if (is_error(obj))
+	if (!obj)
 		return NULL;
 
 	blob_buf_init(&script, 0);
