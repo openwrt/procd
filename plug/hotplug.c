@@ -22,6 +22,7 @@
 #include <libubox/blobmsg_json.h>
 #include <libubox/json_script.h>
 #include <libubox/uloop.h>
+#include <json/json.h>
 
 #include <fcntl.h>
 #include <unistd.h>

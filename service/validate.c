@@ -13,6 +13,7 @@
 
 #include <libubox/blobmsg_json.h>
 #include <libubox/avl-cmp.h>
+#include <json/json.h>
 
 #include "../procd.h"
 
