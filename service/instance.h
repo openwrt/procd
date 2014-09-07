@@ -29,6 +29,9 @@ struct service_instance {
 	int8_t nice;
 	bool valid;
 
+	uid_t uid;
+	gid_t gid;
+
 	bool halt;
 	bool restart;
 	bool respawn;

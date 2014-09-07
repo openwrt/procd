@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <fcntl.h>
+#include <pwd.h>
 
 #include <libubox/md5.h>
 
@@ -40,6 +41,7 @@ enum {
 	INSTANCE_ATTR_LIMITS,
 	INSTANCE_ATTR_WATCH,
 	INSTANCE_ATTR_ERROR,
+	INSTANCE_ATTR_USER,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -55,6 +57,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_LIMITS] = { "limits", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_WATCH] = { "watch", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_ERROR] = { "error", BLOBMSG_TYPE_ARRAY },
+	[INSTANCE_ATTR_USER] = { "user", BLOBMSG_TYPE_STRING },
 };
 
 struct instance_netdev {
@@ -157,6 +160,10 @@ instance_run(struct service_instance *in)
 		dup2(fd, STDERR_FILENO);
 		if (fd > STDERR_FILENO)
 			close(fd);
+	}
+	if (in->uid || in->gid) {
+		setuid(in->uid);
+		setgid(in->gid);
 	}
 	execvp(argv[0], argv);
 	exit(127);
@@ -289,6 +296,12 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 
 	if (in->nice != in_new->nice)
+		return true;
+
+	if (in->uid != in_new->uid)
+		return true;
+
+	if (in->gid != in_new->gid)
 		return true;
 
 	if (!blobmsg_list_equal(&in->limits, &in_new->limits))
@@ -448,6 +461,14 @@ instance_config_parse(struct service_instance *in)
 		in->nice = (int8_t) blobmsg_get_u32(cur);
 		if (in->nice < -20 || in->nice > 20)
 			return false;
+	}
+
+	if (tb[INSTANCE_ATTR_USER]) {
+		struct passwd *p = getpwnam(blobmsg_get_string(tb[INSTANCE_ATTR_USER]));
+		if (p) {
+			in->uid = p->pw_uid;
+			in->gid = p->pw_gid;
+		}
 	}
 
 	instance_fill_any(&in->data, tb[INSTANCE_ATTR_DATA]);
