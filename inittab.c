@@ -279,7 +279,7 @@ void procd_inittab(void)
 		};
 
 		tok = strtok(tags[TAG_PROCESS], " ");
-		for (i = 0; i < (MAX_ARGS - i - 1) && tok; i++) {
+		for (i = 0; i < (MAX_ARGS - 1) && tok; i++) {
 			a->argv[i] = tok;
 			tok = strtok(NULL, " ");
 		}
