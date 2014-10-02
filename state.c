@@ -15,6 +15,8 @@
 #include <sys/reboot.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <signal.h>
 
 #include "procd.h"
 #include "syslog.h"
@@ -75,6 +77,14 @@ static void state_enter(void)
 		break;
 
 	case STATE_HALT:
+		LOG("- SIGTERM processes -\n");
+		kill(-1, SIGTERM);
+		sync();
+		sleep(1);
+		LOG("- SIGKILL processes -\n");
+		kill(-1, SIGKILL);
+		sync();
+		sleep(1);
 		LOG("- reboot -\n");
 		reboot(reboot_event);
 		break;
