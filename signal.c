@@ -91,4 +91,5 @@ void procd_signal(void)
 	sigaction(SIGHUP, &sa_dummy, NULL);
 	sigaction(SIGKILL, &sa_dummy, NULL);
 	sigaction(SIGSTOP, &sa_dummy, NULL);
+	reboot(RB_DISABLE_CAD);
 }

@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/reboot.h>
 
 #include <unistd.h>
 #include <getopt.h>
@@ -69,6 +70,10 @@ int main(int argc, char **argv)
 	else
 		procd_state_next();
 	uloop_run();
+	uloop_done();
+
+	if (getpid() == 1)
+		procd_shutdown(RB_AUTOBOOT);
 
 	return 0;
 }
