@@ -94,6 +94,8 @@ void procd_state_next(void)
 
 void procd_shutdown(int event)
 {
+	if (state >= STATE_SHUTDOWN)
+		return;
 	DEBUG(2, "Shutting down system with event %x\n", event);
 	reboot_event = event;
 	state = STATE_SHUTDOWN;
