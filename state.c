@@ -86,7 +86,20 @@ static void state_enter(void)
 		sync();
 		sleep(1);
 		LOG("- reboot -\n");
-		reboot(reboot_event);
+
+		/* Allow time for last message to reach serial console, etc */
+		sleep(1);
+
+		/* We have to fork here, since the kernel calls do_exit(EXIT_SUCCESS)
+		 * in linux/kernel/sys.c, which can cause the machine to panic when
+		 * the init process exits... */
+		if (!vfork( )) { /* child */
+			reboot(reboot_event);
+			_exit(EXIT_SUCCESS);
+		}
+
+		while (1)
+			sleep(1);
 		break;
 
 	default:
