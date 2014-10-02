@@ -85,7 +85,10 @@ static void state_enter(void)
 		kill(-1, SIGKILL);
 		sync();
 		sleep(1);
-		LOG("- reboot -\n");
+		if (reboot_event == RB_POWER_OFF)
+			LOG("- power down -\n");
+		else
+			LOG("- reboot -\n");
 
 		/* Allow time for last message to reach serial console, etc */
 		sleep(1);
