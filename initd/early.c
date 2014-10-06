@@ -72,6 +72,8 @@ early_console(const char *dev)
 	    dd != STDOUT_FILENO &&
 	    dd != STDERR_FILENO)
 		close(dd);
+
+	fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
 }
 
 static void
