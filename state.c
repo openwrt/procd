@@ -27,6 +27,7 @@
 enum {
 	STATE_NONE = 0,
 	STATE_EARLY,
+	STATE_UBUS,
 	STATE_INIT,
 	STATE_RUNNING,
 	STATE_SHUTDOWN,
@@ -49,16 +50,17 @@ static void state_enter(void)
 		procd_coldplug();
 		break;
 
-	case STATE_INIT:
+	case STATE_UBUS:
 		// try to reopen incase the wdt was not available before coldplug
 		watchdog_init(0);
 		LOG("- ubus -\n");
 		procd_connect_ubus();
-
-		LOG("- init -\n");
 		service_init();
 		service_start_early("ubus", ubus_cmd);
+		break;
 
+	case STATE_INIT:
+		LOG("- init -\n");
 		procd_inittab();
 		procd_inittab_run("respawn");
 		procd_inittab_run("askconsole");
@@ -116,6 +118,12 @@ void procd_state_next(void)
 	DEBUG(4, "Change state %d -> %d\n", state, state + 1);
 	state++;
 	state_enter();
+}
+
+void procd_state_ubus_connect(void)
+{
+	if (state == STATE_UBUS)
+		procd_state_next();
 }
 
 void procd_shutdown(int event)

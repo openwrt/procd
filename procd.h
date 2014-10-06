@@ -35,6 +35,7 @@ void ubus_init_service(struct ubus_context *ctx);
 void ubus_init_system(struct ubus_context *ctx);
 
 void procd_state_next(void);
+void procd_state_ubus_connect(void);
 void procd_shutdown(int event);
 void procd_early(void);
 void procd_preinit(void);

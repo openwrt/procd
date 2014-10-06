@@ -57,6 +57,7 @@ ubus_connect_cb(struct uloop_timeout *timeout)
 
 	DEBUG(2, "Connected to ubus, id=%08x\n", ctx->local_id);
 	ubus_add_uloop(ctx);
+	procd_state_ubus_connect();
 }
 
 void
