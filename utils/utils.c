@@ -149,16 +149,16 @@ char* get_cmdline_val(const char* name, char* out, int len)
 	close(fd);
 
 	sprintf( pattern, "%s=([^ \n]*)", name);
-    regcomp(&pat_cmdline, pattern, REG_EXTENDED);
-    if (!regexec(&pat_cmdline, line, 2, matches, 0)) {
-    	line[matches[1].rm_eo] = '\0';
+	regcomp(&pat_cmdline, pattern, REG_EXTENDED);
+	if (!regexec(&pat_cmdline, line, 2, matches, 0)) {
+		line[matches[1].rm_eo] = '\0';
 		tty = (line + matches[1].rm_so);
 		strncpy(out, tty, len);
 		tty[len-1] = '\0';
 		res = out;
 	}
 
-    regfree(&pat_cmdline);
+	regfree(&pat_cmdline);
 
 	return res;
 }

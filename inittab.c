@@ -85,7 +85,7 @@ static int dev_exist(const char *dev)
 	if (res != -1) {
 		close(res);
 	}
-	
+
 	return (res != -1);
 }
 
@@ -172,10 +172,10 @@ static void askconsole(struct init_action *a)
 	int i;
 
 	tty = get_cmdline_val("console", line, sizeof(line));
-	split=strchr(tty, ',');
-	if (split != NULL)
-		split = '\0';
-	
+	split = strchr(tty, ',');
+	if (split)
+		*split = '\0';
+
 	if (!dev_exist(tty)) {
 		DEBUG(4, "skipping %s\n", tty);
 		return;
