@@ -36,6 +36,7 @@ static void signal_shutdown(int signal, siginfo_t *siginfo, void *data)
 	char *msg = NULL;
 
 	switch(signal) {
+	case SIGINT:
 	case SIGTERM:
 		event = RB_AUTOBOOT;
 		msg = "reboot";
@@ -84,6 +85,7 @@ void procd_signal(void)
 	if (getpid() != 1)
 		return;
 	sigaction(SIGTERM, &sa_shutdown, NULL);
+	sigaction(SIGINT, &sa_shutdown, NULL);
 	sigaction(SIGUSR1, &sa_shutdown, NULL);
 	sigaction(SIGUSR2, &sa_shutdown, NULL);
 	sigaction(SIGSEGV, &sa_crash, NULL);

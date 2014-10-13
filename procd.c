@@ -72,8 +72,5 @@ int main(int argc, char **argv)
 	uloop_run();
 	uloop_done();
 
-	if (getpid() == 1)
-		procd_shutdown(RB_AUTOBOOT);
-
 	return 0;
 }

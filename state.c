@@ -131,6 +131,8 @@ static void state_enter(void)
 		break;
 
 	case STATE_HALT:
+		// To prevent killed processes from interrupting the sleep
+		signal(SIGCHLD, SIG_IGN);
 		LOG("- SIGTERM processes -\n");
 		kill(-1, SIGTERM);
 		sync();
