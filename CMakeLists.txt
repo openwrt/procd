@@ -30,7 +30,8 @@ INSTALL(TARGETS procd
 )
 
 
-ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c watchdog.c)
+ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c watchdog.c
+	utils/utils.c)
 TARGET_LINK_LIBRARIES(init ${LIBS})
 INSTALL(TARGETS init
 	RUNTIME DESTINATION sbin

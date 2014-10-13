@@ -25,6 +25,7 @@
 #include <libubox/utils.h>
 #include <libubox/list.h>
 
+#include "utils/utils.h"
 #include "procd.h"
 #include "rcS.h"
 
@@ -135,30 +136,20 @@ static void askfirst(struct init_action *a)
 static void askconsole(struct init_action *a)
 {
 	struct stat s;
-	char line[256], *tty;
-	int i, r, fd = open("/proc/cmdline", O_RDONLY);
-	regex_t pat_cmdline;
-	regmatch_t matches[2];
+	char line[256], *tty, *split;
+	int i;
 
-	if (fd < 0)
-		return;
-
-	r = read(fd, line, sizeof(line) - 1);
-	line[r] = '\0';
-	close(fd);
-
-	regcomp(&pat_cmdline, "console=([a-zA-Z0-9]*)", REG_EXTENDED);
-	if (regexec(&pat_cmdline, line, 2, matches, 0))
-		goto err_out;
-	line[matches[1].rm_eo] = '\0';
-	tty = &line[matches[1].rm_so];
-
+	tty = get_cmdline_val("console", line, sizeof(line));
+	split=strchr(tty, ',');
+	if (split != NULL)
+		split = '\0';
+	
 	chdir("/dev");
 	i = stat(tty, &s);
 	chdir("/");
 	if (i) {
 		DEBUG(4, "skipping %s\n", tty);
-		goto err_out;
+		return;
 	}
 	console = strdup(tty);
 
@@ -171,9 +162,6 @@ static void askconsole(struct init_action *a)
 
 	a->proc.cb = child_exit;
 	fork_worker(a);
-
-err_out:
-	regfree(&pat_cmdline);
 }
 
 static void rcrespawn(struct init_action *a)

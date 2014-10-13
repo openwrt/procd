@@ -15,6 +15,12 @@
 #include <libubox/avl.h>
 #include <libubox/avl-cmp.h>
 #include "utils.h"
+#include <asm-generic/setup.h>
+#include <regex.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 void
 __blobmsg_list_init(struct blobmsg_list *list, int offset, int len, blobmsg_list_cmp cmp)
@@ -119,4 +125,40 @@ blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2)
 	}
 
 	return true;
+}
+
+char* get_cmdline_val(const char* name, char* out, int len)
+{
+	char pattern[COMMAND_LINE_SIZE + 1];
+	char line[COMMAND_LINE_SIZE + 1];
+	char *res = NULL, *tty;
+	int r, fd;
+	regex_t pat_cmdline;
+	regmatch_t matches[2];
+
+	fd = open("/proc/cmdline", O_RDONLY);
+	if (fd < 0)
+		return NULL;
+
+	r = read(fd, line, COMMAND_LINE_SIZE);
+	if ( r <= 0 ) {
+		close(fd);
+		return NULL;
+	}
+	line[r] = '\0';
+	close(fd);
+
+	sprintf( pattern, "%s=([^ \n]*)", name);
+    regcomp(&pat_cmdline, pattern, REG_EXTENDED);
+    if (!regexec(&pat_cmdline, line, 2, matches, 0)) {
+    	line[matches[1].rm_eo] = '\0';
+		tty = (line + matches[1].rm_so);
+		strncpy(out, tty, len);
+		tty[len-1] = '\0';
+		res = out;
+	}
+
+    regfree(&pat_cmdline);
+
+	return res;
 }

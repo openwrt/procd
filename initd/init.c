@@ -20,6 +20,7 @@
 #include <libubox/uloop.h>
 #include <libubus.h>
 
+#include <limits.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -28,6 +29,7 @@
 #include <unistd.h>
 #include <stdio.h>
 
+#include "../utils/utils.h"
 #include "init.h"
 #include "../watchdog.h"
 
@@ -53,24 +55,16 @@ static struct sigaction sa_shutdown = {
 static void
 cmdline(void)
 {
-	char line[1024];
-	int r, fd = open("/proc/cmdline", O_RDONLY);
-	regex_t pat_cmdline;
-	regmatch_t matches[2];
+	char line[20];
+	char* res;
+	long	r;
 
-	if (fd < 0)
-		return;
-
-	r = read(fd, line, sizeof(line) - 1);
-	line[r] = '\0';
-	close(fd);
-
-	regcomp(&pat_cmdline, "init_debug=([0-9]+)", REG_EXTENDED);
-	if (!regexec(&pat_cmdline, line, 2, matches, 0)) {
-		line[matches[1].rm_eo] = '\0';
-		debug = atoi(&line[matches[1].rm_so]);
+	res = get_cmdline_val("init_debug", line, sizeof(line));
+	if (res != NULL) {
+		r = strtol(line, NULL, 10);
+		if ((r != LONG_MIN) && (r != LONG_MAX))
+			debug = (int) r;
 	}
-	regfree(&pat_cmdline);
 }
 
 int
