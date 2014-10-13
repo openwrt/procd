@@ -12,7 +12,9 @@
  * GNU General Public License for more details.
  */
 
+#include <fcntl.h>
 #include <sys/reboot.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -23,6 +25,7 @@
 #include "plug/hotplug.h"
 #include "watchdog.h"
 #include "service/service.h"
+#include "utils/utils.h"
 
 enum {
 	STATE_NONE = 0,
@@ -37,6 +40,52 @@ enum {
 
 static int state = STATE_NONE;
 static int reboot_event;
+
+static void set_stdio(const char* tty)
+{
+	chdir("/dev");
+	freopen(tty, "r", stdin);
+	freopen(tty, "w", stdout);
+	freopen(tty, "w", stderr);
+	chdir("/");
+	fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
+}
+
+static void set_console(void)
+{
+	const char* tty;
+	char* split;
+	char line[ 20 ];
+	const char* try[] = { "tty0", "console", NULL }; /* Try the most common outputs */
+	int f, i = 0;
+
+	tty = get_cmdline_val("console",line,sizeof(line));
+	if (tty != NULL) {
+		split = strchr(tty, ',');
+		if ( split != NULL )
+			*split = '\0';
+	} else {
+		// Try a default
+		tty=try[i];
+		i++;
+	}
+
+	chdir("/dev");
+	while (tty!=NULL) {
+		f = open(tty, O_RDONLY);
+		if (f >= 0) {
+			close(f);
+			break;
+		}
+
+		tty=try[i];
+		i++;
+	}
+	chdir("/");
+
+	if (tty != NULL)
+		set_stdio(tty);
+}
 
 static void state_enter(void)
 {
@@ -53,6 +102,7 @@ static void state_enter(void)
 	case STATE_UBUS:
 		// try to reopen incase the wdt was not available before coldplug
 		watchdog_init(0);
+		set_stdio("console");
 		LOG("- ubus -\n");
 		procd_connect_ubus();
 		service_init();
@@ -73,6 +123,8 @@ static void state_enter(void)
 		break;
 
 	case STATE_SHUTDOWN:
+		/* Redirect output to the console for the users' benefit */
+		set_console();
 		LOG("- shutdown -\n");
 		procd_inittab_run("shutdown");
 		sync();
