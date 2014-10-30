@@ -55,6 +55,9 @@ static void pipe_cb(struct ustream *s, int bytes)
 		*newline = 0;
 		len = newline + 1 - str;
 		syslog(0, "%s", str);
+#ifdef SHOW_BOOT_ON_CONSOLE
+		fprintf(stderr, "%s\n", str);
+#endif
 		ustream_consume(s, len);
 	} while (1);
 }
