@@ -19,6 +19,8 @@
 #include <libubox/blob.h>
 #include <libubox/blobmsg.h>
 
+#define CMDLINE_SIZE 2048
+
 struct blobmsg_list_node {
 	struct avl_node avl;
 	struct blob_attr *data;

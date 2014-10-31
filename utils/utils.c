@@ -129,8 +129,8 @@ blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2)
 
 char* get_cmdline_val(const char* name, char* out, int len)
 {
-	char pattern[COMMAND_LINE_SIZE + 1];
-	char line[COMMAND_LINE_SIZE + 1];
+	char pattern[CMDLINE_SIZE + 1];
+	char line[CMDLINE_SIZE + 1];
 	char *res = NULL, *tty;
 	int r, fd;
 	regex_t pat_cmdline;
@@ -140,7 +140,7 @@ char* get_cmdline_val(const char* name, char* out, int len)
 	if (fd < 0)
 		return NULL;
 
-	r = read(fd, line, COMMAND_LINE_SIZE);
+	r = read(fd, line, CMDLINE_SIZE);
 	if ( r <= 0 ) {
 		close(fd);
 		return NULL;
