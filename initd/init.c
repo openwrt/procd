@@ -99,10 +99,18 @@ main(int argc, char **argv)
 		ERROR("Failed to start kmodloader\n");
 		exit(-1);
 	}
-	if (pid <= 0)
+	if (pid <= 0) {
 		ERROR("Failed to start kmodloader instance\n");
-	else
-		waitpid(pid, NULL, 0);
+	} else {
+		int i;
+
+		for (i = 0; i < 120; i++) {
+			if (waitpid(pid, NULL, WNOHANG) > 0)
+				break;
+			sleep(1);
+			watchdog_ping();
+		}
+	}
 	uloop_init();
 	preinit();
 	uloop_run();

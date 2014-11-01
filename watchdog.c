@@ -32,11 +32,16 @@ static struct uloop_timeout wdt_timeout;
 static int wdt_fd = -1;
 static int wdt_frequency = 5;
 
-static void watchdog_timeout_cb(struct uloop_timeout *t)
+void watchdog_ping(void)
 {
 	DEBUG(4, "Ping\n");
 	if (write(wdt_fd, "X", 1) < 0)
 		ERROR("WDT failed to write: %s\n", strerror(errno));
+}
+
+static void watchdog_timeout_cb(struct uloop_timeout *t)
+{
+	watchdog_ping();
 	uloop_timeout_set(t, wdt_frequency * 1000);
 }
 
