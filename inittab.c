@@ -64,48 +64,10 @@ static char *ask = "/sbin/askfirst";
 
 static LIST_HEAD(actions);
 
-static int dev_open(const char *dev)
-{
-	int fd = -1;
-
-	if (dev) {
-		chdir("/dev");
-		fd = open( dev, O_RDWR);
-		chdir("/");
-	}
-
-	return fd;
-}
-
-static int dev_exist(const char *dev)
-{
-	int res;
-
-	res = dev_open(dev);
-	if (res != -1) {
-		close(res);
-	}
-
-	return (res != -1);
-}
-
 static void fork_worker(struct init_action *a)
 {
-	int fd;
-	pid_t p;
-
 	a->proc.pid = fork();
 	if (!a->proc.pid) {
-		p = setsid( );
-		fd = dev_open(a->id);
-		if (fd != -1)
-		{
-			dup2(fd, STDIN_FILENO);
-			dup2(fd, STDOUT_FILENO);
-			dup2(fd, STDERR_FILENO);
-			tcsetpgrp(fd, p);
-			close(fd);
-		}
 		execvp(a->argv[0], a->argv);
 		ERROR("Failed to execute %s\n", a->argv[0]);
 		exit(-1);
@@ -149,17 +111,22 @@ static void runrc(struct init_action *a)
 
 static void askfirst(struct init_action *a)
 {
+	struct stat s;
 	int i;
 
-	if (!dev_exist(a->id) || (console && !strcmp(console, a->id))) {
+	chdir("/dev");
+	i = stat(a->id, &s);
+	chdir("/");
+	if (i || (console && !strcmp(console, a->id))) {
 		DEBUG(4, "Skipping %s\n", a->id);
 		return;
 	}
 
 	a->tout.cb = respawn;
-	for (i = MAX_ARGS - 1; i >= 1; i--)
-		a->argv[i] = a->argv[i - 1];
+	for (i = MAX_ARGS - 2; i >= 2; i--)
+		a->argv[i] = a->argv[i - 2];
 	a->argv[0] = ask;
+	a->argv[1] = a->id;
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
@@ -168,24 +135,29 @@ static void askfirst(struct init_action *a)
 
 static void askconsole(struct init_action *a)
 {
+	struct stat s;
 	char line[256], *tty, *split;
 	int i;
 
 	tty = get_cmdline_val("console", line, sizeof(line));
-	split = strchr(tty, ',');
-	if (split)
-		*split = '\0';
-
-	if (!dev_exist(tty)) {
+	split=strchr(tty, ',');
+	if (split != NULL)
+		split = '\0';
+	
+	chdir("/dev");
+	i = stat(tty, &s);
+	chdir("/");
+	if (i) {
 		DEBUG(4, "skipping %s\n", tty);
 		return;
 	}
+	console = strdup(tty);
 
 	a->tout.cb = respawn;
-	for (i = MAX_ARGS - 1; i >= 1; i--)
-		a->argv[i] = a->argv[i - 1];
-	a->id = strdup(tty);
+	for (i = MAX_ARGS - 2; i >= 2; i--)
+		a->argv[i] = a->argv[i - 2];
 	a->argv[0] = ask;
+	a->argv[1] = strdup(tty);
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;

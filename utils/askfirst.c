@@ -19,9 +19,33 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+static int redirect_output(const char *dev)
+{
+	pid_t p = setsid();
+	int fd;
+
+	chdir("/dev");
+	fd = open(dev, O_RDWR);
+	chdir("/");
+
+	if (fd < 0)
+		return -1;
+
+	dup2(fd, STDIN_FILENO);
+	dup2(fd, STDOUT_FILENO);
+	dup2(fd, STDERR_FILENO);
+	tcsetpgrp(fd, p);
+	close(fd);
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	int c;
+
+	if (redirect_output(argv[1]))
+		fprintf(stderr, "%s: Failed to open %s\n", argv[0], argv[1]);
 
 	printf("Please press Enter to activate this console.\n");
 	do {
@@ -31,8 +55,8 @@ int main(int argc, char **argv)
 	}
 	while (c != 0xA);
 
-	execvp(argv[1], &argv[1]);
-	printf("%s: Failed to execute %s\n", argv[0], argv[1]);
+	execvp(argv[2], &argv[2]);
+	printf("%s: Failed to execute %s\n", argv[0], argv[2]);
 
 	return -1;
 }
