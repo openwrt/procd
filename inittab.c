@@ -176,18 +176,23 @@ static void askconsole(struct init_action *a)
 		split = strchr(tty, ',');
 		if (split != NULL)
 			*split = '\0';
-	}
 
-	if (!dev_exist(tty)) {
-		DEBUG(4, "skipping %s\n", tty);
-		return;
+		if (!dev_exist(tty)) {
+			DEBUG(4, "skipping %s\n", tty);
+			return;
+		}
+
+		console = strdup(tty);
+		a->id = strdup(tty);
 	}
-	console = strdup(tty);
+	else {
+		console = NULL;
+		a->id = NULL;
+	}
 
 	a->tout.cb = respawn;
 	for (i = MAX_ARGS - 1; i >= 1; i--)
 		a->argv[i] = a->argv[i - 1];
-	a->id = strdup(tty);
 	a->argv[0] = ask;
 	a->respawn = 500;
 
