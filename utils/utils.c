@@ -129,36 +129,27 @@ blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2)
 
 char* get_cmdline_val(const char* name, char* out, int len)
 {
-	char pattern[CMDLINE_SIZE + 1];
-	char line[CMDLINE_SIZE + 1];
-	char *res = NULL, *tty;
-	int r, fd;
-	regex_t pat_cmdline;
-	regmatch_t matches[2];
-
-	fd = open("/proc/cmdline", O_RDONLY);
-	if (fd < 0)
-		return NULL;
-
-	r = read(fd, line, CMDLINE_SIZE);
-	if ( r <= 0 ) {
-		close(fd);
-		return NULL;
-	}
-	line[r] = '\0';
+	char line[CMDLINE_SIZE + 1], *c, *sptr;
+	int fd = open("/proc/cmdline", O_RDONLY);
+	ssize_t r = read(fd, line, sizeof(line) - 1);
 	close(fd);
 
-	sprintf( pattern, "%s=([^ \n]*)", name);
-	regcomp(&pat_cmdline, pattern, REG_EXTENDED);
-	if (!regexec(&pat_cmdline, line, 2, matches, 0)) {
-		line[matches[1].rm_eo] = '\0';
-		tty = (line + matches[1].rm_so);
-		strncpy(out, tty, len);
-		tty[len-1] = '\0';
-		res = out;
+	if (r <= 0)
+		return NULL;
+
+	line[r] = 0;
+
+	for (c = strtok_r(line, " \t\n", &sptr); c;
+			c = strtok_r(NULL, " \t\n", &sptr)) {
+		char *sep = strchr(c, '=');
+		ssize_t klen = sep - c;
+		if (klen < 0 || strncmp(name, c, klen) || name[klen] != 0)
+			continue;
+
+		strncpy(out, &sep[1], len);
+		out[len-1] = 0;
+		return out;
 	}
 
-	regfree(&pat_cmdline);
-
-	return res;
+	return NULL;
 }
