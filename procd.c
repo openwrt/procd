@@ -62,6 +62,7 @@ int main(int argc, char **argv)
 			return usage(argv[0]);
 		}
 	}
+	setsid();
 	uloop_init();
 	procd_signal();
 	trigger_init();
