@@ -14,6 +14,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -96,16 +97,25 @@ static void fork_worker(struct init_action *a)
 
 	a->proc.pid = fork();
 	if (!a->proc.pid) {
-		p = setsid( );
+		p = setsid();
+
+		close(STDIN_FILENO);
+		close(STDOUT_FILENO);
+		close(STDERR_FILENO);
+
 		fd = dev_open(a->id);
 		if (fd != -1)
 		{
 			dup2(fd, STDIN_FILENO);
 			dup2(fd, STDOUT_FILENO);
 			dup2(fd, STDERR_FILENO);
-			tcsetpgrp(fd, p);
-			close(fd);
+			if (fd > STDERR_FILENO)
+				close(fd);
 		}
+
+		ioctl(STDIN_FILENO, TIOCSCTTY, 1);
+		tcsetpgrp(STDIN_FILENO, p);
+
 		execvp(a->argv[0], a->argv);
 		ERROR("Failed to execute %s\n", a->argv[0]);
 		exit(-1);
