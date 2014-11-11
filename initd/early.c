@@ -29,6 +29,7 @@ early_mounts(void)
 {
 	mount("proc", "/proc", "proc", MS_NOATIME, 0);
 	mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
+	mount("none", "/sys/fs/cgroup", "cgroup", 0, 0);
 
 	mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, NULL);
 	mkdir("/tmp/run", 0777);
