@@ -179,11 +179,13 @@ static const struct blobmsg_policy service_del_attrs[__SERVICE_DEL_ATTR_MAX] = {
 };
 
 enum {
+	SERVICE_LIST_ATTR_NAME,
 	SERVICE_LIST_ATTR_VERBOSE,
 	__SERVICE_LIST_ATTR_MAX,
 };
 
 static const struct blobmsg_policy service_list_attrs[__SERVICE_LIST_ATTR_MAX] = {
+	[SERVICE_LIST_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
 	[SERVICE_LIST_ATTR_VERBOSE] = { "verbose", BLOBMSG_TYPE_BOOL },
 };
 
@@ -256,7 +258,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 }
 
 static void
-service_dump(struct service *s, int verbose)
+service_dump(struct service *s, bool verbose)
 {
 	struct service_instance *in;
 	void *c, *i;
@@ -283,16 +285,23 @@ service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	struct blob_attr *tb[__SERVICE_LIST_ATTR_MAX];
 	struct service *s;
-	int verbose = 0;
+	const char *name = NULL;
+	bool verbose = false;
 
 	blobmsg_parse(service_list_attrs, __SERVICE_LIST_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
 
-	if (tb[SERVICE_LIST_ATTR_VERBOSE] && blobmsg_get_bool(tb[SERVICE_LIST_ATTR_VERBOSE]))
-		verbose = 1;
+	if (tb[SERVICE_LIST_ATTR_VERBOSE])
+		verbose = blobmsg_get_bool(tb[SERVICE_LIST_ATTR_VERBOSE]);
+	if (tb[SERVICE_LIST_ATTR_NAME])
+		name = blobmsg_get_string(tb[SERVICE_LIST_ATTR_NAME]);
 
 	blob_buf_init(&b, 0);
-	avl_for_each_element(&services, s, avl)
+	avl_for_each_element(&services, s, avl) {
+		if (name && strcmp(s->name, name) != 0)
+			continue;
+
 		service_dump(s, verbose);
+	}
 
 	ubus_send_reply(ctx, req, b.head);
 
@@ -458,7 +467,7 @@ service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
 static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
-	UBUS_METHOD("list", service_handle_list, service_attrs),
+	UBUS_METHOD("list", service_handle_list, service_list_attrs),
 	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
 	UBUS_METHOD("update_start", service_handle_update, service_attrs),
 	UBUS_METHOD("update_complete", service_handle_update, service_attrs),
