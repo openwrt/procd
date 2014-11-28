@@ -21,6 +21,11 @@ IF(DEBUG)
   ADD_DEFINITIONS(-DDEBUG -g3)
 ENDIF()
 
+IF(ZRAM_TMPFS)
+  ADD_DEFINITIONS(-DZRAM_TMPFS)
+  SET(SOURCES_ZRAM initd/zram.c)
+ENDIF()
+
 add_subdirectory(upgraded)
 
 ADD_EXECUTABLE(procd ${SOURCES})
@@ -31,7 +36,7 @@ INSTALL(TARGETS procd
 
 
 ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c watchdog.c
-	utils/utils.c)
+	utils/utils.c ${SOURCES_ZRAM})
 TARGET_LINK_LIBRARIES(init ${LIBS})
 INSTALL(TARGETS init
 	RUNTIME DESTINATION sbin

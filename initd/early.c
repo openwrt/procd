@@ -25,25 +25,6 @@
 #include "init.h"
 
 static void
-early_mounts(void)
-{
-	mount("proc", "/proc", "proc", MS_NOATIME, 0);
-	mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
-	mount("none", "/sys/fs/cgroup", "cgroup", 0, 0);
-
-	mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, NULL);
-	mkdir("/tmp/run", 0777);
-	mkdir("/tmp/lock", 0777);
-	mkdir("/tmp/state", 0777);
-	symlink("/tmp", "/var");
-
-	mount("tmpfs", "/dev", "tmpfs", MS_NOATIME, "mode=0755,size=512K");
-	mkdir("/dev/shm", 0755);
-	mkdir("/dev/pts", 0755);
-	mount("devpts", "/dev/pts", "devpts", MS_NOATIME, "mode=600");
-}
-
-static void
 early_dev(void)
 {
 	mkdev("*", 0600);
@@ -78,6 +59,28 @@ early_console(const char *dev)
 }
 
 static void
+early_mounts(void)
+{
+	mount("proc", "/proc", "proc", MS_NOATIME, 0);
+	mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
+	mount("tmpfs", "/dev", "tmpfs", MS_NOATIME, "mode=0755,size=512K");
+	mkdir("/dev/shm", 0755);
+	mkdir("/dev/pts", 0755);
+	mount("devpts", "/dev/pts", "devpts", MS_NOATIME, "mode=600");
+	early_dev();
+
+	early_console("/dev/console");
+	if (mount_zram_on_tmp())
+		mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, NULL);
+	else
+		mkdev("*", 0600);
+	mkdir("/tmp/run", 0777);
+	mkdir("/tmp/lock", 0777);
+	mkdir("/tmp/state", 0777);
+	symlink("/tmp", "/var");
+}
+
+static void
 early_env(void)
 {
 	setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
@@ -90,9 +93,7 @@ early(void)
 		return;
 
 	early_mounts();
-	early_dev();
 	early_env();
-	early_console("/dev/console");
 
 	LOG("Console is alive\n");
 }
