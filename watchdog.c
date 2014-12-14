@@ -35,7 +35,7 @@ static int wdt_frequency = 5;
 void watchdog_ping(void)
 {
 	DEBUG(4, "Ping\n");
-	if (write(wdt_fd, "X", 1) < 0)
+	if (wdt_fd >= 0 && write(wdt_fd, "X", 1) < 0)
 		ERROR("WDT failed to write: %s\n", strerror(errno));
 }
 
