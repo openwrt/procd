@@ -99,10 +99,6 @@ static void fork_worker(struct init_action *a)
 	if (!a->proc.pid) {
 		p = setsid();
 
-		close(STDIN_FILENO);
-		close(STDOUT_FILENO);
-		close(STDERR_FILENO);
-
 		fd = dev_open(a->id);
 		if (fd != -1)
 		{
