@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include <libubox/uloop.h>
 
@@ -64,8 +65,13 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 			    !strcasecmp(key, "processor") ||
 			    !strcasecmp(key, "model name"))
 			{
-				blobmsg_add_string(&b, "system", val + 2);
-				break;
+				strtoul(val + 2, &key, 0);
+
+				if (key == (val + 2) || *key != 0)
+				{
+					blobmsg_add_string(&b, "system", val + 2);
+					break;
+				}
 			}
 		}
 
