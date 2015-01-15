@@ -206,15 +206,15 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_close_array(&b, c);
 
 	c = blobmsg_open_table(&b, "memory");
-	blobmsg_add_u32(&b, "total",    info.mem_unit * info.totalram);
-	blobmsg_add_u32(&b, "free",     info.mem_unit * info.freeram);
-	blobmsg_add_u32(&b, "shared",   info.mem_unit * info.sharedram);
-	blobmsg_add_u32(&b, "buffered", info.mem_unit * info.bufferram);
+	blobmsg_add_u64(&b, "total",    info.mem_unit * info.totalram);
+	blobmsg_add_u64(&b, "free",     info.mem_unit * info.freeram);
+	blobmsg_add_u64(&b, "shared",   info.mem_unit * info.sharedram);
+	blobmsg_add_u64(&b, "buffered", info.mem_unit * info.bufferram);
 	blobmsg_close_table(&b, c);
 
 	c = blobmsg_open_table(&b, "swap");
-	blobmsg_add_u32(&b, "total",    info.mem_unit * info.totalswap);
-	blobmsg_add_u32(&b, "free",     info.mem_unit * info.freeswap);
+	blobmsg_add_u64(&b, "total",    info.mem_unit * info.totalswap);
+	blobmsg_add_u64(&b, "free",     info.mem_unit * info.freeswap);
 	blobmsg_close_table(&b, c);
 
 	ubus_send_reply(ctx, req, b.head);
