@@ -78,7 +78,8 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 		fclose(f);
 	}
 
-	if ((f = fopen("/tmp/sysinfo/model", "r")) != NULL)
+	if ((f = fopen("/tmp/sysinfo/model", "r")) != NULL ||
+	    (f = fopen("/proc/device-tree/model", "r")) != NULL)
 	{
 		if (fgets(line, sizeof(line), f))
 		{
