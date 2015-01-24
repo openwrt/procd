@@ -44,7 +44,7 @@ proc_meminfo(void)
 	fclose(fp);
 
 	if (val > KB(32))
-		val = KB(16);
+		val = KB(32);
 
 	return val;
 }
