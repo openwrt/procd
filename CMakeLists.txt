@@ -26,7 +26,9 @@ IF(ZRAM_TMPFS)
   SET(SOURCES_ZRAM initd/zram.c)
 ENDIF()
 
-add_subdirectory(upgraded)
+IF(BUILD_UPGRADED)
+  add_subdirectory(upgraded)
+ENDIF()
 
 ADD_EXECUTABLE(procd ${SOURCES})
 TARGET_LINK_LIBRARIES(procd ${LIBS})
