@@ -72,6 +72,8 @@ main(int argc, char **argv)
 {
 	pid_t pid;
 
+	ulog_open(ULOG_KMSG, LOG_DAEMON, "init");
+
 	sigaction(SIGTERM, &sa_shutdown, NULL);
 	sigaction(SIGUSR1, &sa_shutdown, NULL);
 	sigaction(SIGUSR2, &sa_shutdown, NULL);

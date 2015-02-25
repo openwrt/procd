@@ -15,23 +15,15 @@
 #ifndef __LOG_H
 #define __LOG_H
 
-#include <syslog.h>
+#include <libubox/ulog.h>
 
 #define DEBUG(level, fmt, ...) do { \
 	if (debug >= level) { \
-		syslog(0, fmt, ## __VA_ARGS__); \
-		fprintf(stderr, "procd: %s(%d): " fmt, __func__, __LINE__, ## __VA_ARGS__); \
+		ulog(LOG_DEBUG, fmt, ## __VA_ARGS__); \
 	} } while (0)
 
-#define LOG(fmt, ...) do { \
-		syslog(0, fmt, ## __VA_ARGS__); \
-		fprintf(stderr, "procd: "fmt, ## __VA_ARGS__); \
-	} while (0)
-
-#define ERROR(fmt, ...) do { \
-		syslog(0, fmt, ## __VA_ARGS__); \
-		fprintf(stderr, "procd: "fmt, ## __VA_ARGS__); \
-	} while (0)
+#define LOG   ULOG_INFO
+#define ERROR ULOG_ERR
 
 extern unsigned int debug;
 

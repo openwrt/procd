@@ -43,6 +43,8 @@ int main(int argc, char **argv)
 	int ch;
 	char *dbglvl = getenv("DBGLVL");
 
+	ulog_open(ULOG_KMSG, LOG_DAEMON, "procd");
+
 	if (dbglvl) {
 		debug = atoi(dbglvl);
 		unsetenv("DBGLVL");

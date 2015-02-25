@@ -21,7 +21,6 @@
 #include <unistd.h>
 #include <stdlib.h>
 
-#include "../log.h"
 #include "init.h"
 
 static void

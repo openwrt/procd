@@ -28,8 +28,6 @@
 
 #include "init.h"
 
-#include "../log.h"
-
 static char **patterns;
 static int n_patterns;
 static char buf[PATH_MAX];

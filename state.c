@@ -116,6 +116,9 @@ static void state_enter(void)
 		procd_inittab_run("askconsole");
 		procd_inittab_run("askfirst");
 		procd_inittab_run("sysinit");
+
+		// switch to syslog log channel
+		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "procd");
 		break;
 
 	case STATE_RUNNING:
