@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <libgen.h>
 
 #include <libubox/md5.h>
 
@@ -42,6 +43,8 @@ enum {
 	INSTANCE_ATTR_WATCH,
 	INSTANCE_ATTR_ERROR,
 	INSTANCE_ATTR_USER,
+	INSTANCE_ATTR_STDOUT,
+	INSTANCE_ATTR_STDERR,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -58,6 +61,8 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_WATCH] = { "watch", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_ERROR] = { "error", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_USER] = { "user", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_STDOUT] = { "stdout", BLOBMSG_TYPE_BOOL },
+	[INSTANCE_ATTR_STDERR] = { "stderr", BLOBMSG_TYPE_BOOL },
 };
 
 struct instance_netdev {
@@ -93,6 +98,12 @@ static const struct rlimit_name rlimit_names[] = {
 	{ NULL, 0 }
 };
 
+static void closefd(int fd)
+{
+	if (fd > STDERR_FILENO)
+		close(fd);
+}
+
 static void
 instance_limits(const char *limit, const char *value)
 {
@@ -126,13 +137,13 @@ instance_limits(const char *limit, const char *value)
 }
 
 static void
-instance_run(struct service_instance *in)
+instance_run(struct service_instance *in, int stdout, int stderr)
 {
 	struct blobmsg_list_node *var;
 	struct blob_attr *cur;
 	char **argv;
 	int argc = 1; /* NULL terminated */
-	int rem, fd;
+	int rem, stdin;
 
 	if (in->nice)
 		setpriority(PRIO_PROCESS, 0, in->nice);
@@ -153,14 +164,28 @@ instance_run(struct service_instance *in)
 		argv[argc++] = blobmsg_data(cur);
 
 	argv[argc] = NULL;
-	fd = open("/dev/null", O_RDWR);
-	if (fd > -1) {
-		dup2(fd, STDIN_FILENO);
-		dup2(fd, STDOUT_FILENO);
-		dup2(fd, STDERR_FILENO);
-		if (fd > STDERR_FILENO)
-			close(fd);
+
+	stdin = open("/dev/null", O_RDONLY);
+
+	if (stdout == -1)
+		stdout = open("/dev/null", O_WRONLY);
+
+	if (stderr == -1)
+		stderr = open("/dev/null", O_WRONLY);
+
+	if (stdin > -1) {
+		dup2(stdin, STDIN_FILENO);
+		closefd(stdin);
 	}
+	if (stdout > -1) {
+		dup2(stdout, STDOUT_FILENO);
+		closefd(stdout);
+	}
+	if (stderr > -1) {
+		dup2(stderr, STDERR_FILENO);
+		closefd(stderr);
+	}
+
 	if (in->uid || in->gid) {
 		setuid(in->uid);
 		setgid(in->gid);
@@ -173,6 +198,8 @@ void
 instance_start(struct service_instance *in)
 {
 	int pid;
+	int opipe[2] = { -1, -1 };
+	int epipe[2] = { -1, -1 };
 
 	if (!avl_is_empty(&in->errors.avl)) {
 		LOG("Not starting instance %s::%s, an error was indicated\n", in->srv->name, in->name);
@@ -181,6 +208,20 @@ instance_start(struct service_instance *in)
 
 	if (in->proc.pending)
 		return;
+
+	if (in->stdout.fd.fd > -2) {
+		if (pipe(opipe)) {
+			ULOG_WARN("pipe() failed: %d (%s)\n", errno, strerror(errno));
+			opipe[0] = opipe[1] = -1;
+		}
+	}
+
+	if (in->stderr.fd.fd > -2) {
+		if (pipe(epipe)) {
+			ULOG_WARN("pipe() failed: %d (%s)\n", errno, strerror(errno));
+			epipe[0] = epipe[1] = -1;
+		}
+	}
 
 	in->restart = false;
 	in->halt = !in->respawn;
@@ -194,7 +235,9 @@ instance_start(struct service_instance *in)
 
 	if (!pid) {
 		uloop_done();
-		instance_run(in);
+		closefd(opipe[0]);
+		closefd(epipe[0]);
+		instance_run(in, opipe[1], epipe[1]);
 		return;
 	}
 
@@ -202,7 +245,61 @@ instance_start(struct service_instance *in)
 	in->proc.pid = pid;
 	clock_gettime(CLOCK_MONOTONIC, &in->start);
 	uloop_process_add(&in->proc);
+
+	if (opipe[0] > -1) {
+		ustream_fd_init(&in->stdout, opipe[0]);
+		closefd(opipe[1]);
+	}
+
+	if (epipe[0] > -1) {
+		ustream_fd_init(&in->stderr, epipe[0]);
+		closefd(epipe[1]);
+	}
+
 	service_event("instance.start", in->srv->name, in->name);
+}
+
+static void
+instance_stdio(struct ustream *s, int prio, struct service_instance *in)
+{
+	char *newline, *str, *arg0, ident[32];
+	int len;
+
+	do {
+		str = ustream_get_read_buf(s, NULL);
+		if (!str)
+			break;
+
+		newline = strchr(str, '\n');
+		if (!newline)
+			break;
+
+		*newline = 0;
+		len = newline + 1 - str;
+
+		arg0 = basename(blobmsg_data(blobmsg_data(in->command)));
+		snprintf(ident, sizeof(ident), "%s[%d]", arg0, in->proc.pid);
+
+		ulog_open(ULOG_STDIO|ULOG_SYSLOG, LOG_DAEMON, ident);
+		ulog(prio, "%s\n", str);
+		ulog_open(ULOG_STDIO|ULOG_SYSLOG, LOG_DAEMON, "procd");
+
+		ustream_consume(s, len);
+	} while (1);
+}
+
+static void
+instance_stdout(struct ustream *s, int bytes)
+{
+	instance_stdio(s, LOG_INFO,
+	               container_of(s, struct service_instance, stdout.stream));
+}
+
+static void
+instance_stderr(struct ustream *s, int bytes)
+{
+	instance_stdio(s, LOG_ERR,
+	               container_of(s, struct service_instance, stderr.stream));
 }
 
 static void
@@ -471,6 +568,12 @@ instance_config_parse(struct service_instance *in)
 		}
 	}
 
+	if (tb[INSTANCE_ATTR_STDOUT] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDOUT]))
+		in->stdout.fd.fd = -1;
+
+	if (tb[INSTANCE_ATTR_STDERR] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDERR]))
+		in->stderr.fd.fd = -1;
+
 	instance_fill_any(&in->data, tb[INSTANCE_ATTR_DATA]);
 
 	if (!instance_fill_array(&in->env, tb[INSTANCE_ATTR_ENV], NULL, false))
@@ -546,6 +649,16 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 void
 instance_free(struct service_instance *in)
 {
+	if (in->stdout.fd.fd > -1) {
+		ustream_free(&in->stdout.stream);
+		close(in->stdout.fd.fd);
+	}
+
+	if (in->stderr.fd.fd > -1) {
+		ustream_free(&in->stderr.stream);
+		close(in->stderr.fd.fd);
+	}
+
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	trigger_del(in);
@@ -564,6 +677,14 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->config = config;
 	in->timeout.cb = instance_timeout;
 	in->proc.cb = instance_exit;
+
+	in->stdout.fd.fd = -2;
+	in->stdout.stream.string_data = true;
+	in->stdout.stream.notify_read = instance_stdout;
+
+	in->stderr.fd.fd = -2;
+	in->stderr.stream.string_data = true;
+	in->stderr.stream.notify_read = instance_stderr;
 
 	blobmsg_list_init(&in->netdev, struct instance_netdev, node, instance_netdev_cmp);
 	blobmsg_list_init(&in->file, struct instance_file, node, instance_file_cmp);

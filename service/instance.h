@@ -17,6 +17,7 @@
 
 #include <libubox/vlist.h>
 #include <libubox/uloop.h>
+#include <libubox/ustream.h>
 #include "../utils/utils.h"
 
 #define RESPAWN_ERROR	(5 * 60)
@@ -45,6 +46,8 @@ struct service_instance {
 	struct blob_attr *config;
 	struct uloop_process proc;
 	struct uloop_timeout timeout;
+	struct ustream_fd stdout;
+	struct ustream_fd stderr;
 
 	struct blob_attr *command;
 	struct blob_attr *trigger;
