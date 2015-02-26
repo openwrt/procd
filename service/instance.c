@@ -280,9 +280,9 @@ instance_stdio(struct ustream *s, int prio, struct service_instance *in)
 		arg0 = basename(blobmsg_data(blobmsg_data(in->command)));
 		snprintf(ident, sizeof(ident), "%s[%d]", arg0, in->proc.pid);
 
-		ulog_open(ULOG_STDIO|ULOG_SYSLOG, LOG_DAEMON, ident);
+		ulog_open(ULOG_SYSLOG, LOG_DAEMON, ident);
 		ulog(prio, "%s\n", str);
-		ulog_open(ULOG_STDIO|ULOG_SYSLOG, LOG_DAEMON, "procd");
+		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "procd");
 
 		ustream_consume(s, len);
 	} while (1);
