@@ -137,13 +137,13 @@ instance_limits(const char *limit, const char *value)
 }
 
 static void
-instance_run(struct service_instance *in, int stdout, int stderr)
+instance_run(struct service_instance *in, int _stdout, int _stderr)
 {
 	struct blobmsg_list_node *var;
 	struct blob_attr *cur;
 	char **argv;
 	int argc = 1; /* NULL terminated */
-	int rem, stdin;
+	int rem, _stdin;
 
 	if (in->nice)
 		setpriority(PRIO_PROCESS, 0, in->nice);
@@ -165,25 +165,25 @@ instance_run(struct service_instance *in, int stdout, int stderr)
 
 	argv[argc] = NULL;
 
-	stdin = open("/dev/null", O_RDONLY);
+	_stdin = open("/dev/null", O_RDONLY);
 
-	if (stdout == -1)
-		stdout = open("/dev/null", O_WRONLY);
+	if (_stdout == -1)
+		_stdout = open("/dev/null", O_WRONLY);
 
-	if (stderr == -1)
-		stderr = open("/dev/null", O_WRONLY);
+	if (_stderr == -1)
+		_stderr = open("/dev/null", O_WRONLY);
 
-	if (stdin > -1) {
-		dup2(stdin, STDIN_FILENO);
-		closefd(stdin);
+	if (_stdin > -1) {
+		dup2(_stdin, STDIN_FILENO);
+		closefd(_stdin);
 	}
-	if (stdout > -1) {
-		dup2(stdout, STDOUT_FILENO);
-		closefd(stdout);
+	if (_stdout > -1) {
+		dup2(_stdout, STDOUT_FILENO);
+		closefd(_stdout);
 	}
-	if (stderr > -1) {
-		dup2(stderr, STDERR_FILENO);
-		closefd(stderr);
+	if (_stderr > -1) {
+		dup2(_stderr, STDERR_FILENO);
+		closefd(_stderr);
 	}
 
 	if (in->uid || in->gid) {
@@ -209,14 +209,14 @@ instance_start(struct service_instance *in)
 	if (in->proc.pending)
 		return;
 
-	if (in->stdout.fd.fd > -2) {
+	if (in->_stdout.fd.fd > -2) {
 		if (pipe(opipe)) {
 			ULOG_WARN("pipe() failed: %d (%s)\n", errno, strerror(errno));
 			opipe[0] = opipe[1] = -1;
 		}
 	}
 
-	if (in->stderr.fd.fd > -2) {
+	if (in->_stderr.fd.fd > -2) {
 		if (pipe(epipe)) {
 			ULOG_WARN("pipe() failed: %d (%s)\n", errno, strerror(errno));
 			epipe[0] = epipe[1] = -1;
@@ -247,12 +247,12 @@ instance_start(struct service_instance *in)
 	uloop_process_add(&in->proc);
 
 	if (opipe[0] > -1) {
-		ustream_fd_init(&in->stdout, opipe[0]);
+		ustream_fd_init(&in->_stdout, opipe[0]);
 		closefd(opipe[1]);
 	}
 
 	if (epipe[0] > -1) {
-		ustream_fd_init(&in->stderr, epipe[0]);
+		ustream_fd_init(&in->_stderr, epipe[0]);
 		closefd(epipe[1]);
 	}
 
@@ -292,14 +292,14 @@ static void
 instance_stdout(struct ustream *s, int bytes)
 {
 	instance_stdio(s, LOG_INFO,
-	               container_of(s, struct service_instance, stdout.stream));
+	               container_of(s, struct service_instance, _stdout.stream));
 }
 
 static void
 instance_stderr(struct ustream *s, int bytes)
 {
 	instance_stdio(s, LOG_ERR,
-	               container_of(s, struct service_instance, stderr.stream));
+	               container_of(s, struct service_instance, _stderr.stream));
 }
 
 static void
@@ -569,10 +569,10 @@ instance_config_parse(struct service_instance *in)
 	}
 
 	if (tb[INSTANCE_ATTR_STDOUT] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDOUT]))
-		in->stdout.fd.fd = -1;
+		in->_stdout.fd.fd = -1;
 
 	if (tb[INSTANCE_ATTR_STDERR] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDERR]))
-		in->stderr.fd.fd = -1;
+		in->_stderr.fd.fd = -1;
 
 	instance_fill_any(&in->data, tb[INSTANCE_ATTR_DATA]);
 
@@ -649,14 +649,14 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 void
 instance_free(struct service_instance *in)
 {
-	if (in->stdout.fd.fd > -1) {
-		ustream_free(&in->stdout.stream);
-		close(in->stdout.fd.fd);
+	if (in->_stdout.fd.fd > -1) {
+		ustream_free(&in->_stdout.stream);
+		close(in->_stdout.fd.fd);
 	}
 
-	if (in->stderr.fd.fd > -1) {
-		ustream_free(&in->stderr.stream);
-		close(in->stderr.fd.fd);
+	if (in->_stderr.fd.fd > -1) {
+		ustream_free(&in->_stderr.stream);
+		close(in->_stderr.fd.fd);
 	}
 
 	uloop_process_delete(&in->proc);
@@ -678,13 +678,13 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->timeout.cb = instance_timeout;
 	in->proc.cb = instance_exit;
 
-	in->stdout.fd.fd = -2;
-	in->stdout.stream.string_data = true;
-	in->stdout.stream.notify_read = instance_stdout;
+	in->_stdout.fd.fd = -2;
+	in->_stdout.stream.string_data = true;
+	in->_stdout.stream.notify_read = instance_stdout;
 
-	in->stderr.fd.fd = -2;
-	in->stderr.stream.string_data = true;
-	in->stderr.stream.notify_read = instance_stderr;
+	in->_stderr.fd.fd = -2;
+	in->_stderr.stream.string_data = true;
+	in->_stderr.stream.notify_read = instance_stderr;
 
 	blobmsg_list_init(&in->netdev, struct instance_netdev, node, instance_netdev_cmp);
 	blobmsg_list_init(&in->file, struct instance_file, node, instance_file_cmp);

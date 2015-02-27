@@ -46,8 +46,8 @@ struct service_instance {
 	struct blob_attr *config;
 	struct uloop_process proc;
 	struct uloop_timeout timeout;
-	struct ustream_fd stdout;
-	struct ustream_fd stderr;
+	struct ustream_fd _stdout;
+	struct ustream_fd _stderr;
 
 	struct blob_attr *command;
 	struct blob_attr *trigger;
