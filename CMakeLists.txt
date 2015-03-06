@@ -14,8 +14,7 @@ SET(SOURCES procd.c signal.c watchdog.c state.c	inittab.c rcS.c	ubus.c system.c
 	service/service.c service/instance.c service/validate.c service/trigger.c service/watch.c
 	plug/coldplug.c plug/hotplug.c utils/utils.c)
 
-find_library(json NAMES json-c json)
-SET(LIBS ubox ubus ${json} blobmsg_json json_script)
+SET(LIBS ubox ubus json-c blobmsg_json json_script)
 
 IF(DEBUG)
   ADD_DEFINITIONS(-DDEBUG -g3)

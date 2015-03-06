@@ -13,7 +13,7 @@
 
 #include <libubox/blobmsg_json.h>
 #include <libubox/avl-cmp.h>
-#include <json/json.h>
+#include <json-c/json.h>
 
 #include "../procd.h"
 
@@ -53,12 +53,12 @@ service_validate_dump_all(struct blob_buf *b, char *p, char *s)
 		if (s && strcmp(s, v->type))
 			continue;
 
-		o = json_object_object_get(r, v->package);
+		json_object_object_get_ex(r, v->package, &o);
 		if (!o) {
 			o = json_object_new_object();
 			json_object_object_add(r, v->package, o);
 		}
-		t = json_object_object_get(o, v->type);
+		json_object_object_get_ex(o, v->type, &t);
 		if (!t) {
 			t = json_object_new_object();
 			json_object_object_add(o, v->type, t);
