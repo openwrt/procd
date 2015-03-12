@@ -12,7 +12,7 @@
  * GNU General Public License for more details.
  */
 
-#define _BSD_SOURCE
+#define _DEFAULT_SOURCE
 
 #include <sys/stat.h>
 #include <sys/types.h>
