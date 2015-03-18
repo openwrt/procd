@@ -31,8 +31,13 @@ int main(int argc, char **argv)
 	}
 	while (c != 0xA);
 
+	if (argc < 2) {
+		printf("%s needs to be called with at least 1 parameter\n", argv[0]);
+		return -1;
+	}
+
 	execvp(argv[1], &argv[1]);
-	printf("Failed to execute %s\n", argv[0]);
+	printf("Failed to execute %s\n", argv[1]);
 
 	return -1;
 }
