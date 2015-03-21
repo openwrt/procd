@@ -15,12 +15,14 @@
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <net/if.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <libgen.h>
+#include <unistd.h>
 
 #include <libubox/md5.h>
 
@@ -45,6 +47,9 @@ enum {
 	INSTANCE_ATTR_USER,
 	INSTANCE_ATTR_STDOUT,
 	INSTANCE_ATTR_STDERR,
+	INSTANCE_ATTR_JAIL,
+	INSTANCE_ATTR_TRACE,
+	INSTANCE_ATTR_SECCOMP,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -63,6 +68,30 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_USER] = { "user", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_STDOUT] = { "stdout", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_STDERR] = { "stderr", BLOBMSG_TYPE_BOOL },
+	[INSTANCE_ATTR_JAIL] = { "jail", BLOBMSG_TYPE_TABLE },
+	[INSTANCE_ATTR_TRACE] = { "trace", BLOBMSG_TYPE_BOOL },
+	[INSTANCE_ATTR_SECCOMP] = { "seccomp", BLOBMSG_TYPE_STRING },
+};
+
+enum {
+	JAIL_ATTR_NAME,
+	JAIL_ATTR_ROOT,
+	JAIL_ATTR_PROCFS,
+	JAIL_ATTR_SYSFS,
+	JAIL_ATTR_UBUS,
+	JAIL_ATTR_LOG,
+	JAIL_ATTR_MOUNT,
+	__JAIL_ATTR_MAX,
+};
+
+static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
+	[JAIL_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[JAIL_ATTR_ROOT] = { "root", BLOBMSG_TYPE_STRING },
+	[JAIL_ATTR_PROCFS] = { "procfs", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_SYSFS] = { "sysfs", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_UBUS] = { "ubus", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_LOG] = { "log", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_MOUNT] = { "mount", BLOBMSG_TYPE_TABLE },
 };
 
 struct instance_netdev {
@@ -97,6 +126,8 @@ static const struct rlimit_name rlimit_names[] = {
 	{ "stack", RLIMIT_STACK },
 	{ NULL, 0 }
 };
+
+static char trace[] = "/sbin/utrace";
 
 static void closefd(int fd)
 {
@@ -136,6 +167,57 @@ instance_limits(const char *limit, const char *value)
 	}
 }
 
+static inline int
+jail_run(struct service_instance *in, char **argv)
+{
+	struct blobmsg_list_node *var;
+	struct jail *jail = &in->jail;
+	int argc = 0;
+
+	argv[argc++] = "/sbin/ujail";
+
+	if (jail->name) {
+		argv[argc++] = "-n";
+		argv[argc++] = jail->name;
+	}
+
+	if (jail->root) {
+		argv[argc++] = "-P";
+		argv[argc++] = jail->root;
+	}
+
+	if (in->seccomp) {
+		argv[argc++] = "-S";
+		argv[argc++] = in->seccomp;
+	}
+
+	if (jail->procfs)
+		argv[argc++] = "-p";
+
+	if (jail->sysfs)
+		argv[argc++] = "-s";
+
+	if (jail->ubus)
+		argv[argc++] = "-u";
+
+	if (jail->log)
+		argv[argc++] = "-l";
+
+	blobmsg_list_for_each(&jail->mount, var) {
+		const char *type = blobmsg_data(var->data);
+
+		if (*type == '1')
+			argv[argc++] = "-w";
+		else
+			argv[argc++] = "-r";
+		argv[argc++] = (char *) blobmsg_name(var->data);
+	}
+
+	argv[argc++] = "--";
+
+	return argc;
+}
+
 static void
 instance_run(struct service_instance *in, int _stdout, int _stderr)
 {
@@ -154,11 +236,25 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	blobmsg_list_for_each(&in->env, var)
 		setenv(blobmsg_name(var->data), blobmsg_data(var->data), 1);
 
+	if (!in->trace && !in->has_jail && in->seccomp) {
+		setenv("SECCOMP_FILE", in->seccomp, 1);
+		setenv("LD_PRELOAD", "/lib/libpreload-seccomp.so", 1);
+	}
+
 	blobmsg_list_for_each(&in->limits, var)
 		instance_limits(blobmsg_name(var->data), blobmsg_data(var->data));
 
-	argv = alloca(sizeof(char *) * argc);
+	if (in->trace)
+		argc += 1;
+
+	argv = alloca(sizeof(char *) * (argc + in->jail.argc));
 	argc = 0;
+
+	if (in->trace)
+		argv[argc++] = trace;
+
+	if (in->has_jail)
+		argc = jail_run(in, argv);
 
 	blobmsg_for_each_attr(cur, in->command, rem)
 		argv[argc++] = blobmsg_data(cur);
@@ -404,6 +500,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (!blobmsg_list_equal(&in->limits, &in_new->limits))
 		return true;
 
+	if (!blobmsg_list_equal(&in->jail.mount, &in_new->jail.mount))
+		return true;
+
 	if (!blobmsg_list_equal(&in->errors, &in_new->errors))
 		return true;
 
@@ -497,6 +596,59 @@ instance_fill_array(struct blobmsg_list *l, struct blob_attr *cur, blobmsg_updat
 	return true;
 }
 
+static int
+instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
+{
+	struct blob_attr *tb[__JAIL_ATTR_MAX];
+	struct jail *jail = &in->jail;
+	struct stat s;
+
+	if (stat("/sbin/ujail", &s))
+		return 0;
+
+	blobmsg_parse(jail_attr, __JAIL_ATTR_MAX, tb,
+		blobmsg_data(attr), blobmsg_data_len(attr));
+
+	jail->argc = 2;
+
+	if (tb[JAIL_ATTR_NAME]) {
+		jail->name = blobmsg_get_string(tb[JAIL_ATTR_NAME]);
+		jail->argc += 2;
+	}
+	if (tb[JAIL_ATTR_ROOT]) {
+		jail->root = blobmsg_get_string(tb[JAIL_ATTR_ROOT]);
+		jail->argc += 2;
+	}
+	if (tb[JAIL_ATTR_PROCFS]) {
+		jail->procfs = blobmsg_get_bool(tb[JAIL_ATTR_PROCFS]);
+		jail->argc++;
+	}
+	if (tb[JAIL_ATTR_SYSFS]) {
+		jail->sysfs = blobmsg_get_bool(tb[JAIL_ATTR_SYSFS]);
+		jail->argc++;
+	}
+	if (tb[JAIL_ATTR_UBUS]) {
+		jail->ubus = blobmsg_get_bool(tb[JAIL_ATTR_UBUS]);
+		jail->argc++;
+	}
+	if (tb[JAIL_ATTR_LOG]) {
+		jail->log = blobmsg_get_bool(tb[JAIL_ATTR_LOG]);
+		jail->argc++;
+	}
+	if (tb[JAIL_ATTR_MOUNT]) {
+		struct blob_attr *cur;
+		int rem;
+
+		blobmsg_for_each_attr(cur, tb[JAIL_ATTR_MOUNT], rem)
+			jail->argc += 2;
+		instance_fill_array(&jail->mount, tb[JAIL_ATTR_MOUNT], NULL, false);
+	}
+	if (in->seccomp)
+		jail->argc += 2;
+
+	return 1;
+}
+
 static bool
 instance_config_parse(struct service_instance *in)
 {
@@ -568,6 +720,21 @@ instance_config_parse(struct service_instance *in)
 		}
 	}
 
+	if (tb[INSTANCE_ATTR_TRACE])
+		in->trace = blobmsg_get_bool(tb[INSTANCE_ATTR_TRACE]);
+
+	if (!in->trace && tb[INSTANCE_ATTR_SECCOMP]) {
+		char *seccomp = blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]);
+		struct stat s;
+
+		if (stat(seccomp, &s))
+			ERROR("%s: not starting seccomp as %s is missing\n", in->name, seccomp);
+		else
+			in->seccomp = seccomp;
+	}
+	if (!in->trace && tb[INSTANCE_ATTR_JAIL])
+		in->has_jail = instance_jail_parse(in, tb[INSTANCE_ATTR_JAIL]);
+
 	if (tb[INSTANCE_ATTR_STDOUT] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDOUT]))
 		in->_stdout.fd.fd = -1;
 
@@ -603,6 +770,7 @@ instance_config_cleanup(struct service_instance *in)
 	blobmsg_list_free(&in->file);
 	blobmsg_list_free(&in->limits);
 	blobmsg_list_free(&in->errors);
+	blobmsg_list_free(&in->jail.mount);
 }
 
 static void
@@ -615,6 +783,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	blobmsg_list_move(&in->file, &in_src->file);
 	blobmsg_list_move(&in->limits, &in_src->limits);
 	blobmsg_list_move(&in->errors, &in_src->errors);
+	blobmsg_list_move(&in->jail.mount, &in_src->jail.mount);
 	in->trigger = in_src->trigger;
 	in->command = in_src->command;
 	in->name = in_src->name;
@@ -692,6 +861,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	blobmsg_list_simple_init(&in->data);
 	blobmsg_list_simple_init(&in->limits);
 	blobmsg_list_simple_init(&in->errors);
+	blobmsg_list_simple_init(&in->jail.mount);
 	in->valid = instance_config_parse(in);
 }
 
@@ -743,6 +913,32 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_add_u32(b, "threshold", in->respawn_threshold);
 		blobmsg_add_u32(b, "retry", in->respawn_retry);
 		blobmsg_close_table(b, r);
+	}
+
+	if (in->trace)
+		blobmsg_add_u8(b, "trace", true);
+
+	if (in->seccomp)
+		blobmsg_add_string(b, "seccomp", in->seccomp);
+
+	if (in->has_jail) {
+		void *r = blobmsg_open_table(b, "jail");
+		if (in->jail.name)
+			blobmsg_add_string(b, "name", in->jail.name);
+		if (in->jail.root)
+			blobmsg_add_string(b, "root", in->jail.root);
+		blobmsg_add_u8(b, "procfs", in->jail.procfs);
+		blobmsg_add_u8(b, "sysfs", in->jail.sysfs);
+		blobmsg_add_u8(b, "ubus", in->jail.ubus);
+		blobmsg_add_u8(b, "log", in->jail.log);
+		blobmsg_close_table(b, r);
+		if (!avl_is_empty(&in->jail.mount.avl)) {
+			struct blobmsg_list_node *var;
+			void *e = blobmsg_open_table(b, "mount");
+			blobmsg_list_for_each(&in->jail.mount, var)
+				blobmsg_add_string(b, blobmsg_name(var->data), blobmsg_data(var->data));
+			blobmsg_close_table(b, e);
+		}
 	}
 
 	if (verbose && in->trigger)

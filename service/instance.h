@@ -22,6 +22,17 @@
 
 #define RESPAWN_ERROR	(5 * 60)
 
+struct jail {
+	bool procfs;
+	bool sysfs;
+	bool ubus;
+	bool log;
+	char *name;
+	char *root;
+	struct blobmsg_list mount;
+	int argc;
+};
+
 struct service_instance {
 	struct vlist_node node;
 	struct service *srv;
@@ -38,6 +49,11 @@ struct service_instance {
 	bool respawn;
 	int respawn_count;
 	struct timespec start;
+
+	bool trace;
+	bool has_jail;
+	struct jail jail;
+	char *seccomp;
 
 	uint32_t respawn_timeout;
 	uint32_t respawn_threshold;
