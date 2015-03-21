@@ -6,5 +6,8 @@ init
 Makefile
 CMakeCache.txt
 CMakeFiles
+utrace
+ujail
+*.so
 *.cmake
 install_manifest.txt
