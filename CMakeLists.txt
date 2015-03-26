@@ -62,18 +62,21 @@ ADD_CUSTOM_COMMAND(
 )
 ADD_CUSTOM_TARGET(headers DEPENDS syscall-names.h)
 
-ADD_EXECUTABLE(ujail jail/jail.c jail/elf.c)
-TARGET_LINK_LIBRARIES(ujail ubox)
-INSTALL(TARGETS ujail
-	RUNTIME DESTINATION sbin
-)
-
+IF(SECCOMP_SUPPORT)
 ADD_LIBRARY(preload-seccomp SHARED jail/preload.c jail/seccomp.c)
 TARGET_LINK_LIBRARIES(preload-seccomp dl ubox blobmsg_json)
 INSTALL(TARGETS preload-seccomp
 	LIBRARY DESTINATION lib
 )
 ADD_DEPENDENCIES(preload-seccomp headers)
+endif()
+
+IF(JAIL_SUPPORT)
+ADD_EXECUTABLE(ujail jail/jail.c jail/elf.c)
+TARGET_LINK_LIBRARIES(ujail ubox)
+INSTALL(TARGETS ujail
+	RUNTIME DESTINATION sbin
+)
 
 ADD_EXECUTABLE(utrace trace/trace.c)
 TARGET_LINK_LIBRARIES(utrace ubox ${json} blobmsg_json)
@@ -87,3 +90,4 @@ TARGET_LINK_LIBRARIES(preload-trace dl)
 INSTALL(TARGETS preload-trace
 	LIBRARY DESTINATION lib
 )
+endif()
