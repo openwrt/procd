@@ -43,7 +43,7 @@
 #include <libubox/uloop.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"P:S:n:r:w:psuld"
+#define OPT_ARGS	"P:S:n:r:w:psuldo"
 
 struct extra {
 	struct list_head list;
@@ -289,6 +289,7 @@ static int spawn_child(void *arg)
 	char **argv = arg;
 	int argc = 0, ch;
 	char *mpoint;
+	int ronly = 0;
 
 	while (argv[argc])
 		argc++;
@@ -304,6 +305,9 @@ static int spawn_child(void *arg)
 			break;
 		case 'p':
 			procfs = 1;
+			break;
+		case 'o':
+			ronly = 1;
 			break;
 		case 's':
 			sysfs = 1;
@@ -331,7 +335,8 @@ static int spawn_child(void *arg)
 		mkdir("/sys", 0755);
 		mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
 	}
-	mount(NULL, "/", NULL, MS_RDONLY | MS_REMOUNT, 0);
+	if (ronly)
+		mount(NULL, "/", NULL, MS_RDONLY | MS_REMOUNT, 0);
 
 	uloop_init();
 
