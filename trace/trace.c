@@ -214,7 +214,8 @@ int main(int argc, char **argv, char **envp)
 	uloop_done();
 
 	if (!json)
-		asprintf(&json, "/tmp/%s.%u.json", basename(*argv), child);
+		if (asprintf(&json, "/tmp/%s.%u.json", basename(*argv), child) < 0)
+			ERROR("failed to allocate output path: %s\n", strerror(errno));
 
 	print_syscalls(policy, json);
 

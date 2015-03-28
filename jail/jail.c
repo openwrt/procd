@@ -313,12 +313,16 @@ static int spawn_child(void *arg)
 			sysfs = 1;
 			break;
 		case 'n':
-			sethostname(optarg, strlen(optarg));
+			if (sethostname(optarg, strlen(optarg)))
+				ERROR("failed to sethostname: %s\n", strerror(errno));
 			break;
 		}
 	}
 
-	asprintf(&mpoint, "%s/old", path);
+	if (asprintf(&mpoint, "%s/old", path) < 0) {
+		ERROR("failed to alloc pivot path: %s\n", strerror(errno));
+		return -1;
+	}
 	mkdir_p(mpoint, 0755);
 	if (pivot_root(path, mpoint) == -1) {
 		ERROR("pivot_root failed:%s\n", strerror(errno));
@@ -370,13 +374,17 @@ static void spawn_namespace(const char *path, int argc, char **argv)
 	char *dir = get_current_dir_name();
 
 	uloop_init();
-	chdir(path);
+	if (chdir(path)) {
+		ERROR("failed to chdir() into the jail\n");
+		return;
+	}
 	namespace_process.pid = clone(spawn_child,
 			child_stack + STACK_SIZE,
 			CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | SIGCHLD, argv);
 
 	if (namespace_process.pid != -1) {
-		chdir(dir);
+		if (chdir(dir))
+			ERROR("failed to chdir() out of the jail\n");
 		free(dir);
 		uloop_process_add(&namespace_process);
 		uloop_run();

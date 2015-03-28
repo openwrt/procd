@@ -43,12 +43,14 @@ static int reboot_event;
 
 static void set_stdio(const char* tty)
 {
-	chdir("/dev");
-	freopen(tty, "r", stdin);
-	freopen(tty, "w", stdout);
-	freopen(tty, "w", stderr);
-	chdir("/");
-	fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
+	if (chdir("/dev") ||
+	    !freopen(tty, "r", stdin) ||
+	    !freopen(tty, "w", stdout) ||
+	    !freopen(tty, "w", stderr) ||
+	    chdir("/"))
+		ERROR("failed to set stdio\n");
+	else
+		fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
 }
 
 static void set_console(void)
@@ -70,7 +72,10 @@ static void set_console(void)
 		i++;
 	}
 
-	chdir("/dev");
+	if (chdir("/dev")) {
+		ERROR("failed to change dir to /dev\n");
+		return;
+	}
 	while (tty!=NULL) {
 		f = open(tty, O_RDONLY);
 		if (f >= 0) {
@@ -81,7 +86,8 @@ static void set_console(void)
 		tty=try[i];
 		i++;
 	}
-	chdir("/");
+	if (chdir("/"))
+		ERROR("failed to change dir to /\n");
 
 	if (tty != NULL)
 		set_stdio(tty);

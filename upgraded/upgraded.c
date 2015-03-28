@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include <libubox/uloop.h>
 
@@ -55,10 +56,12 @@ int main(int argc, char **argv)
 {
 	pid_t p = getpid();
 
-	chdir("/tmp");
-
 	if (p != 1) {
 		fprintf(stderr, "this tool needs to run as pid 1\n");
+		return -1;
+	}
+	if (chdir("/tmp") == -1) {
+		fprintf(stderr, "failed to chdir to /tmp: %s\n", strerror(errno));
 		return -1;
 	}
 	if (argc != 2) {

@@ -38,7 +38,8 @@ check_dbglvl(void)
 
 	if (!fp)
 		return;
-	fscanf(fp, "%d", &lvl);
+	if (fscanf(fp, "%d", &lvl) == EOF)
+		ERROR("failed to read debug level\n");
 	fclose(fp);
 	unlink("/tmp/debug_level");
 

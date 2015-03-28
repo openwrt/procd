@@ -283,8 +283,10 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	}
 
 	if (in->uid || in->gid) {
-		setuid(in->uid);
-		setgid(in->gid);
+		if (setuid(in->uid) || setgid(in->gid)) {
+			ERROR("failed to set uid:%d, gid:%d\n", in->uid, in->gid);
+			exit(127);
+		}
 	}
 	execvp(argv[0], argv);
 	exit(127);

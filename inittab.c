@@ -70,9 +70,11 @@ static int dev_open(const char *dev)
 	int fd = -1;
 
 	if (dev) {
-		chdir("/dev");
-		fd = open( dev, O_RDWR);
-		chdir("/");
+		if (chdir("/dev"))
+			ERROR("failed to change dir to /dev\n");
+		fd = open(dev, O_RDWR);
+		if (chdir("/"))
+			ERROR("failed to change dir to /\n");
 	}
 
 	return fd;
@@ -83,9 +85,8 @@ static int dev_exist(const char *dev)
 	int res;
 
 	res = dev_open(dev);
-	if (res != -1) {
+	if (res != -1)
 		close(res);
-	}
 
 	return (res != -1);
 }

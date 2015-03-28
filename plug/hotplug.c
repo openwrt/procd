@@ -198,7 +198,10 @@ send_to_kernel:
 		ERROR("Failed to open %s\n", loadpath);
 		exit(-1);
 	}
-	write(load, "1", 1);
+	if (write(load, "1", 1) == -1) {
+		ERROR("Failed to write to %s\n", loadpath);
+		exit(-1);
+	}
 	close(load);
 
 	snprintf(syspath, sizeof(syspath), "/sys/%s/data", dev);
@@ -214,7 +217,10 @@ send_to_kernel:
 		if (len <= 0)
 			break;
 
-		write(fw, buf, len);
+		if (write(fw, buf, len) == -1) {
+			ERROR("failed to write firmware file %s/%s to %s\n", dir, file, dev);
+			break;
+		}
 	}
 
 	if (src >= 0)
@@ -222,7 +228,8 @@ send_to_kernel:
 	close(fw);
 
 	load = open(loadpath, O_WRONLY);
-	write(load, "0", 1);
+	if (write(load, "0", 1) == -1)
+		ERROR("failed to write to %s\n", loadpath);
 	close(load);
 
 	DEBUG(2, "Done loading %s\n", path);
