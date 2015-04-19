@@ -871,6 +871,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 {
 	void *i;
 
+	if (!in->valid)
+		return;
+
 	i = blobmsg_open_table(b, in->name);
 	blobmsg_add_u8(b, "running", in->proc.pending);
 	if (in->proc.pending)
