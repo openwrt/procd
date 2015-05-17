@@ -20,6 +20,7 @@
 #include <signal.h>
 #include <string.h>
 #include <unistd.h>
+#include <endian.h>
 
 #include <sys/prctl.h>
 #ifndef PR_SET_NO_NEW_PRIVS
@@ -67,10 +68,18 @@ struct seccomp_data {
 # define ARCH_NR	AUDIT_ARCH_X86_64
 #elif defined(__mips__)
 # define REG_SYSCALL	regs[2]
-# define ARCH_NR	AUDIT_ARCH_MIPSEL
+# if __BYTE_ORDER == __LITTLE_ENDIAN
+#  define ARCH_NR	AUDIT_ARCH_MIPSEL
+# else
+#  define ARCH_NR	AUDIT_ARCH_MIPS
+# endif
 #elif defined(__arm__) && (defined(__ARM_EABI__) || defined(__thumb__))
 # define REG_SYSCALL	regs.uregs[7]
-# define ARCH_NR	AUDIT_ARCH_ARM
+# if __BYTE_ORDER == __LITTLE_ENDIAN
+#  define ARCH_NR	AUDIT_ARCH_ARM
+# else
+#  define ARCH_NR	AUDIT_ARCH_ARMEB
+# endif
 #else
 # warning "Platform does not support seccomp filter yet"
 # define REG_SYSCALL	0
