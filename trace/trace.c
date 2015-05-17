@@ -42,6 +42,8 @@
 # define EF_REG2	8
 # endif
 #define reg_syscall_nr	(EF_REG2 / 4)
+#elif defined(__arm__)
+#define reg_syscall_nr	_offsetof(struct user, regs.uregs[7])
 #else
 #error tracing is not supported on this architecture
 #endif
