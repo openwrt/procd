@@ -68,6 +68,9 @@ struct seccomp_data {
 #elif defined(__mips__)
 # define REG_SYSCALL	regs[2]
 # define ARCH_NR	AUDIT_ARCH_MIPSEL
+#elif defined(__arm__) && (defined(__ARM_EABI__) || defined(__thumb__))
+# define REG_SYSCALL	regs.uregs[7]
+# define ARCH_NR	AUDIT_ARCH_ARM
 #else
 # warning "Platform does not support seccomp filter yet"
 # define REG_SYSCALL	0
