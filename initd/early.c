@@ -77,8 +77,6 @@ early_mounts(void)
 	mkdir("/tmp/run", 0777);
 	mkdir("/tmp/lock", 0777);
 	mkdir("/tmp/state", 0777);
-	if (symlink("/tmp", "/var"))
-		ERROR("failed to symlink /tmp -> /var\n");
 }
 
 static void
