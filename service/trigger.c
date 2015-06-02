@@ -323,12 +323,12 @@ void trigger_init(void)
 	q.max_running_tasks = 1;
 }
 
-static int trigger_match(const char *event, const char *match)
+static bool trigger_match(const char *event, const char *match)
 {
 	char *wildcard = strstr(match, ".*");
 	if (wildcard)
-		return strncmp(event, match, wildcard - match);
-	return strcmp(event, match);
+		return !strncmp(event, match, wildcard - match);
+	return !strcmp(event, match);
 }
 
 void trigger_event(const char *type, struct blob_attr *data)
@@ -338,7 +338,7 @@ void trigger_event(const char *type, struct blob_attr *data)
 	list_for_each_entry(t, &triggers, list) {
 		if (t->remove)
 			continue;
-		if (!trigger_match(type, t->type)) {
+		if (trigger_match(type, t->type)) {
 			if (t->timeout) {
 				free(t->data);
 				t->data = blob_memdup(data);
