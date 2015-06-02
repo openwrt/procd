@@ -336,7 +336,7 @@ void trigger_event(const char *type, struct blob_attr *data)
 	struct trigger *t;
 
 	list_for_each_entry(t, &triggers, list) {
-		if (t->pending || t->remove)
+		if (t->remove)
 			continue;
 		if (!trigger_match(type, t->type)) {
 			if (t->timeout) {
