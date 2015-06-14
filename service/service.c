@@ -213,8 +213,17 @@ static const struct blobmsg_policy validate_policy[__VALIDATE_MAX] = {
 	[VALIDATE_SERVICE] = { .name = "service", .type = BLOBMSG_TYPE_STRING },
 };
 
+enum {
+	DATA_NAME,
+	DATA_INSTANCE,
+	DATA_TYPE,
+	__DATA_MAX
+};
+
 static const struct blobmsg_policy get_data_policy[] = {
-	{ "type", BLOBMSG_TYPE_STRING }
+	[DATA_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[DATA_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+	[DATA_TYPE] = { "type", BLOBMSG_TYPE_STRING },
 };
 
 static int
@@ -424,24 +433,36 @@ service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	struct service_instance *in;
 	struct service *s;
-	struct blob_attr *tb;
+	struct blob_attr *tb[__DATA_MAX];
+	const char *name = NULL;
+	const char *instance = NULL;
 	const char *type = NULL;
 
-	blobmsg_parse(get_data_policy, 1, &tb, blob_data(msg), blob_len(msg));
-	if (tb)
-		type = blobmsg_data(tb);
+	blobmsg_parse(get_data_policy, __DATA_MAX, tb, blob_data(msg), blob_len(msg));
+	if (tb[DATA_NAME])
+		name = blobmsg_data(tb[DATA_NAME]);
+	if (tb[DATA_INSTANCE])
+		instance = blobmsg_data(tb[DATA_INSTANCE]);
+	if (tb[DATA_TYPE])
+		type = blobmsg_data(tb[DATA_TYPE]);
 
 	blob_buf_init(&b, 0);
 	avl_for_each_element(&services, s, avl) {
 		void *cs = NULL;
 
+		if (name && strcmp(name, s->name))
+			continue;
+
 		vlist_for_each_element(&s->instances, in, node) {
 			struct blobmsg_list_node *var;
 			void *ci = NULL;
 
+			if (instance && strcmp(instance, in->name))
+				continue;
+
 			blobmsg_list_for_each(&in->data, var) {
 				if (type &&
-				    strcmp(blobmsg_name(var->data), type) != 0)
+				    strcmp(blobmsg_name(var->data), type))
 					continue;
 
 				if (!cs)
