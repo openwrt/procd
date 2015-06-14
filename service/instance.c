@@ -295,6 +295,8 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	exit(127);
 }
 
+static void instance_free_stdio(struct service_instance *in);
+
 void
 instance_start(struct service_instance *in)
 {
@@ -310,6 +312,7 @@ instance_start(struct service_instance *in)
 	if (in->proc.pending)
 		return;
 
+	instance_free_stdio(in);
 	if (in->_stdout.fd.fd > -2) {
 		if (pipe(opipe)) {
 			ULOG_WARN("pipe() failed: %d (%s)\n", errno, strerror(errno));
@@ -820,19 +823,26 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 	return true;
 }
 
-void
-instance_free(struct service_instance *in)
+static void
+instance_free_stdio(struct service_instance *in)
 {
 	if (in->_stdout.fd.fd > -1) {
 		ustream_free(&in->_stdout.stream);
 		close(in->_stdout.fd.fd);
+		in->_stdout.fd.fd = -1;
 	}
 
 	if (in->_stderr.fd.fd > -1) {
 		ustream_free(&in->_stderr.stream);
 		close(in->_stderr.fd.fd);
+		in->_stderr.fd.fd = -1;
 	}
+}
 
+void
+instance_free(struct service_instance *in)
+{
+	instance_free_stdio(in);
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	trigger_del(in);
