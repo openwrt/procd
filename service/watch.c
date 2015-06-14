@@ -26,11 +26,6 @@ struct watch_object {
 	char *name;
 };
 
-struct watch_subscribe {
-	struct uloop_timeout t;
-	uint32_t id;
-};
-
 static struct ubus_event_handler watch_event;
 static struct ubus_subscriber watch_subscribe;
 static LIST_HEAD(watch_objects);
