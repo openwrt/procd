@@ -366,6 +366,10 @@ instance_stdio(struct ustream *s, int prio, struct service_instance *in)
 	char *newline, *str, *arg0, ident[32];
 	int len;
 
+	arg0 = basename(blobmsg_data(blobmsg_data(in->command)));
+	snprintf(ident, sizeof(ident), "%s[%d]", arg0, in->proc.pid);
+	ulog_open(ULOG_SYSLOG, LOG_DAEMON, ident);
+
 	do {
 		str = ustream_get_read_buf(s, NULL);
 		if (!str)
@@ -376,17 +380,13 @@ instance_stdio(struct ustream *s, int prio, struct service_instance *in)
 			break;
 
 		*newline = 0;
-		len = newline + 1 - str;
-
-		arg0 = basename(blobmsg_data(blobmsg_data(in->command)));
-		snprintf(ident, sizeof(ident), "%s[%d]", arg0, in->proc.pid);
-
-		ulog_open(ULOG_SYSLOG, LOG_DAEMON, ident);
 		ulog(prio, "%s\n", str);
-		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "procd");
 
+		len = newline + 1 - str;
 		ustream_consume(s, len);
 	} while (1);
+
+	ulog_open(ULOG_SYSLOG, LOG_DAEMON, "procd");
 }
 
 static void
