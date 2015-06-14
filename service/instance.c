@@ -917,8 +917,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 
 	if (in->respawn) {
 		void *r = blobmsg_open_table(b, "respawn");
-		blobmsg_add_u32(b, "timeout", in->respawn_timeout);
 		blobmsg_add_u32(b, "threshold", in->respawn_threshold);
+		blobmsg_add_u32(b, "timeout", in->respawn_timeout);
 		blobmsg_add_u32(b, "retry", in->respawn_retry);
 		blobmsg_close_table(b, r);
 	}
