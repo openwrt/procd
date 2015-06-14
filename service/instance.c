@@ -295,7 +295,21 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	exit(127);
 }
 
-static void instance_free_stdio(struct service_instance *in);
+static void
+instance_free_stdio(struct service_instance *in)
+{
+	if (in->_stdout.fd.fd > -1) {
+		ustream_free(&in->_stdout.stream);
+		close(in->_stdout.fd.fd);
+		in->_stdout.fd.fd = -1;
+	}
+
+	if (in->_stderr.fd.fd > -1) {
+		ustream_free(&in->_stderr.stream);
+		close(in->_stderr.fd.fd);
+		in->_stderr.fd.fd = -1;
+	}
+}
 
 void
 instance_start(struct service_instance *in)
@@ -821,22 +835,6 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 		/* restart happens in the child callback handler */
 	}
 	return true;
-}
-
-static void
-instance_free_stdio(struct service_instance *in)
-{
-	if (in->_stdout.fd.fd > -1) {
-		ustream_free(&in->_stdout.stream);
-		close(in->_stdout.fd.fd);
-		in->_stdout.fd.fd = -1;
-	}
-
-	if (in->_stderr.fd.fd > -1) {
-		ustream_free(&in->_stderr.stream);
-		close(in->_stderr.fd.fd);
-		in->_stderr.fd.fd = -1;
-	}
 }
 
 void
