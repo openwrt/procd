@@ -44,7 +44,7 @@ void procd_coldplug(void)
 	umount2("/dev/pts", MNT_DETACH);
 	umount2("/dev/", MNT_DETACH);
 	mount("tmpfs", "/dev", "tmpfs", 0, "mode=0755,size=512K");
-	mkdir("/dev/shm", 0755);
+	mkdir("/dev/shm", 01777);
 	mkdir("/dev/pts", 0755);
 	mount("devpts", "/dev/pts", "devpts", 0, 0);
 	udevtrigger.cb = udevtrigger_complete;

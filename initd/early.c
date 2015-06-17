@@ -64,7 +64,7 @@ early_mounts(void)
 	mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
 	mount("none", "/sys/fs/cgroup", "cgroup", 0, 0);
 	mount("tmpfs", "/dev", "tmpfs", MS_NOATIME, "mode=0755,size=512K");
-	mkdir("/dev/shm", 0755);
+	mkdir("/dev/shm", 01777);
 	mkdir("/dev/pts", 0755);
 	mount("devpts", "/dev/pts", "devpts", MS_NOATIME, "mode=600");
 	early_dev();
