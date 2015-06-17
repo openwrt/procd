@@ -60,6 +60,8 @@ early_console(const char *dev)
 static void
 early_mounts(void)
 {
+	unsigned int oldumask = umask(0);
+
 	mount("proc", "/proc", "proc", MS_NOATIME, 0);
 	mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
 	mount("none", "/sys/fs/cgroup", "cgroup", 0, 0);
@@ -77,6 +79,7 @@ early_mounts(void)
 	mkdir("/tmp/run", 0777);
 	mkdir("/tmp/lock", 0777);
 	mkdir("/tmp/state", 0777);
+	umask(oldumask);
 }
 
 static void
