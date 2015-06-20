@@ -19,7 +19,6 @@
 #include <linux/types.h>
 #include <linux/netlink.h>
 
-#include <libubox/avl-cmp.h>
 #include <libubox/blobmsg_json.h>
 #include <libubox/json_script.h>
 #include <libubox/uloop.h>
@@ -44,20 +43,7 @@ struct cmd_queue {
 	void (*handler)(struct blob_attr *msg, struct blob_attr *data);
 };
 
-struct cmd_interval {
-	struct avl_node avl;
-
-	bool cancelled;
-	struct timespec start;
-	struct uloop_timeout timeout;
-	struct uloop_process process;
-
-	struct blob_attr *msg;
-	struct blob_attr *data;
-};
-
 static LIST_HEAD(cmd_queue);
-static AVL_TREE(cmd_intervals, avl_strcmp, false, NULL);
 static struct uloop_process queue_proc;
 static struct uloop_timeout last_event;
 static struct blob_buf b;
@@ -171,150 +157,6 @@ static void handle_exec(struct blob_attr *msg, struct blob_attr *data)
 	exit(-1);
 }
 
-static void handle_set_interval_timeout(struct uloop_timeout *timeout)
-{
-	struct cmd_interval *interval = container_of(timeout, struct cmd_interval, timeout);
-	struct blob_attr *cur;
-	char *argv[8];
-	int rem, fd;
-	int msecs = 0;
-	int i = 0;
-
-	blobmsg_for_each_attr(cur, interval->data, rem) {
-		switch (i) {
-		case 0:
-			break;
-		case 1:
-			msecs = strtol(blobmsg_get_string(cur), NULL, 0);
-			break;
-		default:
-			argv[i - 2] = blobmsg_data(cur);
-		}
-		i++;
-		if (i - 2 == 7)
-			break;
-	}
-
-	if (interval->process.pending) {
-		uloop_timeout_set(&interval->timeout, msecs);
-		return;
-	}
-
-	interval->process.pid = fork();
-	if (interval->process.pid < 0) {
-		perror("fork");
-	} else if (interval->process.pid == 0) {
-		struct timespec now;
-		char elapsed[6];
-
-		if (i - 2 <= 0)
-			return;
-
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		snprintf(elapsed, sizeof(elapsed), "%ld", now.tv_sec - interval->start.tv_sec);
-
-		blobmsg_for_each_attr(cur, interval->msg, rem)
-			setenv(blobmsg_name(cur), blobmsg_data(cur), 1);
-		setenv("ACTION", "interval", 1);
-		setenv("ELAPSED", elapsed, 1);
-		unsetenv("SEEN");
-
-		if (debug < 3) {
-			fd = open("/dev/null", O_RDWR);
-			if (fd > -1) {
-				dup2(fd, STDIN_FILENO);
-				dup2(fd, STDOUT_FILENO);
-				dup2(fd, STDERR_FILENO);
-				if (fd > STDERR_FILENO)
-					close(fd);
-			}
-		}
-
-		argv[i - 2] = NULL;
-		execvp(argv[0], &argv[0]);
-		exit(-1);
-	} else {
-		uloop_process_add(&interval->process);
-		uloop_timeout_set(&interval->timeout, msecs);
-	}
-}
-
-static void handle_set_interval_process_cb(struct uloop_process *process, int ret)
-{
-	struct cmd_interval *interval = container_of(process, struct cmd_interval, process);
-
-	if (interval->cancelled)
-		free(interval);
-}
-
-static void handle_set_interval(struct blob_attr *msg, struct blob_attr *data)
-{
-	static struct blobmsg_policy set_interval_policy[2] = {
-		{ .type = BLOBMSG_TYPE_STRING },
-		{ .type = BLOBMSG_TYPE_STRING },
-	};
-	struct blob_attr *tb[2];
-	struct cmd_interval *interval;
-	struct blob_attr *_msg, *_data;
-	char *_key;
-	char *name;
-	int msecs;
-
-	blobmsg_parse_array(set_interval_policy, 2, tb, blobmsg_data(data), blobmsg_data_len(data));
-	if (!tb[0] || !tb[1])
-		return;
-	name = blobmsg_get_string(tb[0]);
-	msecs = strtol(blobmsg_get_string(tb[1]), NULL, 0);
-
-	interval = calloc_a(sizeof(struct cmd_interval),
-		&_key, strlen(name) + 1,
-		&_msg, blob_pad_len(msg),
-		&_data, blob_pad_len(data),
-		NULL);
-	if (!interval)
-		return;
-
-	strcpy(_key, name);
-	interval->avl.key = _key;
-	interval->msg = _msg;
-	interval->data = _data;
-	clock_gettime(CLOCK_MONOTONIC, &interval->start);
-	interval->timeout.cb = handle_set_interval_timeout;
-	interval->process.cb = handle_set_interval_process_cb;
-
-	memcpy(interval->msg, msg, blob_pad_len(msg));
-	memcpy(interval->data, data, blob_pad_len(data));
-
-	avl_insert(&cmd_intervals, &interval->avl);
-
-	uloop_timeout_set(&interval->timeout, msecs);
-}
-
-static void handle_clear_interval(struct blob_attr *msg, struct blob_attr *data)
-{
-	static struct blobmsg_policy clear_interval_policy = {
-		.type = BLOBMSG_TYPE_STRING,
-	};
-	struct blob_attr *tb;
-	struct cmd_interval *interval;
-	char *name;
-
-	blobmsg_parse_array(&clear_interval_policy, 1, &tb, blobmsg_data(data), blobmsg_data_len(data));
-	if (!tb)
-		return;
-	name = blobmsg_get_string(tb);
-
-	interval = avl_find_element(&cmd_intervals, name, interval, avl);
-	if (interval) {
-		uloop_timeout_cancel(&interval->timeout);
-		avl_delete(&cmd_intervals, &interval->avl);
-		if (interval->process.pending)
-			interval->cancelled = true;
-		else
-			free(interval);
-	}
-}
-
 static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 {
 	char *dir = blobmsg_get_string(blobmsg_data(data));
@@ -411,14 +253,6 @@ static struct cmd_handler {
 	}, {
 		.name = "exec",
 		.handler = handle_exec,
-	}, {
-		.name = "set-interval",
-		.atomic = 1,
-		.handler = handle_set_interval,
-	}, {
-		.name = "clear-interval",
-		.atomic = 1,
-		.handler = handle_clear_interval,
 	}, {
 		.name = "load-firmware",
 		.handler = handle_firmware,
