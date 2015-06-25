@@ -144,6 +144,11 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 				continue;
 
 			dest = blobmsg_alloc_string_buffer(&b, key, strlen(val));
+			if (!dest) {
+				ERROR("Failed to allocate blob.\n");
+				continue;
+			}
+
 			while (val && (ch = *(val++)) != 0) {
 				switch (ch) {
 				case '\'':

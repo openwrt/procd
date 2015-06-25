@@ -115,6 +115,10 @@ static void add_initd(struct runqueue *q, char *file, char *param)
 	char *p, *f;
 
 	s = calloc_a(sizeof(*s), &f, strlen(file) + 1, &p, strlen(param) + 1);
+	if (!s) {
+		ERROR("Out of memory in %s.\n", file);
+		return;
+	}
 	s->proc.task.type = &initd_type;
 	s->proc.task.complete = q_initd_complete;
 	if (!strcmp(param, "stop") || !strcmp(param, "shutdown"))
@@ -131,6 +135,11 @@ static int _rc(struct runqueue *q, char *path, const char *file, char *pattern, 
 	char *dir = alloca(2 + strlen(path) + strlen(file) + strlen(pattern));
 	glob_t gl;
 	int j;
+
+	if (!dir) {
+		ERROR("Out of memory in %s.\n", file);
+		return -1;
+	}
 
 	DEBUG(2, "running %s/%s%s %s\n", path, file, pattern, param);
 	sprintf(dir, "%s/%s%s", path, file, pattern);
