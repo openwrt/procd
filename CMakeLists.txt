@@ -10,6 +10,13 @@ IF(APPLE)
   LINK_DIRECTORIES(/opt/local/lib)
 ENDIF()
 
+
+ADD_LIBRARY(setlbf SHARED service/setlbf.c)
+INSTALL(TARGETS setlbf
+	LIBRARY DESTINATION lib
+)
+
+
 SET(SOURCES procd.c signal.c watchdog.c state.c	inittab.c rcS.c	ubus.c system.c
 	service/service.c service/instance.c service/validate.c service/trigger.c service/watch.c
 	plug/coldplug.c plug/hotplug.c utils/utils.c)

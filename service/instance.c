@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 
+#define _GNU_SOURCE
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -19,6 +20,7 @@
 #include <net/if.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <libgen.h>
@@ -224,8 +226,11 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	struct blobmsg_list_node *var;
 	struct blob_attr *cur;
 	char **argv;
+	char *ld_preload;
 	int argc = 1; /* NULL terminated */
 	int rem, _stdin;
+	bool seccomp = !in->trace && !in->has_jail && in->seccomp;
+	bool setlbf = _stdout >= 0;
 
 	if (in->nice)
 		setpriority(PRIO_PROCESS, 0, in->nice);
@@ -236,10 +241,14 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	blobmsg_list_for_each(&in->env, var)
 		setenv(blobmsg_name(var->data), blobmsg_data(var->data), 1);
 
-	if (!in->trace && !in->has_jail && in->seccomp) {
+	if (seccomp)
 		setenv("SECCOMP_FILE", in->seccomp, 1);
-		setenv("LD_PRELOAD", "/lib/libpreload-seccomp.so", 1);
-	}
+
+	if ((seccomp || setlbf) && asprintf(&ld_preload, "LD_PRELOAD=%s%s%s",
+			seccomp ? "/lib/libpreload-seccomp.so" : "",
+			seccomp && setlbf ? ":" : "",
+			setlbf ? "/lib/libsetlbf.so" : "") > 0)
+		putenv(ld_preload);
 
 	blobmsg_list_for_each(&in->limits, var)
 		instance_limits(blobmsg_name(var->data), blobmsg_data(var->data));
