@@ -66,16 +66,20 @@ early_mounts(void)
 	mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
 	mount("none", "/sys/fs/cgroup", "cgroup", 0, 0);
 	mount("tmpfs", "/dev", "tmpfs", MS_NOATIME, "mode=0755,size=512K");
-	mkdir("/dev/shm", 01777);
+	symlink("/tmp/shm", "/dev/shm");
 	mkdir("/dev/pts", 0755);
 	mount("devpts", "/dev/pts", "devpts", MS_NOATIME, "mode=600");
 	early_dev();
 
 	early_console("/dev/console");
-	if (mount_zram_on_tmp())
+	if (mount_zram_on_tmp()) {
 		mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, NULL);
-	else
-		mkdev("*", 0600);
+		mkdir("/tmp/shm", 01777);
+	} else {
+		mkdir("/tmp/shm", 01777);
+		mount("tmpfs", "/tmp/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME,
+				"mode=01777");
+	}
 	mkdir("/tmp/run", 0777);
 	mkdir("/tmp/lock", 0777);
 	mkdir("/tmp/state", 0777);
