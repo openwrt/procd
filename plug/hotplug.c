@@ -35,20 +35,57 @@
 
 #define HOTPLUG_WAIT	500
 
+struct cmd_handler;
 struct cmd_queue {
 	struct list_head list;
 
 	struct blob_attr *msg;
 	struct blob_attr *data;
+	int timeout;
+
 	void (*handler)(struct blob_attr *msg, struct blob_attr *data);
+	void (*start)(struct blob_attr *msg, struct blob_attr *data);
+	void (*complete)(struct blob_attr *msg, struct blob_attr *data, int ret);
+};
+
+struct button_timeout {
+	struct list_head list;
+	struct uloop_timeout timeout;
+	char *name;
+	int seen;
+	struct blob_attr *data;
 };
 
 static LIST_HEAD(cmd_queue);
+static LIST_HEAD(button_timer);
 static struct uloop_process queue_proc;
 static struct uloop_timeout last_event;
-static struct blob_buf b;
+static struct blob_buf b, button_buf;
 static char *rule_file;
 static struct blob_buf script;
+static struct cmd_queue *current;
+
+static void queue_add(struct cmd_handler *h, struct blob_attr *msg, struct blob_attr *data);
+static void handle_button_complete(struct blob_attr *msg, struct blob_attr *data, int ret);
+
+static void button_free(struct button_timeout *b)
+{
+	uloop_timeout_cancel(&b->timeout);
+	list_del(&b->list);
+	free(b->data);
+	free(b->name);
+	free(b);
+}
+
+static void button_timeout_remove(char *button)
+{
+	struct button_timeout *b, *c;
+
+	if (!list_empty(&button_timer)) list_for_each_entry_safe(b, c, &button_timer, list) {
+		if (!strcmp(b->name, button))
+			button_free(b);
+	}
+}
 
 static char *hotplug_msg_find_var(struct blob_attr *msg, const char *name)
 {
@@ -157,6 +194,14 @@ static void handle_exec(struct blob_attr *msg, struct blob_attr *data)
 	exit(-1);
 }
 
+static void handle_button_start(struct blob_attr *msg, struct blob_attr *data)
+{
+	char *button = hotplug_msg_find_var(msg, "BUTTON");
+
+	if (button)
+		button_timeout_remove(button);
+}
+
 static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 {
 	char *dir = blobmsg_get_string(blobmsg_data(data));
@@ -237,23 +282,42 @@ send_to_kernel:
 	exit(-1);
 }
 
+enum {
+	HANDLER_MKDEV = 0,
+	HANDLER_RM,
+	HANDLER_EXEC,
+	HANDLER_BUTTON,
+	HANDLER_FW,
+};
+
 static struct cmd_handler {
 	char *name;
 	int atomic;
 	void (*handler)(struct blob_attr *msg, struct blob_attr *data);
+	void (*start)(struct blob_attr *msg, struct blob_attr *data);
+	void (*complete)(struct blob_attr *msg, struct blob_attr *data, int ret);
 } handlers[] = {
-	{
+	[HANDLER_MKDEV] = {
 		.name = "makedev",
 		.atomic = 1,
 		.handler = handle_makedev,
-	}, {
+	},
+	[HANDLER_RM] = {
 		.name = "rm",
 		.atomic = 1,
 		.handler = handle_rm,
-	}, {
+	},
+	[HANDLER_EXEC] = {
 		.name = "exec",
 		.handler = handle_exec,
-	}, {
+	},
+	[HANDLER_BUTTON] = {
+		.name = "button",
+		.handler = handle_exec,
+		.start = handle_button_start,
+		.complete = handle_button_complete,
+	},
+	[HANDLER_FW] = {
 		.name = "load-firmware",
 		.handler = handle_firmware,
 	},
@@ -274,10 +338,13 @@ static void queue_next(void)
 		c->handler(c->msg, c->data);
 		exit(0);
 	}
-
+	if (c->start)
+		c->start(c->msg, c->data);
 	list_del(&c->list);
-	free(c);
-
+	if (c->complete)
+		current = c;
+	else
+		free(c);
 	if (queue_proc.pid <= 0) {
 		queue_next();
 		return;
@@ -292,6 +359,11 @@ static void queue_proc_cb(struct uloop_process *c, int ret)
 {
 	DEBUG(4, "Finished hotplug exec instance, pid=%d\n", (int) c->pid);
 
+	if (current) {
+		current->complete(current->msg, current->data, ret);
+		free(current);
+		current = NULL;
+	}
 	queue_next();
 }
 
@@ -314,8 +386,50 @@ static void queue_add(struct cmd_handler *h, struct blob_attr *msg, struct blob_
 	memcpy(c->msg, msg, blob_pad_len(msg));
 	memcpy(c->data, data, blob_pad_len(data));
 	c->handler = h->handler;
+	c->complete = h->complete;
+	c->start = h->start;
 	list_add_tail(&c->list, &cmd_queue);
 	queue_next();
+}
+
+static void handle_button_timeout(struct uloop_timeout *t)
+{
+	struct button_timeout *b;
+	char seen[16];
+
+	b = container_of(t, struct button_timeout, timeout);
+	blob_buf_init(&button_buf, 0);
+	blobmsg_add_string(&button_buf, "ACTION", "timeout");
+	snprintf(seen, sizeof(seen), "%d", b->seen);
+	blobmsg_add_string(&button_buf, "SEEN", seen);
+	queue_add(&handlers[HANDLER_EXEC], button_buf.head, b->data);
+	button_free(b);
+}
+
+static void handle_button_complete(struct blob_attr *msg, struct blob_attr *data, int ret)
+{
+	char *name = hotplug_msg_find_var(msg, "BUTTON");
+	struct button_timeout *b;
+	int timeout = ret >> 8;
+
+	if (!timeout)
+		return;
+
+	b = malloc(sizeof(*b));
+	if (!b || !name)
+		return;
+
+	memset(b, 0, sizeof(*b));
+
+	b->data = malloc(blob_pad_len(data));
+	b->name = strdup(name);
+	b->seen = timeout;
+
+	memcpy(b->data, data, blob_pad_len(data));
+	b->timeout.cb = handle_button_timeout;
+
+	uloop_timeout_set(&b->timeout, timeout * 1000);
+	list_add(&b->list, &button_timer);
 }
 
 static const char* rule_handle_var(struct json_script_ctx *ctx, const char *name, struct blob_attr *vars)
