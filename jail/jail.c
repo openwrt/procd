@@ -143,7 +143,7 @@ static int build_jail(const char *path)
 
 	mkdir(path, 0755);
 
-	if (mount("tmpfs", path, "tmpfs", MS_NOATIME, "mode=0744")) {
+	if (mount("tmpfs", path, "tmpfs", MS_NOATIME, "mode=0755")) {
 		ERROR("tmpfs mount failed %s\n", strerror(errno));
 		return -1;
 	}
