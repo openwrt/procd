@@ -14,5 +14,5 @@ CC=$1
 echo "#include <asm/unistd.h>"
 echo "static const char *syscall_names[] = {"
 echo "#include <sys/syscall.h>" | ${CC} -E -dM - | grep '^#define __NR_' | \
-	LC_ALL=C sed -r -n -e 's/^\#define[ \t]+__NR_([a-z0-9_]+)[ \t]+([ ()+0-9NR_Linux]+)(.*)/ [\2] = "\1",/p'
+	LC_ALL=C sed -r -n -e 's/^\#define[ \t]+__NR_([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_Linux]+)(.*)/ [\2] = "\1",/p'
 echo "};"
