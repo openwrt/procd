@@ -151,7 +151,10 @@ static void runrc(struct init_action *a)
 		ERROR("valid format is rcS <S|K> <param>\n");
 		return;
 	}
-	rcS(a->argv[1], a->argv[2], rcdone);
+
+	/* proceed even if no init or shutdown scripts run */
+	if (rcS(a->argv[1], a->argv[2], rcdone))
+		rcdone(NULL);
 }
 
 static void askfirst(struct init_action *a)
