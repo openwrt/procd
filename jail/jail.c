@@ -43,7 +43,17 @@
 #include <libubox/uloop.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"P:S:n:r:w:psuldo"
+#define OPT_ARGS	"P:S:n:r:w:d:psulo"
+
+static struct {
+	char *path;
+	char *name;
+	char **jail_argv;
+	char *seccomp;
+	int procfs;
+	int ronly;
+	int sysfs;
+} opts;
 
 struct extra {
 	struct list_head list;
@@ -125,7 +135,7 @@ static int mount_bind(const char *root, const char *path, const char *name, int 
 		return -1;
 	}
 
-	if (readonly && mount(old, new, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL)) {
+	if (readonly && mount(NULL, new, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL)) {
 		ERROR("failed to remount ro %s: %s\n", new, strerror(errno));
 		return -1;
 	}
@@ -135,80 +145,75 @@ static int mount_bind(const char *root, const char *path, const char *name, int 
 	return 0;
 }
 
-static int build_jail(const char *path)
+static int build_jail_fs()
 {
 	struct library *l;
 	struct extra *m;
-	int ret = 0;
 
-	mkdir(path, 0755);
-
-	if (mount("tmpfs", path, "tmpfs", MS_NOATIME, "mode=0755")) {
+	if (mount("tmpfs", opts.path, "tmpfs", MS_NOATIME, "mode=0755")) {
 		ERROR("tmpfs mount failed %s\n", strerror(errno));
 		return -1;
 	}
 
+	if (chdir(opts.path)) {
+		ERROR("failed to chdir() in the jail root\n");
+		return -1;
+	}
+
+	avl_init(&libraries, avl_strcmp, false, NULL);
+	alloc_library_path("/lib64");
+	alloc_library_path("/lib");
+	alloc_library_path("/usr/lib");
+	load_ldso_conf("/etc/ld.so.conf");
+
+	if (elf_load_deps(*opts.jail_argv)) {
+		ERROR("failed to load dependencies\n");
+		return -1;
+	}
+
+	if (opts.seccomp && elf_load_deps("libpreload-seccomp.so")) {
+		ERROR("failed to load libpreload-seccomp.so\n");
+		return -1;
+	}
+
 	avl_for_each_element(&libraries, l, avl)
-		if (mount_bind(path, l->path, l->name, 1, -1))
+		if (mount_bind(opts.path, l->path, l->name, 1, -1))
 			return -1;
 
 	list_for_each_entry(m, &extras, list)
-		if (mount_bind(path, m->path, m->name, m->readonly, 0))
+		if (mount_bind(opts.path, m->path, m->name, m->readonly, 0))
 			return -1;
 
-	return ret;
-}
-
-static void _umount(const char *root, const char *path)
-{
-	char *buf = NULL;
-
-	if (asprintf(&buf, "%s%s", root, path) < 0) {
-		ERROR("failed to alloc umount buffer: %s\n", strerror(errno));
-	} else {
-		DEBUG("umount %s\n", buf);
-		umount(buf);
-		free(buf);
+	char *mpoint;
+	if (asprintf(&mpoint, "%s/old", opts.path) < 0) {
+		ERROR("failed to alloc pivot path: %s\n", strerror(errno));
+		return -1;
 	}
-}
-
-static int stop_jail(const char *root)
-{
-	struct library *l;
-	struct extra *m;
-
-	avl_for_each_element(&libraries, l, avl) {
-		char path[256];
-		char *p = l->path;
-
-		if (strstr(p, "local"))
-			p = "/lib";
-
-		snprintf(path, sizeof(path), "%s%s/%s", root, p, l->name);
-		DEBUG("umount %s\n", path);
-		umount(path);
+	mkdir_p(mpoint, 0755);
+	if (pivot_root(opts.path, mpoint) == -1) {
+		ERROR("pivot_root failed:%s\n", strerror(errno));
+		free(mpoint);
+		return -1;
 	}
-
-	list_for_each_entry(m, &extras, list) {
-		char path[256];
-
-		snprintf(path, sizeof(path), "%s%s/%s", root, m->path, m->name);
-		DEBUG("umount %s\n", path);
-		umount(path);
+	free(mpoint);
+	umount2("/old", MNT_DETACH);
+	rmdir("/old");
+	if (opts.procfs) {
+		mkdir("/proc", 0755);
+		mount("proc", "/proc", "proc", MS_NOATIME, 0);
 	}
-
-	_umount(root, "/proc");
-	_umount(root, "/sys");
-
-	DEBUG("umount %s\n", root);
-	umount(root);
-	rmdir(root);
+	if (opts.sysfs) {
+		mkdir("/sys", 0755);
+		mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
+	}
+	if (opts.ronly)
+		mount(NULL, "/", NULL, MS_RDONLY | MS_REMOUNT, 0);
 
 	return 0;
 }
 
 #define MAX_ENVP	8
-static char** build_envp(const char *seccomp, int debug)
+static char** build_envp(const char *seccomp)
 {
 	static char *envp[MAX_ENVP];
 	static char preload_var[64];
@@ -227,176 +232,76 @@ static char** build_envp(const char *seccomp, int debug)
 		snprintf(preload_var, sizeof(preload_var), "LD_PRELOAD=%s", preload_lib);
 		envp[count++] = preload_var;
 	}
-	if (debug)
+	if (debug > 1)
 		envp[count++] = debug_var;
 
 	return envp;
 }
 
-static int spawn(const char *path, char **argv, const char *seccomp)
+static void usage(void)
 {
-	pid_t pid = fork();
-
-	if (pid < 0) {
-		ERROR("failed to spawn %s: %s\n", *argv, strerror(errno));
-		return -1;
-	} else if (!pid) {
-		char **envp = build_envp(seccomp, 0);
-
-		INFO("spawning %s\n", *argv);
-		execve(*argv, argv, envp);
-		ERROR("failed to spawn child %s: %s\n", *argv, strerror(errno));
-		exit(-1);
-	}
-
-	return pid;
-}
-
-static int usage(void)
-{
-	fprintf(stderr, "jail <options> -D <binary> <params ...>\n");
+	fprintf(stderr, "ujail <options> -- <binary> <params ...>\n");
 	fprintf(stderr, "  -P <path>\tpath where the jail will be staged\n");
 	fprintf(stderr, "  -S <file>\tseccomp filter\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
 	fprintf(stderr, "  -w <file>\twriteable files that should be staged\n");
-	fprintf(stderr, "  -p\t\tjail has /proc\t\n");
-	fprintf(stderr, "  -s\t\tjail has /sys\t\n");
-	fprintf(stderr, "  -l\t\tjail has /dev/log\t\n");
-	fprintf(stderr, "  -u\t\tjail has a ubus socket\t\n");
-
-	return -1;
+	fprintf(stderr, "  -d <num>\tshow debug log (increase num to increase verbosity)\n");
+	fprintf(stderr, "  -p\t\tjail has /proc\n");
+	fprintf(stderr, "  -s\t\tjail has /sys\n");
+	fprintf(stderr, "  -l\t\tjail has /dev/log\n");
+	fprintf(stderr, "  -u\t\tjail has a ubus socket\n");
+	fprintf(stderr, "  -o\t\tremont jail root (/) read only\n");
+	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
+and he has the same powers as root outside the jail,\n\
+thus he can escape the jail and/or break stuff.\n\
+Please use an appropriate seccomp filter (-S) to restrict his powers\n");
 }
 
-static int child_running = 1;
-
-static void child_process_handler(struct uloop_process *c, int ret)
+static int spawn_jail(void *arg)
 {
-	INFO("child (%d) exited: %d\n", c->pid, ret);
-	uloop_end();
-	child_running = 0;
+	if (opts.name && sethostname(opts.name, strlen(opts.name))) {
+		ERROR("failed to sethostname: %s\n", strerror(errno));
+	}
+
+	if (build_jail_fs()) {
+		ERROR("failed to build jail fs");
+		exit(EXIT_FAILURE);
+	}
+
+	char **envp = build_envp(opts.seccomp);
+	if (!envp)
+		exit(EXIT_FAILURE);
+
+	//TODO: drop capabilities() here
+	//prctl(PR_CAPBSET_DROP, ..., 0, 0, 0);
+
+	INFO("exec-ing %s\n", *opts.jail_argv);
+	execve(*opts.jail_argv, opts.jail_argv, envp);
+	//we get there only if execve fails
+	ERROR("failed to execve %s: %s\n", *opts.jail_argv, strerror(errno));
+	exit(EXIT_FAILURE);
 }
 
-struct uloop_process child_process = {
-	.cb = child_process_handler,
-};
+static int jail_running = 1;
+static int jail_return_code = 0;
 
-static int spawn_child(void *arg)
+static void jail_process_handler(struct uloop_process *c, int ret)
 {
-	char *path = get_current_dir_name();
-	int procfs = 0, sysfs = 0;
-	char *seccomp = NULL;
-	char **argv = arg;
-	int argc = 0, ch;
-	char *mpoint;
-	int ronly = 0;
-
-	while (argv[argc])
-		argc++;
-
-	optind = 0;
-	while ((ch = getopt(argc, argv, OPT_ARGS)) != -1) {
-		switch (ch) {
-		case 'd':
-			debug = 1;
-			break;
-		case 'S':
-			seccomp = optarg;
-			break;
-		case 'p':
-			procfs = 1;
-			break;
-		case 'o':
-			ronly = 1;
-			break;
-		case 's':
-			sysfs = 1;
-			break;
-		case 'n':
-			if (sethostname(optarg, strlen(optarg)))
-				ERROR("failed to sethostname: %s\n", strerror(errno));
-			break;
-		}
-	}
-
-	if (asprintf(&mpoint, "%s/old", path) < 0) {
-		ERROR("failed to alloc pivot path: %s\n", strerror(errno));
-		return -1;
-	}
-	mkdir_p(mpoint, 0755);
-	if (pivot_root(path, mpoint) == -1) {
-		ERROR("pivot_root failed:%s\n", strerror(errno));
-		return -1;
-	}
-	free(mpoint);
-	umount2("/old", MNT_DETACH);
-	rmdir("/old");
-	if (procfs) {
-		mkdir("/proc", 0755);
-		mount("proc", "/proc", "proc", MS_NOATIME, 0);
-	}
-	if (sysfs) {
-		mkdir("/sys", 0755);
-		mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
-	}
-	if (ronly)
-		mount(NULL, "/", NULL, MS_RDONLY | MS_REMOUNT, 0);
-
-	uloop_init();
-
-	child_process.pid = spawn(path, &argv[optind], seccomp);
-	uloop_process_add(&child_process);
-	uloop_run();
-	uloop_done();
-	if (child_running) {
-		kill(child_process.pid, SIGTERM);
-		waitpid(child_process.pid, NULL, 0);
-	}
-
-	return 0;
-}
-
-static int namespace_running = 1;
-
-static void namespace_process_handler(struct uloop_process *c, int ret)
-{
-	INFO("namespace (%d) exited: %d\n", c->pid, ret);
-	uloop_end();
-	namespace_running = 0;
-}
-
-struct uloop_process namespace_process = {
-	.cb = namespace_process_handler,
-};
-
-static void spawn_namespace(const char *path, int argc, char **argv)
-{
-	char *dir = get_current_dir_name();
-
-	uloop_init();
-	if (chdir(path)) {
-		ERROR("failed to chdir() into the jail\n");
-		return;
-	}
-	namespace_process.pid = clone(spawn_child,
-			child_stack + STACK_SIZE,
-			CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | SIGCHLD, argv);
-
-	if (namespace_process.pid != -1) {
-		if (chdir(dir))
-			ERROR("failed to chdir() out of the jail\n");
-		free(dir);
-		uloop_process_add(&namespace_process);
-		uloop_run();
-		uloop_done();
-		if (namespace_running) {
-			kill(namespace_process.pid, SIGTERM);
-			waitpid(namespace_process.pid, NULL, 0);
-		}
+	if (WIFEXITED(ret)) {
+		jail_return_code = WEXITSTATUS(ret);
+		INFO("jail (%d) exited with exit: %d\n", c->pid, jail_return_code);
 	} else {
-		ERROR("failed to spawn namespace: %s\n", strerror(errno));
+		jail_return_code = WTERMSIG(ret);
+		INFO("jail (%d) exited with signal: %d\n", c->pid, jail_return_code);
 	}
+	jail_running = 0;
+	uloop_end();
 }
+
+static struct uloop_process jail_process = {
+	.cb = jail_process_handler,
+};
 
 static void add_extra(char *name, int readonly)
 {
@@ -419,16 +324,14 @@ static void add_extra(char *name, int readonly)
 int main(int argc, char **argv)
 {
 	uid_t uid = getuid();
-	const char *name = NULL;
-	char *path = NULL;
-	struct stat s;
-	int ch, ret;
 	char log[] = "/dev/log";
 	char ubus[] = "/var/run/ubus.sock";
+	int ret = EXIT_SUCCESS;
+	int ch;
 
 	if (uid) {
 		ERROR("not root, aborting: %s\n", strerror(errno));
-		return -1;
+		return EXIT_FAILURE;
 	}
 
 	umask(022);
@@ -436,15 +339,27 @@ int main(int argc, char **argv)
 	while ((ch = getopt(argc, argv, OPT_ARGS)) != -1) {
 		switch (ch) {
 		case 'd':
-			debug = 1;
+			debug = atoi(optarg);
 			break;
-		case 'P':
-			path = optarg;
+		case 'p':
+			opts.procfs = 1;
 			break;
-		case 'n':
-			name = optarg;
+		case 'o':
+			opts.ronly = 1;
+			break;
+		case 's':
+			opts.sysfs = 1;
 			break;
 		case 'S':
+			opts.seccomp = optarg;
+			add_extra(optarg, 1);
+			break;
+		case 'P':
+			opts.path = optarg;
+			break;
+		case 'n':
+			opts.name = optarg;
+			break;
 		case 'r':
 			add_extra(optarg, 1);
 			break;
@@ -460,46 +375,52 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (argc - optind < 1)
-		return usage();
-
-	if (!path && asprintf(&path, "/tmp/%s", basename(argv[optind])) == -1) {
-		ERROR("failed to set root path\n: %s", strerror(errno));
-		return -1;
+	//no <binary> param found
+	if (argc - optind < 1) {
+		usage();
+		return EXIT_FAILURE;
 	}
 
-	if (!stat(path, &s)) {
-		ERROR("%s already exists: %s\n", path, strerror(errno));
-		return -1;
+	opts.jail_argv = &argv[optind];
+
+	if (opts.name)
+		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
+
+	if (!opts.path && asprintf(&opts.path, "/tmp/%s", basename(*opts.jail_argv)) == -1) {
+		ERROR("failed to asprintf root path: %s\n", strerror(errno));
+		return EXIT_FAILURE;
 	}
 
-	if (name)
-		prctl(PR_SET_NAME, name, NULL, NULL, NULL);
-
-	avl_init(&libraries, avl_strcmp, false, NULL);
-	alloc_library_path("/lib64");
-	alloc_library_path("/lib");
-	alloc_library_path("/usr/lib");
-	load_ldso_conf("/etc/ld.so.conf");
-
-	if (elf_load_deps(argv[optind])) {
-		ERROR("failed to load dependencies\n");
-		return -1;
+	if (mkdir(opts.path, 0755)) {
+		ERROR("unable to create root path: %s (%s)\n", opts.path, strerror(errno));
+		return EXIT_FAILURE;
 	}
 
-	if (elf_load_deps("libpreload-seccomp.so")) {
-		ERROR("failed to load libpreload-seccomp.so\n");
-		return -1;
+	uloop_init();
+	jail_process.pid = clone(spawn_jail,
+			child_stack + STACK_SIZE,
+			CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD, argv);
+
+	if (jail_process.pid != -1) {
+		uloop_process_add(&jail_process);
+		uloop_run();
+		uloop_done();
+		if (jail_running) {
+			kill(jail_process.pid, SIGTERM);
+			waitpid(jail_process.pid, NULL, 0);
+		}
+	} else {
+		ERROR("failed to spawn namespace: %s\n", strerror(errno));
+		ret = EXIT_FAILURE;
 	}
 
-	ret = build_jail(path);
+	if (rmdir(opts.path)) {
+		ERROR("Unable to remove root path: %s (%s)\n", opts.path, strerror(errno));
+		ret = EXIT_FAILURE;
+	}
 
-	if (!ret)
-		spawn_namespace(path, argc, argv);
-	else
-		ERROR("failed to build jail\n");
+	if (ret)
+		return ret;
 
-	stop_jail(path);
-
-	return ret;
+	return jail_return_code;
 }
