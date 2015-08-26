@@ -37,19 +37,21 @@
 #include <sched.h>
 
 #include "elf.h"
+#include "capabilities.h"
 
 #include <libubox/utils.h>
 #include <libubox/list.h>
 #include <libubox/uloop.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"P:S:n:r:w:d:psulo"
+#define OPT_ARGS	"P:S:C:n:r:w:d:psulo"
 
 static struct {
 	char *path;
 	char *name;
 	char **jail_argv;
 	char *seccomp;
+	char *capabilities;
 	int procfs;
 	int ronly;
 	int sysfs;
@@ -243,6 +245,7 @@ static void usage(void)
 	fprintf(stderr, "ujail <options> -- <binary> <params ...>\n");
 	fprintf(stderr, "  -P <path>\tpath where the jail will be staged\n");
 	fprintf(stderr, "  -S <file>\tseccomp filter\n");
+	fprintf(stderr, "  -C <file>\tcapabilities drop config\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
 	fprintf(stderr, "  -w <file>\twriteable files that should be staged\n");
@@ -255,7 +258,7 @@ static void usage(void)
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
-Please use an appropriate seccomp filter (-S) to restrict his powers\n");
+Please use an appropriate seccomp/capabilities filter (-S/-C) to restrict his powers\n");
 }
 
 static int spawn_jail(void *arg)
@@ -273,8 +276,8 @@ static int spawn_jail(void *arg)
 	if (!envp)
 		exit(EXIT_FAILURE);
 
-	//TODO: drop capabilities() here
-	//prctl(PR_CAPBSET_DROP, ..., 0, 0, 0);
+	if (opts.capabilities && drop_capabilities(opts.capabilities))
+		exit(EXIT_FAILURE);
 
 	INFO("exec-ing %s\n", *opts.jail_argv);
 	execve(*opts.jail_argv, opts.jail_argv, envp);
@@ -352,6 +355,10 @@ int main(int argc, char **argv)
 			break;
 		case 'S':
 			opts.seccomp = optarg;
+			add_extra(optarg, 1);
+			break;
+		case 'C':
+			opts.capabilities = optarg;
 			add_extra(optarg, 1);
 			break;
 		case 'P':
