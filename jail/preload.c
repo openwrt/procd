@@ -27,13 +27,7 @@ static main_t __main__;
 
 static int __preload_main__(int argc, char **argv, char **envp)
 {
-	uid_t uid = getuid();
 	char *env_file = getenv("SECCOMP_FILE");
-
-	if (uid) {
-		INFO("preload-seccomp: %s: not root, cannot install seccomp filter\n", *argv);
-		return -1;
-	}
 
 	if (install_syscall_filter(*argv, env_file))
 		return -1;
