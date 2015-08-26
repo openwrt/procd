@@ -12,8 +12,8 @@
  */
 
 #define INFO(fmt, ...) do { \
-	syslog(0,"perload-jail: "fmt, ## __VA_ARGS__); \
-	fprintf(stderr,"perload-jail: "fmt, ## __VA_ARGS__); \
+	syslog(0,"preload-seccomp: "fmt, ## __VA_ARGS__); \
+	fprintf(stderr,"preload-seccomp: "fmt, ## __VA_ARGS__); \
 	} while (0)
 
 int install_syscall_filter(const char *argv, const char *file);
