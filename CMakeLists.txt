@@ -84,7 +84,9 @@ TARGET_LINK_LIBRARIES(ujail ubox)
 INSTALL(TARGETS ujail
 	RUNTIME DESTINATION sbin
 )
+endif()
 
+IF(UTRACE_SUPPORT)
 ADD_EXECUTABLE(utrace trace/trace.c)
 TARGET_LINK_LIBRARIES(utrace ubox ${json} blobmsg_json)
 INSTALL(TARGETS utrace
