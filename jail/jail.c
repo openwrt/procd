@@ -42,6 +42,7 @@ static struct {
 	char **jail_argv;
 	char *seccomp;
 	char *capabilities;
+	int namespace;
 	int procfs;
 	int ronly;
 	int sysfs;
@@ -233,13 +234,14 @@ static char** build_envp(const char *seccomp)
 static void usage(void)
 {
 	fprintf(stderr, "ujail <options> -- <binary> <params ...>\n");
-	fprintf(stderr, "  -P <path>\tpath where the jail will be staged\n");
-	fprintf(stderr, "  -S <file>\tseccomp filter\n");
+	fprintf(stderr, "  -d <num>\tshow debug log (increase num to increase verbosity)\n");
+	fprintf(stderr, "  -S <file>\tseccomp filter config\n");
 	fprintf(stderr, "  -C <file>\tcapabilities drop config\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
+	fprintf(stderr, "namespace jail options:\n");
+	fprintf(stderr, "  -P <path>\tpath where the jail will be staged\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
 	fprintf(stderr, "  -w <file>\twriteable files that should be staged\n");
-	fprintf(stderr, "  -d <num>\tshow debug log (increase num to increase verbosity)\n");
 	fprintf(stderr, "  -p\t\tjail has /proc\n");
 	fprintf(stderr, "  -s\t\tjail has /sys\n");
 	fprintf(stderr, "  -l\t\tjail has /dev/log\n");
@@ -248,7 +250,26 @@ static void usage(void)
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
-Please use an appropriate seccomp/capabilities filter (-S/-C) to restrict his powers\n");
+Please use seccomp/capabilities (-S/-C) to restrict his powers\n\n\
+If you use none of the namespace jail options,\n\
+ujail will not use namespace/build a jail,\n\
+and will only drop capabilities/apply seccomp filter.\n\n");
+}
+
+static int exec_jail()
+{
+	char **envp = build_envp(opts.seccomp);
+	if (!envp)
+		exit(EXIT_FAILURE);
+
+	if (opts.capabilities && drop_capabilities(opts.capabilities))
+		exit(EXIT_FAILURE);
+
+	INFO("exec-ing %s\n", *opts.jail_argv);
+	execve(*opts.jail_argv, opts.jail_argv, envp);
+	//we get there only if execve fails
+	ERROR("failed to execve %s: %s\n", *opts.jail_argv, strerror(errno));
+	exit(EXIT_FAILURE);
 }
 
 static int spawn_jail(void *arg)
@@ -262,18 +283,7 @@ static int spawn_jail(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	char **envp = build_envp(opts.seccomp);
-	if (!envp)
-		exit(EXIT_FAILURE);
-
-	if (opts.capabilities && drop_capabilities(opts.capabilities))
-		exit(EXIT_FAILURE);
-
-	INFO("exec-ing %s\n", *opts.jail_argv);
-	execve(*opts.jail_argv, opts.jail_argv, envp);
-	//we get there only if execve fails
-	ERROR("failed to execve %s: %s\n", *opts.jail_argv, strerror(errno));
-	exit(EXIT_FAILURE);
+	return exec_jail();
 }
 
 static int jail_running = 1;
@@ -335,12 +345,15 @@ int main(int argc, char **argv)
 			debug = atoi(optarg);
 			break;
 		case 'p':
+			opts.namespace = 1;
 			opts.procfs = 1;
 			break;
 		case 'o':
+			opts.namespace = 1;
 			opts.ronly = 1;
 			break;
 		case 's':
+			opts.namespace = 1;
 			opts.sysfs = 1;
 			break;
 		case 'S':
@@ -352,21 +365,26 @@ int main(int argc, char **argv)
 			add_extra(optarg, 1);
 			break;
 		case 'P':
+			opts.namespace = 1;
 			opts.path = optarg;
 			break;
 		case 'n':
 			opts.name = optarg;
 			break;
 		case 'r':
+			opts.namespace = 1;
 			add_extra(optarg, 1);
 			break;
 		case 'w':
+			opts.namespace = 1;
 			add_extra(optarg, 0);
 			break;
 		case 'u':
+			opts.namespace = 1;
 			add_extra(ubus, 0);
 			break;
 		case 'l':
+			opts.namespace = 1;
 			add_extra(log, 0);
 			break;
 		}
@@ -377,41 +395,59 @@ int main(int argc, char **argv)
 		usage();
 		return EXIT_FAILURE;
 	}
+	if (!(opts.namespace||opts.capabilities||opts.seccomp)) {
+		ERROR("Not using namespaces, capabilities or seccomp !!!\n\n");
+		usage();
+		return EXIT_FAILURE;
+	}
+	DEBUG("Using namespaces(%d), capabilities(%d), seccomp(%d)\n",
+		opts.namespace,
+		opts.capabilities != 0,
+		opts.seccomp != 0);
 
 	opts.jail_argv = &argv[optind];
 
 	if (opts.name)
 		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
 
-	if (!opts.path && asprintf(&opts.path, "/tmp/%s", basename(*opts.jail_argv)) == -1) {
+	if (opts.namespace && !opts.path && asprintf(&opts.path, "/tmp/%s", basename(*opts.jail_argv)) == -1) {
 		ERROR("failed to asprintf root path: %s\n", strerror(errno));
 		return EXIT_FAILURE;
 	}
 
-	if (mkdir(opts.path, 0755)) {
+	if (opts.namespace && mkdir(opts.path, 0755)) {
 		ERROR("unable to create root path: %s (%s)\n", opts.path, strerror(errno));
 		return EXIT_FAILURE;
 	}
 
 	uloop_init();
-	jail_process.pid = clone(spawn_jail,
+	if (opts.namespace) {
+		jail_process.pid = clone(spawn_jail,
 			child_stack + STACK_SIZE,
 			CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD, argv);
+	} else {
+		jail_process.pid = fork();
+	}
 
-	if (jail_process.pid != -1) {
+	if (jail_process.pid > 0) {
+		//parent process
 		uloop_process_add(&jail_process);
 		uloop_run();
 		uloop_done();
 		if (jail_running) {
+			DEBUG("uloop interrupted, killing jail process\n");
 			kill(jail_process.pid, SIGTERM);
 			waitpid(jail_process.pid, NULL, 0);
 		}
+	} else if (jail_process.pid == 0) {
+		//fork child process
+		return exec_jail();
 	} else {
-		ERROR("failed to spawn namespace: %s\n", strerror(errno));
+		ERROR("failed to clone/fork: %s\n", strerror(errno));
 		ret = EXIT_FAILURE;
 	}
 
-	if (rmdir(opts.path)) {
+	if (opts.namespace && rmdir(opts.path)) {
 		ERROR("Unable to remove root path: %s (%s)\n", opts.path, strerror(errno));
 		ret = EXIT_FAILURE;
 	}
