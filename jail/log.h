@@ -12,6 +12,7 @@
  */
 
 extern int debug;
+#include <syslog.h>
 
 #define INFO(fmt, ...) do { \
 	printf("jail: "fmt, ## __VA_ARGS__); \

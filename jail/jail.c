@@ -12,12 +12,6 @@
  */
 
 #define _GNU_SOURCE
-#include <sys/syscall.h>
-#include <sys/mman.h>
-#include <sys/utsname.h>
-#include <sys/types.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
@@ -30,16 +24,12 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <syslog.h>
 #include <libgen.h>
-#include <glob.h>
-#include <elf.h>
 #include <sched.h>
 
 #include "elf.h"
 #include "capabilities.h"
 
-#include <libubox/utils.h>
 #include <libubox/list.h>
 #include <libubox/uloop.h>
 
