@@ -399,6 +399,7 @@ static void handle_button_timeout(struct uloop_timeout *t)
 
 	b = container_of(t, struct button_timeout, timeout);
 	blob_buf_init(&button_buf, 0);
+	blobmsg_add_string(&button_buf, "BUTTON", b->name);
 	blobmsg_add_string(&button_buf, "ACTION", "timeout");
 	snprintf(seen, sizeof(seen), "%d", b->seen);
 	blobmsg_add_string(&button_buf, "SEEN", seen);
