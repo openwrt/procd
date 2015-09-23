@@ -282,7 +282,7 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 	if (tb[WDT_STOP])
 		watchdog_set_stopped(blobmsg_get_bool(tb[WDT_STOP]));
 
-	if (watchdog_fd() < 0)
+	if (watchdog_fd() == NULL)
 		status = "offline";
 	else if (watchdog_get_stopped())
 		status = "stopped";
