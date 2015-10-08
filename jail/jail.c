@@ -193,11 +193,11 @@ static int build_jail_fs()
 	rmdir("/old");
 	if (opts.procfs) {
 		mkdir("/proc", 0755);
-		mount("proc", "/proc", "proc", MS_NOATIME, 0);
+		mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
 	}
 	if (opts.sysfs) {
 		mkdir("/sys", 0755);
-		mount("sysfs", "/sys", "sysfs", MS_NOATIME, 0);
+		mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
 	}
 	if (opts.ronly)
 		mount(NULL, "/", NULL, MS_RDONLY | MS_REMOUNT, 0);
