@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 2.6)
 
 PROJECT(procd C)
+INCLUDE(GNUInstallDirs)
 ADD_DEFINITIONS(-Os -ggdb -Wall -Werror --std=gnu99 -Wmissing-declarations)
 
 SET(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS "")
@@ -13,7 +14,7 @@ ENDIF()
 
 ADD_LIBRARY(setlbf SHARED service/setlbf.c)
 INSTALL(TARGETS setlbf
-	LIBRARY DESTINATION lib
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
 
@@ -39,7 +40,7 @@ ENDIF()
 ADD_EXECUTABLE(procd ${SOURCES})
 TARGET_LINK_LIBRARIES(procd ${LIBS})
 INSTALL(TARGETS procd
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 
@@ -47,19 +48,19 @@ ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c wat
 	utils/utils.c ${SOURCES_ZRAM})
 TARGET_LINK_LIBRARIES(init ${LIBS})
 INSTALL(TARGETS init
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 
 ADD_EXECUTABLE(udevtrigger plug/udevtrigger.c)
 INSTALL(TARGETS udevtrigger
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 
 ADD_EXECUTABLE(askfirst utils/askfirst.c)
 INSTALL(TARGETS askfirst
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 ADD_CUSTOM_COMMAND(
@@ -80,7 +81,7 @@ IF(SECCOMP_SUPPORT)
 ADD_LIBRARY(preload-seccomp SHARED jail/preload.c jail/seccomp.c)
 TARGET_LINK_LIBRARIES(preload-seccomp dl ubox blobmsg_json)
 INSTALL(TARGETS preload-seccomp
-	LIBRARY DESTINATION lib
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 ADD_DEPENDENCIES(preload-seccomp syscall-names-h)
 endif()
@@ -89,7 +90,7 @@ IF(JAIL_SUPPORT)
 ADD_EXECUTABLE(ujail jail/jail.c jail/elf.c jail/capabilities.c)
 TARGET_LINK_LIBRARIES(ujail ubox blobmsg_json)
 INSTALL(TARGETS ujail
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 ADD_DEPENDENCIES(ujail capabilities-names-h)
 endif()
@@ -98,13 +99,13 @@ IF(UTRACE_SUPPORT)
 ADD_EXECUTABLE(utrace trace/trace.c)
 TARGET_LINK_LIBRARIES(utrace ubox ${json} blobmsg_json)
 INSTALL(TARGETS utrace
-	RUNTIME DESTINATION sbin
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 ADD_DEPENDENCIES(utrace syscall-names-h)
 
 ADD_LIBRARY(preload-trace SHARED trace/preload.c)
 TARGET_LINK_LIBRARIES(preload-trace dl)
 INSTALL(TARGETS preload-trace
-	LIBRARY DESTINATION lib
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 endif()
