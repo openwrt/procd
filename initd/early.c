@@ -22,6 +22,7 @@
 #include <stdlib.h>
 
 #include "init.h"
+#include "../libc-compat.h"
 
 static void
 early_dev(void)
@@ -66,7 +67,7 @@ early_mounts(void)
 	mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
 	mount("cgroup", "/sys/fs/cgroup", "cgroup",  MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
 	mount("tmpfs", "/dev", "tmpfs", MS_NOATIME | MS_NOSUID, "mode=0755,size=512K");
-	symlink("/tmp/shm", "/dev/shm");
+	ignore(symlink("/tmp/shm", "/dev/shm"));
 	mkdir("/dev/pts", 0755);
 	mount("devpts", "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "mode=600");
 	early_dev();

@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "../procd.h"
+#include "../libc-compat.h"
 
 #include "hotplug.h"
 
@@ -45,7 +46,7 @@ void procd_coldplug(void)
 	umount2("/dev/pts", MNT_DETACH);
 	umount2("/dev/", MNT_DETACH);
 	mount("tmpfs", "/dev", "tmpfs", MS_NOSUID, "mode=0755,size=512K");
-	symlink("/tmp/shm", "/dev/shm");
+	ignore(symlink("/tmp/shm", "/dev/shm"));
 	mkdir("/dev/pts", 0755);
 	umask(oldumask);
 	mount("devpts", "/dev/pts", "devpts", MS_NOEXEC | MS_NOSUID, 0);
