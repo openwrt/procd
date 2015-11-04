@@ -53,7 +53,7 @@
 } while (0)
 
 #define ERROR(fmt, ...) do { \
-	syslog(0, "utrace: "fmt, ## __VA_ARGS__); \
+	syslog(LOG_ERR, "utrace: "fmt, ## __VA_ARGS__); \
 	fprintf(stderr, "utrace: "fmt, ## __VA_ARGS__); \
 } while (0)
 

@@ -54,7 +54,7 @@ static void pipe_cb(struct ustream *s, int bytes)
 			break;
 		*newline = 0;
 		len = newline + 1 - str;
-		syslog(0, "%s", str);
+		syslog(LOG_NOTICE, "%s", str);
 #ifdef SHOW_BOOT_ON_CONSOLE
 		fprintf(stderr, "%s\n", str);
 #endif

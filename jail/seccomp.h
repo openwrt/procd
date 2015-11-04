@@ -12,7 +12,7 @@
  */
 
 #define INFO(fmt, ...) do { \
-	syslog(0,"preload-seccomp: "fmt, ## __VA_ARGS__); \
+	syslog(LOG_INFO,"preload-seccomp: "fmt, ## __VA_ARGS__); \
 	fprintf(stderr,"preload-seccomp: "fmt, ## __VA_ARGS__); \
 	} while (0)
 
