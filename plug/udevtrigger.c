@@ -114,7 +114,7 @@ static int sysfs_resolve_link(char *devpath, size_t size)
 
 	strlcpy(link_path, "/sys", sizeof(link_path));
 	strlcat(link_path, devpath, sizeof(link_path));
-	len = readlink(link_path, link_target, sizeof(link_target));
+	len = readlink(link_path, link_target, sizeof(link_target) - 1);
 	if (len <= 0)
 		return -1;
 	link_target[len] = '\0';
