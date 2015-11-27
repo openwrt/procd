@@ -182,7 +182,7 @@ static int elf32_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int
 		if (curr->d_tag != DT_STRTAB)
 			continue;
 
-		strtab = map + (curr->d_un.d_val - load_offset);
+		strtab = map + (curr->d_un.d_ptr - load_offset);
 		break;
 	}
 
@@ -216,7 +216,7 @@ static int elf64_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int
 		if (curr->d_tag != DT_STRTAB)
 			continue;
 
-		strtab = map + (curr->d_un.d_val - load_offset);
+		strtab = map + (curr->d_un.d_ptr - load_offset);
 		break;
 	}
 
