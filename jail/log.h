@@ -14,6 +14,7 @@
 #define _JAIL_LOG_H_
 
 extern int debug;
+#include <stdio.h>
 #include <syslog.h>
 
 #define INFO(fmt, ...) do { \
