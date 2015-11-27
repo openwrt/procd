@@ -139,7 +139,7 @@ static int mount_bind(const char *root, const char *path, const char *name, int 
 	return 0;
 }
 
-static int build_jail_fs()
+static int build_jail_fs(void)
 {
 	struct library *l;
 	struct extra *m;
@@ -253,7 +253,7 @@ ujail will not use namespace/build a jail,\n\
 and will only drop capabilities/apply seccomp filter.\n\n");
 }
 
-static int exec_jail()
+static int exec_jail(void)
 {
 	char **envp = build_envp(opts.seccomp);
 	if (!envp)
