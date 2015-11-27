@@ -87,7 +87,7 @@ ADD_DEPENDENCIES(preload-seccomp syscall-names-h)
 endif()
 
 IF(JAIL_SUPPORT)
-ADD_EXECUTABLE(ujail jail/jail.c jail/elf.c jail/capabilities.c)
+ADD_EXECUTABLE(ujail jail/jail.c jail/elf.c jail/fs.c jail/capabilities.c)
 TARGET_LINK_LIBRARIES(ujail ubox blobmsg_json)
 INSTALL(TARGETS ujail
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}

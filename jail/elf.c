@@ -12,14 +12,10 @@
  */
 
 #define _GNU_SOURCE
-#include <sys/mman.h>
 
-#include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <libgen.h>
 #include <glob.h>
 #include <elf.h>
 #include <linux/limits.h>
@@ -27,6 +23,7 @@
 #include <libubox/utils.h>
 
 #include "elf.h"
+#include "fs.h"
 #include "log.h"
 
 struct avl_tree libraries;
@@ -52,7 +49,11 @@ static void alloc_library_path(const char *path)
 	DEBUG("adding ld.so path %s\n", path);
 }
 
-static void alloc_library(const char *path, const char *name)
+/*
+ * path = full path
+ * name = soname/avl key
+ */
+void alloc_library(const char *path, const char *name)
 {
 	struct library *l;
 	char *_name, *_path;
@@ -67,31 +68,25 @@ static void alloc_library(const char *path, const char *name)
 	l->path = strcpy(_path, path);
 
 	avl_insert(&libraries, &l->avl);
-	DEBUG("adding library %s/%s\n", path, name);
+	DEBUG("adding library %s (%s)\n", path, name);
 }
 
-static int elf_open(char **dir, const char *file)
+int lib_open(char **fullpath, const char *file)
 {
 	struct library_path *p;
 	char path[PATH_MAX];
 	int fd = -1;
 
-	*dir = NULL;
+	*fullpath = NULL;
 
 	list_for_each_entry(p, &library_paths, list) {
-		if (strlen(p->path))
-			snprintf(path, sizeof(path), "%s/%s", p->path, file);
-		else
-			strncpy(path, file, sizeof(path));
+		snprintf(path, sizeof(path), "%s/%s", p->path, file);
 		fd = open(path, O_RDONLY);
 		if (fd >= 0) {
-			*dir = p->path;
+			*fullpath = strdup(path);
 			break;
 		}
 	}
-
-	if (fd == -1)
-		fd = open(file, O_RDONLY);
 
 	return fd;
 }
@@ -99,15 +94,12 @@ static int elf_open(char **dir, const char *file)
 const char* find_lib(const char *file)
 {
 	struct library *l;
-	static char path[PATH_MAX];
 
 	l = avl_find_element(&libraries, file, l, avl);
 	if (!l)
 		return NULL;
 
-	snprintf(path, sizeof(path), "%s/%s", l->path, file);
-
-	return path;
+	return l->path;
 }
 
 static int elf64_find_section(const char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
@@ -197,7 +189,7 @@ static int elf32_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int
 		if (curr->d_tag != DT_NEEDED)
 			continue;
 
-		if (elf_load_deps(&strtab[curr->d_un.d_val]))
+		if (add_path_and_deps(&strtab[curr->d_un.d_val], 1, -1, 1))
 			return -1;
 	}
 
@@ -231,79 +223,37 @@ static int elf64_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int
 		if (curr->d_tag != DT_NEEDED)
 			continue;
 
-		if (elf_load_deps(&strtab[curr->d_un.d_val]))
+		if (add_path_and_deps(&strtab[curr->d_un.d_val], 1, -1, 1))
 			return -1;
 	}
 
 	return 0;
 }
 
-int elf_load_deps(const char *library)
+int elf_load_deps(const char *path, const char *map)
 {
 	unsigned int dyn_offset, dyn_size;
 	unsigned int load_offset, load_vaddr;
-	struct stat s;
-	char *map = NULL, *dir = NULL;
-	int clazz, fd, ret = -1;
 
-	if (avl_find(&libraries, library))
-		return 0;
-
-	fd = elf_open(&dir, library);
-
-	if (fd < 0) {
-		ERROR("failed to open %s\n", library);
+	if (elf_find_section(map, PT_LOAD, &load_offset, NULL, &load_vaddr)) {
+		ERROR("failed to load the .load section from %s\n", path);
 		return -1;
 	}
 
-	if (fstat(fd, &s) == -1) {
-		ERROR("failed to stat %s\n", library);
-		ret = -1;
-		goto err_out;
-	}
-
-	map = mmap(NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-	if (map == MAP_FAILED) {
-		ERROR("failed to mmap %s\n", library);
-		ret = -1;
-		goto err_out;
-	}
-
-	if (elf_find_section(map, PT_LOAD, &load_offset, NULL, &load_vaddr)) {
-		ERROR("failed to load the .load section from %s\n", library);
-		ret = -1;
-		goto err_out;
-	}
-
 	if (elf_find_section(map, PT_DYNAMIC, &dyn_offset, &dyn_size, NULL)) {
-		ERROR("failed to load the .dynamic section from %s\n", library);
-		ret = -1;
-		goto err_out;
+		ERROR("failed to load the .dynamic section from %s\n", path);
+		return -1;
 	}
 
-	if (dir) {
-		alloc_library(dir, library);
-	} else {
-		char *elf1 = strdup(library);
-		char *elf2 = strdup(library);
-
-		alloc_library(dirname(elf1), basename(elf2));
-		free(elf1);
-		free(elf2);
-	}
-	clazz = map[EI_CLASS];
+	int clazz = map[EI_CLASS];
 
 	if (clazz == ELFCLASS32)
-		ret = elf32_scan_dynamic(map, dyn_offset, dyn_size, load_vaddr - load_offset);
+		return elf32_scan_dynamic(map, dyn_offset, dyn_size, load_vaddr - load_offset);
 	else if (clazz == ELFCLASS64)
-		ret = elf64_scan_dynamic(map, dyn_offset, dyn_size, load_vaddr - load_offset);
+		return elf64_scan_dynamic(map, dyn_offset, dyn_size, load_vaddr - load_offset);
 
-err_out:
-	if (map)
-		munmap(map, s.st_size);
-	close(fd);
-
-	return ret;
+	ERROR("unknown elf format %d\n", clazz);
+	return -1;
 }
 
 static void load_ldso_conf(const char *conf)

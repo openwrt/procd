@@ -29,8 +29,10 @@ struct library_path {
 
 extern struct avl_tree libraries;
 
-int elf_load_deps(const char *library);
+void alloc_library(const char *path, const char *name);
+int elf_load_deps(const char *path, const char *map);
 const char* find_lib(const char *file);
 void init_library_search(void);
+int lib_open(char **fullpath, const char *file);
 
 #endif

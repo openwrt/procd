@@ -18,7 +18,6 @@
 
 #include <stdlib.h>
 #include <unistd.h>
-#include <values.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -27,11 +26,12 @@
 #include <sched.h>
 #include <linux/limits.h>
 
-#include "elf.h"
 #include "capabilities.h"
+#include "elf.h"
+#include "fs.h"
+#include "jail.h"
 #include "log.h"
 
-#include <libubox/list.h>
 #include <libubox/uloop.h>
 
 #define STACK_SIZE	(1024 * 1024)
@@ -48,16 +48,6 @@ static struct {
 	int ronly;
 	int sysfs;
 } opts;
-
-struct extra {
-	struct list_head list;
-
-	const char *path;
-	const char *name;
-	int readonly;
-};
-
-static LIST_HEAD(extras);
 
 extern int pivot_root(const char *new_root, const char *put_old);
 
@@ -90,28 +80,23 @@ static int mkdir_p(char *dir, mode_t mask)
 	return ret;
 }
 
-static int mount_bind(const char *root, const char *path, const char *name, int readonly, int error)
+int mount_bind(const char *root, const char *path, int readonly, int error)
 {
 	struct stat s;
-	char old[PATH_MAX];
 	char new[PATH_MAX];
 	int fd;
 
-	snprintf(old, sizeof(old), "%s/%s", path, name);
-	snprintf(new, sizeof(new), "%s%s", root, path);
-
-	mkdir_p(new, 0755);
-
-	snprintf(new, sizeof(new), "%s%s/%s", root, path, name);
-
-	if (stat(old, &s)) {
-		ERROR("%s does not exist\n", old);
+	if (stat(path, &s)) {
+		ERROR("stat(%s) failed: %s\n", path, strerror(errno));
 		return error;
 	}
 
+	snprintf(new, sizeof(new), "%s%s", root, path);
 	if (S_ISDIR(s.st_mode)) {
 		mkdir_p(new, 0755);
 	} else {
+		mkdir_p(dirname(new), 0755);
+		snprintf(new, sizeof(new), "%s%s", root, path);
 		fd = creat(new, 0644);
 		if (fd == -1) {
 			ERROR("failed to create %s: %s\n", new, strerror(errno));
@@ -120,8 +105,8 @@ static int mount_bind(const char *root, const char *path, const char *name, int 
 		close(fd);
 	}
 
-	if (mount(old, new, NULL, MS_BIND, NULL)) {
-		ERROR("failed to mount -B %s %s: %s\n", old, new, strerror(errno));
+	if (mount(path, new, NULL, MS_BIND, NULL)) {
+		ERROR("failed to mount -B %s %s: %s\n", path, new, strerror(errno));
 		return -1;
 	}
 
@@ -130,16 +115,13 @@ static int mount_bind(const char *root, const char *path, const char *name, int 
 		return -1;
 	}
 
-	DEBUG("mount -B %s %s\n", old, new);
+	DEBUG("mount -B %s %s\n", path, new);
 
 	return 0;
 }
 
 static int build_jail_fs(void)
 {
-	struct library *l;
-	struct extra *m;
-
 	if (mount("tmpfs", opts.path, "tmpfs", MS_NOATIME, "mode=0755")) {
 		ERROR("tmpfs mount failed %s\n", strerror(errno));
 		return -1;
@@ -150,25 +132,20 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	init_library_search();
-
-	if (elf_load_deps(*opts.jail_argv)) {
+	if (add_path_and_deps(*opts.jail_argv, 1, -1, 0)) {
 		ERROR("failed to load dependencies\n");
 		return -1;
 	}
 
-	if (opts.seccomp && elf_load_deps("libpreload-seccomp.so")) {
+	if (opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
 		ERROR("failed to load libpreload-seccomp.so\n");
 		return -1;
 	}
 
-	avl_for_each_element(&libraries, l, avl)
-		if (mount_bind(opts.path, l->path, l->name, 1, -1))
-			return -1;
-
-	list_for_each_entry(m, &extras, list)
-		if (mount_bind(opts.path, m->path, m->name, m->readonly, 0))
-			return -1;
+	if (mount_all(opts.path)) {
+		ERROR("mount_all() failed\n");
+		return -1;
+	}
 
 	char *mpoint;
 	if (asprintf(&mpoint, "%s/old", opts.path) < 0) {
@@ -299,24 +276,6 @@ static struct uloop_process jail_process = {
 	.cb = jail_process_handler,
 };
 
-static void add_extra(char *name, int readonly)
-{
-	struct extra *f;
-
-	if (*name != '/') {
-		ERROR("%s is not an absolute path\n", name);
-		return;
-	}
-
-	f = calloc(1, sizeof(struct extra));
-
-	f->name = basename(name);
-	f->path = dirname(strdup(name));
-	f->readonly = readonly;
-
-	list_add_tail(&f->list, &extras);
-}
-
 int main(int argc, char **argv)
 {
 	uid_t uid = getuid();
@@ -331,6 +290,8 @@ int main(int argc, char **argv)
 	}
 
 	umask(022);
+	mount_list_init();
+	init_library_search();
 
 	while ((ch = getopt(argc, argv, OPT_ARGS)) != -1) {
 		switch (ch) {
@@ -351,11 +312,11 @@ int main(int argc, char **argv)
 			break;
 		case 'S':
 			opts.seccomp = optarg;
-			add_extra(optarg, 1);
+			add_mount(optarg, 1, -1);
 			break;
 		case 'C':
 			opts.capabilities = optarg;
-			add_extra(optarg, 1);
+			add_mount(optarg, 1, -1);
 			break;
 		case 'P':
 			opts.namespace = 1;
@@ -366,19 +327,19 @@ int main(int argc, char **argv)
 			break;
 		case 'r':
 			opts.namespace = 1;
-			add_extra(optarg, 1);
+			add_path_and_deps(optarg, 1, 0, 0);
 			break;
 		case 'w':
 			opts.namespace = 1;
-			add_extra(optarg, 0);
+			add_path_and_deps(optarg, 0, 0, 0);
 			break;
 		case 'u':
 			opts.namespace = 1;
-			add_extra(ubus, 0);
+			add_mount(ubus, 0, -1);
 			break;
 		case 'l':
 			opts.namespace = 1;
-			add_extra(log, 0);
+			add_mount(log, 0, -1);
 			break;
 		}
 	}
