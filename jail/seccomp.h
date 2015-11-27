@@ -10,6 +10,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#ifndef _JAIL_SECCOMP_H_
+#define _JAIL_SECCOMP_H_
 
 #define INFO(fmt, ...) do { \
 	syslog(LOG_INFO,"preload-seccomp: "fmt, ## __VA_ARGS__); \
@@ -17,3 +19,5 @@
 	} while (0)
 
 int install_syscall_filter(const char *argv, const char *file);
+
+#endif

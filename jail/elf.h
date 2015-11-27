@@ -10,8 +10,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#ifndef _JAIL_ELF_H_
+#define _JAIL_ELF_H_
 
-#ifndef _ELF_H__
 #include <libubox/avl.h>
 #include <libubox/avl-cmp.h>
 

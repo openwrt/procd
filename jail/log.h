@@ -10,6 +10,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#ifndef _JAIL_LOG_H_
+#define _JAIL_LOG_H_
 
 extern int debug;
 #include <syslog.h>
@@ -25,3 +27,4 @@ extern int debug;
 	if (debug) printf("jail: "fmt, ## __VA_ARGS__); \
 	} while (0)
 
+#endif
