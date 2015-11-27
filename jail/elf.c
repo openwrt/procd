@@ -100,17 +100,12 @@ const char* find_lib(const char *file)
 {
 	struct library *l;
 	static char path[PATH_MAX];
-	const char *p;
 
 	l = avl_find_element(&libraries, file, l, avl);
 	if (!l)
 		return NULL;
 
-	p = l->path;
-	if (strstr(p, "local"))
-		p = "/lib";
-
-	snprintf(path, sizeof(path), "%s/%s", p, file);
+	snprintf(path, sizeof(path), "%s/%s", l->path, file);
 
 	return path;
 }

@@ -92,21 +92,17 @@ static int mkdir_p(char *dir, mode_t mask)
 
 static int mount_bind(const char *root, const char *path, const char *name, int readonly, int error)
 {
-	const char *p = path;
 	struct stat s;
 	char old[PATH_MAX];
 	char new[PATH_MAX];
 	int fd;
 
-	if (strstr(p, "local"))
-		p = "/lib";
-
 	snprintf(old, sizeof(old), "%s/%s", path, name);
-	snprintf(new, sizeof(new), "%s%s", root, p);
+	snprintf(new, sizeof(new), "%s%s", root, path);
 
 	mkdir_p(new, 0755);
 
-	snprintf(new, sizeof(new), "%s%s/%s", root, p, name);
+	snprintf(new, sizeof(new), "%s%s/%s", root, path, name);
 
 	if (stat(old, &s)) {
 		ERROR("%s does not exist\n", old);
