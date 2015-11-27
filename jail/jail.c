@@ -154,11 +154,7 @@ static int build_jail_fs()
 		return -1;
 	}
 
-	avl_init(&libraries, avl_strcmp, false, NULL);
-	alloc_library_path("/lib");
-	alloc_library_path("/lib64");
-	alloc_library_path("/usr/lib");
-	load_ldso_conf("/etc/ld.so.conf");
+	init_library_search();
 
 	if (elf_load_deps(*opts.jail_argv)) {
 		ERROR("failed to load dependencies\n");

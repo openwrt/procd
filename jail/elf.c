@@ -32,7 +32,7 @@
 struct avl_tree libraries;
 static LIST_HEAD(library_paths);
 
-void alloc_library_path(const char *path)
+static void alloc_library_path(const char *path)
 {
 	struct stat s;
 	if (stat(path, &s))
@@ -311,7 +311,7 @@ err_out:
 	return ret;
 }
 
-void load_ldso_conf(const char *conf)
+static void load_ldso_conf(const char *conf)
 {
 	FILE* fp = fopen(conf, "r");
 	char line[PATH_MAX];
@@ -355,4 +355,13 @@ void load_ldso_conf(const char *conf)
 	}
 
 	fclose(fp);
+}
+
+void init_library_search(void)
+{
+	avl_init(&libraries, avl_strcmp, false, NULL);
+	alloc_library_path("/lib");
+	alloc_library_path("/lib64");
+	alloc_library_path("/usr/lib");
+	load_ldso_conf("/etc/ld.so.conf");
 }
