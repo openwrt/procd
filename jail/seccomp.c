@@ -10,11 +10,9 @@
  * found in the LICENSE file.
  */
 #define _GNU_SOURCE 1
-#include <stdio.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <syslog.h>
 
 #include <libubox/utils.h>
 #include <libubox/blobmsg.h>
