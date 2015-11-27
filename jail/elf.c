@@ -69,7 +69,7 @@ static void alloc_library(const char *path, const char *name)
 	DEBUG("adding library %s/%s\n", path, name);
 }
 
-static int elf_open(char **dir, char *file)
+static int elf_open(char **dir, const char *file)
 {
 	struct library_path *p;
 	char path[256];
@@ -95,7 +95,7 @@ static int elf_open(char **dir, char *file)
 	return fd;
 }
 
-char* find_lib(char *file)
+const char* find_lib(const char *file)
 {
 	struct library *l;
 	static char path[256];
@@ -114,7 +114,7 @@ char* find_lib(char *file)
 	return path;
 }
 
-static int elf64_find_section(char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
+static int elf64_find_section(const char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
 {
 	Elf64_Ehdr *e;
 	Elf64_Phdr *ph;
@@ -137,7 +137,7 @@ static int elf64_find_section(char *map, unsigned int type, unsigned int *offset
 	return -1;
 }
 
-static int elf32_find_section(char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
+static int elf32_find_section(const char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
 {
 	Elf32_Ehdr *e;
 	Elf32_Phdr *ph;
@@ -160,7 +160,7 @@ static int elf32_find_section(char *map, unsigned int type, unsigned int *offset
 	return -1;
 }
 
-static int elf_find_section(char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
+static int elf_find_section(const char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
 {
 	int clazz = map[EI_CLASS];
 
@@ -174,10 +174,10 @@ static int elf_find_section(char *map, unsigned int type, unsigned int *offset, 
 	return -1;
 }
 
-static int elf32_scan_dynamic(char *map, int dyn_offset, int dyn_size, int load_offset)
+static int elf32_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int load_offset)
 {
 	Elf32_Dyn *dynamic = (Elf32_Dyn *) (map + dyn_offset);
-	char *strtab = NULL;
+	const char *strtab = NULL;
 
 	while ((void *) dynamic < (void *) (map + dyn_offset + dyn_size)) {
 		Elf32_Dyn *curr = dynamic;
@@ -208,10 +208,10 @@ static int elf32_scan_dynamic(char *map, int dyn_offset, int dyn_size, int load_
 	return 0;
 }
 
-static int elf64_scan_dynamic(char *map, int dyn_offset, int dyn_size, int load_offset)
+static int elf64_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int load_offset)
 {
 	Elf64_Dyn *dynamic = (Elf64_Dyn *) (map + dyn_offset);
-	char *strtab = NULL;
+	const char *strtab = NULL;
 
 	while ((void *) dynamic < (void *) (map + dyn_offset + dyn_size)) {
 		Elf64_Dyn *curr = dynamic;
@@ -242,7 +242,7 @@ static int elf64_scan_dynamic(char *map, int dyn_offset, int dyn_size, int load_
 	return 0;
 }
 
-int elf_load_deps(char *library)
+int elf_load_deps(const char *library)
 {
 	unsigned int dyn_offset, dyn_size;
 	unsigned int load_offset, load_vaddr;
@@ -288,10 +288,12 @@ int elf_load_deps(char *library)
 	if (dir) {
 		alloc_library(dir, library);
 	} else {
-		char *elf = strdup(library);
+		char *elf1 = strdup(library);
+		char *elf2 = strdup(library);
 
-		alloc_library(dirname(elf), basename(library));
-		free(elf);
+		alloc_library(dirname(elf1), basename(elf2));
+		free(elf1);
+		free(elf2);
 	}
 	clazz = map[EI_CLASS];
 

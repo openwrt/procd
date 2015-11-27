@@ -212,7 +212,7 @@ static char** build_envp(const char *seccomp)
 	static char preload_var[64];
 	static char seccomp_var[64];
 	static char debug_var[] = "LD_DEBUG=all";
-	char *preload_lib = find_lib("libpreload-seccomp.so");
+	const char *preload_lib = find_lib("libpreload-seccomp.so");
 	int count = 0;
 
 	if (seccomp && !preload_lib) {
