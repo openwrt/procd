@@ -79,6 +79,29 @@ void mount_list_init(void) {
 	avl_init(&mounts, avl_strcmp, false, NULL);
 }
 
+static int add_script_interp(const char *path, const char *map, int size)
+{
+	int start = 2;
+	while (start < size && map[start] != '/') {
+		start++;
+	}
+	if (start >= size) {
+		ERROR("bad script interp (%s)", path);
+		return -1;
+	}
+	int stop = start + 1;
+	while (stop < size && map[stop] > 0x20 && map[stop] <= 0x7e) {
+		stop++;
+	}
+	if (stop >= size || (stop-start) > PATH_MAX) {
+		ERROR("bad script interp (%s)", path);
+		return -1;
+	}
+	char buf[PATH_MAX];
+	strncpy(buf, map+start, stop-start);
+	return add_path_and_deps(buf, 1, -1, 0);
+}
+
 int add_path_and_deps(const char *path, int readonly, int error, int lib)
 {
 	assert(path != NULL);
@@ -132,6 +155,11 @@ int add_path_and_deps(const char *path, int readonly, int error, int lib)
 	if (map == MAP_FAILED) {
 		ERROR("failed to mmap %s\n", path);
 		ret = -1;
+		goto out;
+	}
+
+	if (map[0] == '#' && map[1] == '!') {
+		ret = add_script_interp(path, map, s.st_size);
 		goto out;
 	}
 
