@@ -33,6 +33,10 @@ static LIST_HEAD(library_paths);
 
 void alloc_library_path(const char *path)
 {
+	struct stat s;
+	if (stat(path, &s))
+		return;
+
 	struct library_path *p;
 	char *_path;
 
@@ -343,10 +347,6 @@ void load_ldso_conf(const char *conf)
 				load_ldso_conf(gl.gl_pathv[i]);
 			globfree(&gl);
 		} else {
-			struct stat s;
-
-			if (stat(line, &s))
-				continue;
 			alloc_library_path(line);
 		}
 	}
