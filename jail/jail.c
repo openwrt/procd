@@ -154,8 +154,8 @@ static int build_jail_fs()
 	}
 
 	avl_init(&libraries, avl_strcmp, false, NULL);
-	alloc_library_path("/lib64");
 	alloc_library_path("/lib");
+	alloc_library_path("/lib64");
 	alloc_library_path("/usr/lib");
 	load_ldso_conf("/etc/ld.so.conf");
 
