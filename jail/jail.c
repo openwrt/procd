@@ -272,7 +272,7 @@ static int exec_jail()
 	exit(EXIT_FAILURE);
 }
 
-static int spawn_jail(void *arg)
+static int spawn_jail(void *_notused)
 {
 	if (opts.name && sethostname(opts.name, strlen(opts.name))) {
 		ERROR("failed to sethostname: %s\n", strerror(errno));
@@ -424,7 +424,7 @@ int main(int argc, char **argv)
 	if (opts.namespace) {
 		jail_process.pid = clone(spawn_jail,
 			child_stack + STACK_SIZE,
-			CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD, argv);
+			CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD, NULL);
 	} else {
 		jail_process.pid = fork();
 	}
