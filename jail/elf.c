@@ -26,6 +26,7 @@
 #include <libubox/utils.h>
 
 #include "elf.h"
+#include "log.h"
 
 struct avl_tree libraries;
 static LIST_HEAD(library_paths);

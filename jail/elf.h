@@ -16,8 +16,6 @@
 #include <libubox/avl.h>
 #include <libubox/avl-cmp.h>
 
-#include "log.h"
-
 struct library {
 	struct avl_node avl;
 	char *name;

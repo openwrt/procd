@@ -28,6 +28,7 @@
 
 #include "elf.h"
 #include "capabilities.h"
+#include "log.h"
 
 #include <libubox/list.h>
 #include <libubox/uloop.h>
