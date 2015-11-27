@@ -234,6 +234,7 @@ int elf_load_deps(const char *path, const char *map)
 {
 	unsigned int dyn_offset, dyn_size;
 	unsigned int load_offset, load_vaddr;
+	unsigned int interp_offset;
 
 	if (elf_find_section(map, PT_LOAD, &load_offset, NULL, &load_vaddr)) {
 		ERROR("failed to load the .load section from %s\n", path);
@@ -243,6 +244,10 @@ int elf_load_deps(const char *path, const char *map)
 	if (elf_find_section(map, PT_DYNAMIC, &dyn_offset, &dyn_size, NULL)) {
 		ERROR("failed to load the .dynamic section from %s\n", path);
 		return -1;
+	}
+
+	if (elf_find_section(map, PT_INTERP, &interp_offset, NULL, NULL) == 0) {
+		add_path_and_deps(map+interp_offset, 1, -1, 0);
 	}
 
 	int clazz = map[EI_CLASS];
