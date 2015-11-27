@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <libgen.h>
 #include <sched.h>
+#include <linux/limits.h>
 
 #include "elf.h"
 #include "capabilities.h"
@@ -93,8 +94,8 @@ static int mount_bind(const char *root, const char *path, const char *name, int 
 {
 	const char *p = path;
 	struct stat s;
-	char old[256];
-	char new[256];
+	char old[PATH_MAX];
+	char new[PATH_MAX];
 	int fd;
 
 	if (strstr(p, "local"))
@@ -209,8 +210,8 @@ static int build_jail_fs()
 static char** build_envp(const char *seccomp)
 {
 	static char *envp[MAX_ENVP];
-	static char preload_var[64];
-	static char seccomp_var[64];
+	static char preload_var[PATH_MAX];
+	static char seccomp_var[PATH_MAX];
 	static char debug_var[] = "LD_DEBUG=all";
 	const char *preload_lib = find_lib("libpreload-seccomp.so");
 	int count = 0;

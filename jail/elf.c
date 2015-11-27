@@ -22,6 +22,7 @@
 #include <libgen.h>
 #include <glob.h>
 #include <elf.h>
+#include <linux/limits.h>
 
 #include <libubox/utils.h>
 
@@ -72,7 +73,7 @@ static void alloc_library(const char *path, const char *name)
 static int elf_open(char **dir, const char *file)
 {
 	struct library_path *p;
-	char path[256];
+	char path[PATH_MAX];
 	int fd = -1;
 
 	*dir = NULL;
@@ -98,7 +99,7 @@ static int elf_open(char **dir, const char *file)
 const char* find_lib(const char *file)
 {
 	struct library *l;
-	static char path[256];
+	static char path[PATH_MAX];
 	const char *p;
 
 	l = avl_find_element(&libraries, file, l, avl);
@@ -313,7 +314,7 @@ err_out:
 void load_ldso_conf(const char *conf)
 {
 	FILE* fp = fopen(conf, "r");
-	char line[256];
+	char line[PATH_MAX];
 
 	if (!fp) {
 		DEBUG("failed to open %s\n", conf);
@@ -323,7 +324,7 @@ void load_ldso_conf(const char *conf)
 	while (!feof(fp)) {
 		int len;
 
-		if (!fgets(line, 256, fp))
+		if (!fgets(line, sizeof(line), fp))
 			break;
 		len = strlen(line);
 		if (len < 2)
