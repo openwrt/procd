@@ -35,10 +35,9 @@
 #include <libubox/uloop.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"P:S:C:n:r:w:d:psulo"
+#define OPT_ARGS	"S:C:n:r:w:d:psulo"
 
 static struct {
-	char *path;
 	char *name;
 	char **jail_argv;
 	char *seccomp;
@@ -122,12 +121,18 @@ int mount_bind(const char *root, const char *path, int readonly, int error)
 
 static int build_jail_fs(void)
 {
-	if (mount("tmpfs", opts.path, "tmpfs", MS_NOATIME, "mode=0755")) {
+	char jail_root[] = "/tmp/ujail-XXXXXX";
+	if (mkdtemp(jail_root) == NULL) {
+		ERROR("mkdtemp(jail_root) failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	if (mount("tmpfs", jail_root, "tmpfs", MS_NOATIME, "mode=0755")) {
 		ERROR("tmpfs mount failed %s\n", strerror(errno));
 		return -1;
 	}
 
-	if (chdir(opts.path)) {
+	if (chdir(jail_root)) {
 		ERROR("failed to chdir() in the jail root\n");
 		return -1;
 	}
@@ -142,25 +147,25 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	if (mount_all(opts.path)) {
+	if (mount_all(jail_root)) {
 		ERROR("mount_all() failed\n");
 		return -1;
 	}
 
-	char *mpoint;
-	if (asprintf(&mpoint, "%s/old", opts.path) < 0) {
-		ERROR("failed to alloc pivot path: %s\n", strerror(errno));
+	char dirbuf[sizeof(jail_root) + 4];
+	snprintf(dirbuf, sizeof(dirbuf), "%s/old", jail_root);
+	mkdir(dirbuf, 0755);
+
+	if (pivot_root(jail_root, dirbuf) == -1) {
+		ERROR("pivot_root failed: %s\n", strerror(errno));
 		return -1;
 	}
-	mkdir_p(mpoint, 0755);
-	if (pivot_root(opts.path, mpoint) == -1) {
-		ERROR("pivot_root failed:%s\n", strerror(errno));
-		free(mpoint);
-		return -1;
-	}
-	free(mpoint);
+
+	snprintf(dirbuf, sizeof(dirbuf), "/old%s", jail_root);
+	rmdir(dirbuf);
 	umount2("/old", MNT_DETACH);
 	rmdir("/old");
+
 	if (opts.procfs) {
 		mkdir("/proc", 0755);
 		mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
@@ -209,7 +214,6 @@ static void usage(void)
 	fprintf(stderr, "  -C <file>\tcapabilities drop config\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "namespace jail options:\n");
-	fprintf(stderr, "  -P <path>\tpath where the jail will be staged\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
 	fprintf(stderr, "  -w <file>\twriteable files that should be staged\n");
 	fprintf(stderr, "  -p\t\tjail has /proc\n");
@@ -281,7 +285,6 @@ int main(int argc, char **argv)
 	uid_t uid = getuid();
 	char log[] = "/dev/log";
 	char ubus[] = "/var/run/ubus.sock";
-	int ret = EXIT_SUCCESS;
 	int ch;
 
 	if (uid) {
@@ -317,10 +320,6 @@ int main(int argc, char **argv)
 		case 'C':
 			opts.capabilities = optarg;
 			add_mount(optarg, 1, -1);
-			break;
-		case 'P':
-			opts.namespace = 1;
-			opts.path = optarg;
 			break;
 		case 'n':
 			opts.name = optarg;
@@ -364,16 +363,6 @@ int main(int argc, char **argv)
 	if (opts.name)
 		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
 
-	if (opts.namespace && !opts.path && asprintf(&opts.path, "/tmp/%s", basename(*opts.jail_argv)) == -1) {
-		ERROR("failed to asprintf root path: %s\n", strerror(errno));
-		return EXIT_FAILURE;
-	}
-
-	if (opts.namespace && mkdir(opts.path, 0755)) {
-		ERROR("unable to create root path: %s (%s)\n", opts.path, strerror(errno));
-		return EXIT_FAILURE;
-	}
-
 	uloop_init();
 	if (opts.namespace) {
 		jail_process.pid = clone(spawn_jail,
@@ -393,21 +382,12 @@ int main(int argc, char **argv)
 			kill(jail_process.pid, SIGTERM);
 			waitpid(jail_process.pid, NULL, 0);
 		}
+		return jail_return_code;
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
 		return exec_jail();
 	} else {
 		ERROR("failed to clone/fork: %s\n", strerror(errno));
-		ret = EXIT_FAILURE;
+		return EXIT_FAILURE;
 	}
-
-	if (opts.namespace && rmdir(opts.path)) {
-		ERROR("Unable to remove root path: %s (%s)\n", opts.path, strerror(errno));
-		ret = EXIT_FAILURE;
-	}
-
-	if (ret)
-		return ret;
-
-	return jail_return_code;
 }

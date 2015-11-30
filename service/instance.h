@@ -28,7 +28,6 @@ struct jail {
 	bool ubus;
 	bool log;
 	char *name;
-	char *root;
 	struct blobmsg_list mount;
 	int argc;
 };
