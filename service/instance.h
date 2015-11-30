@@ -27,6 +27,7 @@ struct jail {
 	bool sysfs;
 	bool ubus;
 	bool log;
+	bool ronly;
 	char *name;
 	struct blobmsg_list mount;
 	int argc;
