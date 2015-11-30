@@ -81,7 +81,7 @@ int lib_open(char **fullpath, const char *file)
 
 	list_for_each_entry(p, &library_paths, list) {
 		snprintf(path, sizeof(path), "%s/%s", p->path, file);
-		fd = open(path, O_RDONLY);
+		fd = open(path, O_RDONLY|O_CLOEXEC);
 		if (fd >= 0) {
 			*fullpath = strdup(path);
 			break;

@@ -116,7 +116,7 @@ int add_path_and_deps(const char *path, int readonly, int error, int lib)
 	if (path[0] == '/') {
 		if (avl_find(&mounts, path))
 			return 0;
-		fd = open(path, O_RDONLY);
+		fd = open(path, O_RDONLY|O_CLOEXEC);
 		if (fd == -1)
 			return error;
 		add_mount(path, readonly, error);
