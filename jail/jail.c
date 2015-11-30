@@ -35,10 +35,11 @@
 #include <libubox/uloop.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:r:w:d:psuloc"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psuloc"
 
 static struct {
 	char *name;
+	char *hostname;
 	char **jail_argv;
 	char *seccomp;
 	char *capabilities;
@@ -216,6 +217,7 @@ static void usage(void)
 	fprintf(stderr, "  -c\t\tset PR_SET_NO_NEW_PRIVS\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "namespace jail options:\n");
+	fprintf(stderr, "  -h <hostname>\tchange the hostname of the jail\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
 	fprintf(stderr, "  -w <file>\twriteable files that should be staged\n");
 	fprintf(stderr, "  -p\t\tjail has /proc\n");
@@ -255,8 +257,8 @@ static int exec_jail(void)
 
 static int spawn_jail(void *_notused)
 {
-	if (opts.name && sethostname(opts.name, strlen(opts.name))) {
-		ERROR("failed to sethostname: %s\n", strerror(errno));
+	if (opts.hostname && sethostname(opts.hostname, strlen(opts.hostname))) {
+		ERROR("sethostname(%s) failed: %s\n", opts.hostname, strerror(errno));
 	}
 
 	if (build_jail_fs()) {
@@ -333,6 +335,9 @@ int main(int argc, char **argv)
 			break;
 		case 'n':
 			opts.name = optarg;
+			break;
+		case 'h':
+			opts.hostname = optarg;
 			break;
 		case 'r':
 			opts.namespace = 1;
