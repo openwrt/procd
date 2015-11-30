@@ -237,7 +237,7 @@ static int exec_jail(void)
 
 	INFO("exec-ing %s\n", *opts.jail_argv);
 	execve(*opts.jail_argv, opts.jail_argv, envp);
-	//we get there only if execve fails
+	/* we get there only if execve fails */
 	ERROR("failed to execve %s: %s\n", *opts.jail_argv, strerror(errno));
 	exit(EXIT_FAILURE);
 }
@@ -344,7 +344,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	//no <binary> param found
+	/* no <binary> param found */
 	if (argc - optind < 1) {
 		usage();
 		return EXIT_FAILURE;
@@ -384,7 +384,7 @@ int main(int argc, char **argv)
 	}
 
 	if (jail_process.pid > 0) {
-		//parent process
+		/* parent process */
 		uloop_process_add(&jail_process);
 		uloop_run();
 		uloop_done();
@@ -394,7 +394,7 @@ int main(int argc, char **argv)
 			waitpid(jail_process.pid, NULL, 0);
 		}
 	} else if (jail_process.pid == 0) {
-		//fork child process
+		/* fork child process */
 		return exec_jail();
 	} else {
 		ERROR("failed to clone/fork: %s\n", strerror(errno));
