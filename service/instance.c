@@ -79,6 +79,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 
 enum {
 	JAIL_ATTR_NAME,
+	JAIL_ATTR_HOSTNAME,
 	JAIL_ATTR_PROCFS,
 	JAIL_ATTR_SYSFS,
 	JAIL_ATTR_UBUS,
@@ -90,6 +91,7 @@ enum {
 
 static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[JAIL_ATTR_HOSTNAME] = { "hostname", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_PROCFS] = { "procfs", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_SYSFS] = { "sysfs", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_UBUS] = { "ubus", BLOBMSG_TYPE_BOOL },
@@ -183,6 +185,11 @@ jail_run(struct service_instance *in, char **argv)
 	if (jail->name) {
 		argv[argc++] = "-n";
 		argv[argc++] = jail->name;
+	}
+
+	if (jail->hostname) {
+		argv[argc++] = "-h";
+		argv[argc++] = jail->hostname;
 	}
 
 	if (in->seccomp) {
@@ -649,6 +656,10 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->name = blobmsg_get_string(tb[JAIL_ATTR_NAME]);
 		jail->argc += 2;
 	}
+	if (tb[JAIL_ATTR_HOSTNAME]) {
+		jail->hostname = blobmsg_get_string(tb[JAIL_ATTR_HOSTNAME]);
+		jail->argc += 2;
+	}
 	if (tb[JAIL_ATTR_PROCFS]) {
 		jail->procfs = blobmsg_get_bool(tb[JAIL_ATTR_PROCFS]);
 		jail->argc++;
@@ -959,6 +970,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		void *r = blobmsg_open_table(b, "jail");
 		if (in->jail.name)
 			blobmsg_add_string(b, "name", in->jail.name);
+		if (in->jail.hostname)
+			blobmsg_add_string(b, "hostname", in->jail.hostname);
 		blobmsg_add_u8(b, "procfs", in->jail.procfs);
 		blobmsg_add_u8(b, "sysfs", in->jail.sysfs);
 		blobmsg_add_u8(b, "ubus", in->jail.ubus);

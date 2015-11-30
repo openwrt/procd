@@ -29,6 +29,7 @@ struct jail {
 	bool log;
 	bool ronly;
 	char *name;
+	char *hostname;
 	struct blobmsg_list mount;
 	int argc;
 };
