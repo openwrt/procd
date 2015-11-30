@@ -35,13 +35,14 @@
 #include <libubox/uloop.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:r:w:d:psulo"
+#define OPT_ARGS	"S:C:n:r:w:d:psuloc"
 
 static struct {
 	char *name;
 	char **jail_argv;
 	char *seccomp;
 	char *capabilities;
+	int no_new_privs;
 	int namespace;
 	int procfs;
 	int ronly;
@@ -212,6 +213,7 @@ static void usage(void)
 	fprintf(stderr, "  -d <num>\tshow debug log (increase num to increase verbosity)\n");
 	fprintf(stderr, "  -S <file>\tseccomp filter config\n");
 	fprintf(stderr, "  -C <file>\tcapabilities drop config\n");
+	fprintf(stderr, "  -c\t\tset PR_SET_NO_NEW_PRIVS\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "namespace jail options:\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
@@ -238,6 +240,11 @@ static int exec_jail(void)
 
 	if (opts.capabilities && drop_capabilities(opts.capabilities))
 		exit(EXIT_FAILURE);
+
+	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+                ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
 
 	INFO("exec-ing %s\n", *opts.jail_argv);
 	execve(*opts.jail_argv, opts.jail_argv, envp);
@@ -320,6 +327,9 @@ int main(int argc, char **argv)
 		case 'C':
 			opts.capabilities = optarg;
 			add_mount(optarg, 1, -1);
+			break;
+		case 'c':
+			opts.no_new_privs = 1;
 			break;
 		case 'n':
 			opts.name = optarg;
