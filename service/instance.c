@@ -49,6 +49,7 @@ enum {
 	INSTANCE_ATTR_USER,
 	INSTANCE_ATTR_STDOUT,
 	INSTANCE_ATTR_STDERR,
+	INSTANCE_ATTR_NO_NEW_PRIVS,
 	INSTANCE_ATTR_JAIL,
 	INSTANCE_ATTR_TRACE,
 	INSTANCE_ATTR_SECCOMP,
@@ -70,6 +71,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_USER] = { "user", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_STDOUT] = { "stdout", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_STDERR] = { "stderr", BLOBMSG_TYPE_BOOL },
+	[INSTANCE_ATTR_NO_NEW_PRIVS] = { "no_new_privs", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_JAIL] = { "jail", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_TRACE] = { "trace", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_SECCOMP] = { "seccomp", BLOBMSG_TYPE_STRING },
@@ -187,6 +189,9 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = "-S";
 		argv[argc++] = in->seccomp;
 	}
+
+	if (in->no_new_privs)
+		argv[argc++] = "-c";
 
 	if (jail->procfs)
 		argv[argc++] = "-p";
@@ -752,6 +757,9 @@ instance_config_parse(struct service_instance *in)
 	if (tb[INSTANCE_ATTR_TRACE])
 		in->trace = blobmsg_get_bool(tb[INSTANCE_ATTR_TRACE]);
 
+	if (tb[INSTANCE_ATTR_NO_NEW_PRIVS])
+		in->no_new_privs = blobmsg_get_bool(tb[INSTANCE_ATTR_NO_NEW_PRIVS]);
+
 	if (!in->trace && tb[INSTANCE_ATTR_SECCOMP]) {
 		char *seccomp = blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]);
 		struct stat s;
@@ -940,6 +948,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 
 	if (in->trace)
 		blobmsg_add_u8(b, "trace", true);
+
+	if (in->no_new_privs)
+		blobmsg_add_u8(b, "no_new_privs", true);
 
 	if (in->seccomp)
 		blobmsg_add_string(b, "seccomp", in->seccomp);
