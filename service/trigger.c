@@ -77,6 +77,9 @@ rule_load_script(struct json_script_ctx *ctx, const char *name)
 {
 	struct trigger *t = container_of(ctx, struct trigger, jctx);
 
+	if (strcmp(name, t->type) != 0)
+		return NULL;
+
 	return json_script_file_from_blobmsg(t->type, t->rule, blob_pad_len(t->rule));
 }
 
@@ -225,7 +228,7 @@ static void trigger_delay_cb(struct uloop_timeout *tout)
 {
 	struct trigger *t = container_of(tout, struct trigger, delay);
 
-	json_script_run(&t->jctx, "foo", t->data);
+	json_script_run(&t->jctx, t->type, t->data);
 	free(t->data);
 	t->data = NULL;
 }
@@ -344,7 +347,7 @@ void trigger_event(const char *type, struct blob_attr *data)
 				t->data = blob_memdup(data);
 				uloop_timeout_set(&t->delay, t->timeout);
 			} else {
-				json_script_run(&t->jctx, "foo", data);
+				json_script_run(&t->jctx, t->type, data);
 			}
 		}
 	}
