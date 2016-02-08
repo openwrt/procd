@@ -90,7 +90,7 @@ early_mounts(void)
 static void
 early_env(void)
 {
-	setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
+	setenv("PATH", EARLY_PATH, 1);
 }
 
 void

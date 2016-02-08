@@ -18,6 +18,10 @@
 
 #include "../log.h"
 
+#ifndef EARLY_PATH
+#define EARLY_PATH "/usr/sbin:/sbin:/usr/bin:/bin"
+#endif
+
 void preinit(void);
 void early(void);
 int mkdev(const char *progname, int progmode);
