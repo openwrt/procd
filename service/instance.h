@@ -56,6 +56,7 @@ struct service_instance {
 	bool no_new_privs;
 	struct jail jail;
 	char *seccomp;
+	char *pidfile;
 
 	uint32_t respawn_timeout;
 	uint32_t respawn_threshold;
