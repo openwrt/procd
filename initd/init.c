@@ -106,10 +106,10 @@ main(int argc, char **argv)
 	} else {
 		int i;
 
-		for (i = 0; i < 120; i++) {
+		for (i = 0; i < 1200; i++) {
 			if (waitpid(pid, NULL, WNOHANG) > 0)
 				break;
-			sleep(1);
+			usleep(10 * 1000);
 			watchdog_ping();
 		}
 	}
