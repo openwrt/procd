@@ -13,7 +13,9 @@
  */
 
 #include <sys/utsname.h>
+#ifdef linux
 #include <sys/sysinfo.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -186,23 +188,27 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
                 struct ubus_request_data *req, const char *method,
                 struct blob_attr *msg)
 {
-	void *c;
 	time_t now;
 	struct tm *tm;
+#ifdef linux
 	struct sysinfo info;
+	void *c;
+
+	if (sysinfo(&info))
+		return UBUS_STATUS_UNKNOWN_ERROR;
+#endif
 
 	now = time(NULL);
 
 	if (!(tm = localtime(&now)))
 		return UBUS_STATUS_UNKNOWN_ERROR;
 
-	if (sysinfo(&info))
-		return UBUS_STATUS_UNKNOWN_ERROR;
-
 	blob_buf_init(&b, 0);
 
-	blobmsg_add_u32(&b, "uptime",    info.uptime);
 	blobmsg_add_u32(&b, "localtime", mktime(tm));
+
+#ifdef linux
+	blobmsg_add_u32(&b, "uptime",    info.uptime);
 
 	c = blobmsg_open_array(&b, "load");
 	blobmsg_add_u32(&b, NULL, info.loads[0]);
@@ -221,6 +227,7 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_add_u64(&b, "total",    info.mem_unit * info.totalswap);
 	blobmsg_add_u64(&b, "free",     info.mem_unit * info.freeswap);
 	blobmsg_close_table(&b, c);
+#endif
 
 	ubus_send_reply(ctx, req, b.head);
 
