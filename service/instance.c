@@ -122,14 +122,16 @@ static const struct rlimit_name rlimit_names[] = {
 	{ "data", RLIMIT_DATA },
 	{ "fsize", RLIMIT_FSIZE },
 	{ "memlock", RLIMIT_MEMLOCK },
-	{ "msgqueue", RLIMIT_MSGQUEUE },
-	{ "nice", RLIMIT_NICE },
 	{ "nofile", RLIMIT_NOFILE },
 	{ "nproc", RLIMIT_NPROC },
 	{ "rss", RLIMIT_RSS },
-	{ "rtprio", RLIMIT_RTPRIO },
-	{ "sigpending", RLIMIT_SIGPENDING },
 	{ "stack", RLIMIT_STACK },
+#ifdef linux
+	{ "nice", RLIMIT_NICE },
+	{ "rtprio", RLIMIT_RTPRIO },
+	{ "msgqueue", RLIMIT_MSGQUEUE },
+	{ "sigpending", RLIMIT_SIGPENDING },
+#endif
 	{ NULL, 0 }
 };
 
