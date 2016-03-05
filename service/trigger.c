@@ -16,9 +16,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include <linux/types.h>
-#include <linux/netlink.h>
-
 #include <libubox/blobmsg_json.h>
 #include <libubox/json_script.h>
 #include <libubox/runqueue.h>

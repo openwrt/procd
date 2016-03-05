@@ -150,6 +150,7 @@ static void state_enter(void)
 		kill(-1, SIGKILL);
 		sync();
 		sleep(1);
+#ifndef DISABLE_INIT
 		if (reboot_event == RB_POWER_OFF)
 			LOG("- power down -\n");
 		else
@@ -165,9 +166,11 @@ static void state_enter(void)
 			reboot(reboot_event);
 			_exit(EXIT_SUCCESS);
 		}
-
 		while (1)
 			sleep(1);
+#else
+		exit(0);
+#endif
 		break;
 
 	default:

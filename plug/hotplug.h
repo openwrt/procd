@@ -17,9 +17,33 @@
 
 #include <libubox/uloop.h>
 
+#ifndef DISABLE_INIT
 void hotplug(char *rules);
 int hotplug_run(char *rules);
 void hotplug_shutdown(void);
 void hotplug_last_event(uloop_timeout_handler handler);
+void procd_coldplug(void);
+#else
+static inline void hotplug(char *rules)
+{
+}
+
+static inline int hotplug_run(char *rules)
+{
+	return 0;
+}
+
+static inline void hotplug_shutdown(void)
+{
+}
+
+static inline void hotplug_last_event(uloop_timeout_handler handler)
+{
+}
+
+static inline void procd_coldplug(void)
+{
+}
+#endif
 
 #endif

@@ -35,6 +35,7 @@ static void signal_shutdown(int signal, siginfo_t *siginfo, void *data)
 	int event = 0;
 	char *msg = NULL;
 
+#ifndef DISABLE_INIT
 	switch(signal) {
 	case SIGINT:
 	case SIGTERM:
@@ -47,6 +48,7 @@ static void signal_shutdown(int signal, siginfo_t *siginfo, void *data)
 		msg = "poweroff";
 		break;
 	}
+#endif
 
 	DEBUG(1, "Triggering %s\n", msg);
 	if (event)
@@ -93,5 +95,7 @@ void procd_signal(void)
 	sigaction(SIGHUP, &sa_dummy, NULL);
 	sigaction(SIGKILL, &sa_dummy, NULL);
 	sigaction(SIGSTOP, &sa_dummy, NULL);
+#ifndef DISABLE_INIT
 	reboot(RB_DISABLE_CAD);
+#endif
 }

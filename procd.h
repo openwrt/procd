@@ -39,7 +39,6 @@ void procd_state_ubus_connect(void);
 void procd_shutdown(int event);
 void procd_early(void);
 void procd_preinit(void);
-void procd_coldplug(void);
 void procd_signal(void);
 void procd_signal_preinit(void);
 void procd_inittab(void);

@@ -18,9 +18,12 @@ INSTALL(TARGETS setlbf
 )
 
 
-SET(SOURCES procd.c signal.c watchdog.c state.c	inittab.c rcS.c	ubus.c system.c
+SET(SOURCES procd.c signal.c state.c inittab.c rcS.c ubus.c system.c
 	service/service.c service/instance.c service/validate.c service/trigger.c service/watch.c
-	plug/coldplug.c plug/hotplug.c utils/utils.c)
+	utils/utils.c)
+IF(NOT DISABLE_INIT)
+  SET(SOURCES ${SOURCES} watchdog.c plug/coldplug.c plug/hotplug.c)
+ENDIF()
 
 SET(LIBS ubox ubus json-c blobmsg_json json_script)
 
@@ -47,20 +50,21 @@ INSTALL(TARGETS procd
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
-IF(NOT DISABLE_INIT)
+IF(DISABLE_INIT)
+ADD_DEFINITIONS(-DDISABLE_INIT)
+ELSE()
 ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c watchdog.c
 	utils/utils.c ${SOURCES_ZRAM})
 TARGET_LINK_LIBRARIES(init ${LIBS})
 INSTALL(TARGETS init
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
-ENDIF()
-
 
 ADD_EXECUTABLE(udevtrigger plug/udevtrigger.c)
 INSTALL(TARGETS udevtrigger
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
+ENDIF()
 
 
 ADD_EXECUTABLE(askfirst utils/askfirst.c)
