@@ -22,21 +22,38 @@
 char *ubus_socket = NULL;
 static struct ubus_context *ctx;
 static struct uloop_timeout ubus_timer;
+static int timeout;
+
+static void reset_timeout(void)
+{
+	timeout = 50;
+}
+
+static void timeout_retry(void)
+{
+	uloop_timeout_set(&ubus_timer, timeout);
+	timeout *= 2;
+	if (timeout > 1000)
+		timeout = 1000;
+}
 
 static void
 ubus_reconnect_cb(struct uloop_timeout *timeout)
 {
-	if (!ubus_reconnect(ctx, ubus_socket))
+	if (!ubus_reconnect(ctx, ubus_socket)) {
 		ubus_add_uloop(ctx);
-	else
-		uloop_timeout_set(timeout, 2000);
+		return;
+	}
+
+	timeout_retry();
 }
 
 static void
 ubus_disconnect_cb(struct ubus_context *ctx)
 {
 	ubus_timer.cb = ubus_reconnect_cb;
-	uloop_timeout_set(&ubus_timer, 2000);
+	reset_timeout();
+	timeout_retry();
 }
 
 static void
@@ -46,7 +63,7 @@ ubus_connect_cb(struct uloop_timeout *timeout)
 
 	if (!ctx) {
 		DEBUG(4, "Connection to ubus failed\n");
-		uloop_timeout_set(&ubus_timer, 1000);
+		timeout_retry();
 		return;
 	}
 
@@ -56,6 +73,7 @@ ubus_connect_cb(struct uloop_timeout *timeout)
 	watch_ubus(ctx);
 
 	DEBUG(2, "Connected to ubus, id=%08x\n", ctx->local_id);
+	reset_timeout();
 	ubus_add_uloop(ctx);
 	procd_state_ubus_connect();
 }
@@ -64,5 +82,6 @@ void
 procd_connect_ubus(void)
 {
 	ubus_timer.cb = ubus_connect_cb;
-	uloop_timeout_set(&ubus_timer, 1000);
+	reset_timeout();
+	timeout_retry();
 }
