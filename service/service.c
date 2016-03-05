@@ -22,7 +22,7 @@
 
 #include "../rcS.h"
 
-struct avl_tree services;
+AVL_TREE(services, avl_strcmp, false, NULL);
 static struct blob_buf b;
 static struct ubus_context *ctx;
 
@@ -552,11 +552,3 @@ void ubus_init_service(struct ubus_context *_ctx)
 	ctx = _ctx;
 	ubus_add_object(ctx, &main_object);
 }
-
-void
-service_init(void)
-{
-	avl_init(&services, avl_strcmp, false, NULL);
-	service_validate_init();
-}
-

@@ -51,8 +51,6 @@ void service_validate_dump(struct blob_buf *b, struct service *s);
 void service_validate_dump_all(struct blob_buf *b, char *p, char *s);
 int service_start_early(char *name, char *cmdline);
 void service_validate_del(struct service *s);
-void service_validate_init(void);
-void service_init(void);
 void service_event(const char *type, const char *service, const char *instance);
 
 #endif

@@ -32,7 +32,7 @@ static const struct blobmsg_policy service_validate_attrs[__SERVICE_VAL_MAX] = {
 	[SERVICE_VAL_DATA] = { "data", BLOBMSG_TYPE_TABLE },
 };
 
-static struct avl_tree validators;
+static AVL_TREE(validators, avl_strcmp, true, NULL);
 
 void
 service_validate_dump_all(struct blob_buf *b, char *p, char *s)
@@ -154,10 +154,4 @@ service_validate_add(struct service *s, struct blob_attr *msg)
 		if (avl_insert(&v->rules, &vr->avl))
 			free(vr);
 	}
-}
-
-void
-service_validate_init(void)
-{
-	avl_init(&validators, avl_strcmp, true, NULL);
 }

@@ -111,7 +111,6 @@ static void state_enter(void)
 		set_stdio("console");
 		LOG("- ubus -\n");
 		procd_connect_ubus();
-		service_init();
 		service_start_early("ubus", ubus_cmd);
 		break;
 
