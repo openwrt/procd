@@ -47,13 +47,14 @@ INSTALL(TARGETS procd
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
-
+IF(NOT DISABLE_INIT)
 ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c watchdog.c
 	utils/utils.c ${SOURCES_ZRAM})
 TARGET_LINK_LIBRARIES(init ${LIBS})
 INSTALL(TARGETS init
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
+ENDIF()
 
 
 ADD_EXECUTABLE(udevtrigger plug/udevtrigger.c)
