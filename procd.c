@@ -29,11 +29,12 @@ unsigned int debug;
 
 static int usage(const char *prog)
 {
-	ERROR("Usage: %s [options]\n"
+	fprintf(stderr, "Usage: %s [options]\n"
 		"Options:\n"
-		"\t-s <path>\tPath to ubus socket\n"
-		"\t-h <path>\trun as hotplug daemon\n"
-		"\t-d <level>\tEnable debug messages\n"
+		"	-s <path>	Path to ubus socket\n"
+		"	-h <path>	run as hotplug daemon\n"
+		"	-d <level>	Enable debug messages\n"
+		"	-S		Print messages to stdout\n"
 		"\n", prog);
 	return 1;
 }
@@ -42,15 +43,14 @@ int main(int argc, char **argv)
 {
 	int ch;
 	char *dbglvl = getenv("DBGLVL");
-
-	ulog_open(ULOG_KMSG, LOG_DAEMON, "procd");
+	int ulog_channels = ULOG_KMSG;
 
 	if (dbglvl) {
 		debug = atoi(dbglvl);
 		unsetenv("DBGLVL");
 	}
 
-	while ((ch = getopt(argc, argv, "d:s:h:")) != -1) {
+	while ((ch = getopt(argc, argv, "d:s:h:S")) != -1) {
 		switch (ch) {
 		case 'h':
 			return hotplug_run(optarg);
@@ -60,10 +60,16 @@ int main(int argc, char **argv)
 		case 'd':
 			debug = atoi(optarg);
 			break;
+		case 'S':
+			ulog_channels = ULOG_STDIO;
+			break;
 		default:
 			return usage(argv[0]);
 		}
 	}
+
+	ulog_open(ulog_channels, LOG_DAEMON, "procd");
+
 	setsid();
 	uloop_init();
 	procd_signal();
