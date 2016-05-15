@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/mount.h>
+#include <fcntl.h>
 
 #include <libubox/uloop.h>
 #include <libubox/utils.h>
@@ -64,6 +65,7 @@ spawn_procd(struct uloop_process *proc, int ret)
 
 	unsetenv("INITRAMFS");
 	unsetenv("PREINIT");
+	unlink("/tmp/.preinit");
 	DEBUG(2, "Exec to real procd now\n");
 	if (wdt_fd)
 		setenv("WDTFD", wdt_fd, 1);
@@ -104,6 +106,7 @@ preinit(void)
 	uloop_process_add(&plugd_proc);
 
 	setenv("PREINIT", "1", 1);
+	creat("/tmp/.preinit", 0600);
 
 	preinit_proc.cb = spawn_procd;
 	preinit_proc.pid = fork();
