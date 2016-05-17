@@ -165,7 +165,7 @@ int patch_fd(const char *device, int fd, int flags)
 		device = "/dev/null";
 
 	if (*device != '/') {
-		dfd = open("/dev", O_RDONLY);
+		dfd = open("/dev", O_PATH|O_DIRECTORY);
 
 		if (dfd < 0)
 			return -1;
