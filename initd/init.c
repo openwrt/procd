@@ -86,17 +86,9 @@ main(int argc, char **argv)
 	if (!pid) {
 		char *kmod[] = { "/sbin/kmodloader", "/etc/modules-boot.d/", NULL };
 
-		if (debug < 3) {
-			int fd = open("/dev/null", O_RDWR);
+		if (debug < 3)
+			patch_stdio("/dev/null");
 
-			if (fd > -1) {
-				dup2(fd, STDIN_FILENO);
-				dup2(fd, STDOUT_FILENO);
-				dup2(fd, STDERR_FILENO);
-				if (fd > STDERR_FILENO)
-					close(fd);
-			}
-		}
 		execvp(kmod[0], kmod);
 		ERROR("Failed to start kmodloader\n");
 		exit(-1);
