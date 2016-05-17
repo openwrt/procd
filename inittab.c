@@ -65,30 +65,23 @@ static char *ask = "/sbin/askfirst";
 
 static LIST_HEAD(actions);
 
-static int dev_open(const char *dev)
-{
-	int fd = -1;
-
-	if (dev) {
-		if (chdir("/dev"))
-			ERROR("failed to change dir to /dev\n");
-		fd = open(dev, O_RDWR);
-		if (chdir("/"))
-			ERROR("failed to change dir to /\n");
-	}
-
-	return fd;
-}
-
 static int dev_exist(const char *dev)
 {
-	int res;
+	int dfd, fd;
 
-	res = dev_open(dev);
-	if (res != -1)
-		close(res);
+	dfd = open("/dev", O_PATH|O_DIRECTORY);
 
-	return (res != -1);
+	if (dfd < 0)
+		return 0;
+
+	fd = openat(dfd, dev, O_RDONLY);
+	close(dfd);
+
+	if (fd < 0)
+		return 0;
+
+	close(fd);
+	return 1;
 }
 
 static void fork_worker(struct init_action *a)
