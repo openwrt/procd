@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 
+#include "../utils/utils.h"
 #include "init.h"
 #include "../libc-compat.h"
 
@@ -35,25 +36,16 @@ static void
 early_console(const char *dev)
 {
 	struct stat s;
-	int dd;
 
 	if (stat(dev, &s)) {
 		ERROR("Failed to stat %s\n", dev);
 		return;
 	}
 
-	dd = open(dev, O_RDWR);
-	if (dd < 0)
-		dd = open("/dev/null", O_RDWR);
-
-	dup2(dd, STDIN_FILENO);
-	dup2(dd, STDOUT_FILENO);
-	dup2(dd, STDERR_FILENO);
-
-	if (dd != STDIN_FILENO &&
-	    dd != STDOUT_FILENO &&
-	    dd != STDERR_FILENO)
-		close(dd);
+	if (patch_stdio(dev)) {
+		ERROR("Failed to setup i/o redirection\n");
+		return;
+	}
 
 	fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
 }
