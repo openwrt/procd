@@ -93,22 +93,14 @@ static int dev_exist(const char *dev)
 
 static void fork_worker(struct init_action *a)
 {
-	int fd;
 	pid_t p;
 
 	a->proc.pid = fork();
 	if (!a->proc.pid) {
 		p = setsid();
 
-		fd = dev_open(a->id);
-		if (fd != -1)
-		{
-			dup2(fd, STDIN_FILENO);
-			dup2(fd, STDOUT_FILENO);
-			dup2(fd, STDERR_FILENO);
-			if (fd > STDERR_FILENO)
-				close(fd);
-		}
+		if (patch_stdio(a->id))
+			ERROR("Failed to setup i/o redirection\n");
 
 		ioctl(STDIN_FILENO, TIOCSCTTY, 1);
 		tcsetpgrp(STDIN_FILENO, p);
