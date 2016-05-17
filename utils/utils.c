@@ -20,6 +20,10 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <string.h>
+#include <errno.h>
+
+#include "../log.h"
 
 void
 __blobmsg_list_init(struct blobmsg_list *list, int offset, int len, blobmsg_list_cmp cmp)
@@ -151,4 +155,54 @@ char* get_cmdline_val(const char* name, char* out, int len)
 	}
 
 	return NULL;
+}
+
+int patch_fd(const char *device, int fd, int flags)
+{
+	int dfd, nfd;
+
+	if (device == NULL)
+		device = "/dev/null";
+
+	if (*device != '/') {
+		dfd = open("/dev", O_RDONLY);
+
+		if (dfd < 0)
+			return -1;
+
+		nfd = openat(dfd, device, flags);
+
+		close(dfd);
+	} else {
+		nfd = open(device, flags);
+	}
+
+	if (nfd < 0 && strcmp(device, "/dev/null"))
+		nfd = open("/dev/null", flags);
+
+	if (nfd < 0)
+		return -1;
+
+	fd = dup2(nfd, fd);
+
+	if (nfd > STDERR_FILENO)
+		close(nfd);
+
+	return (fd < 0) ? -1 : 0;
+}
+
+int patch_stdio(const char *device)
+{
+	int fd, rv = 0;
+	const char *fdname[3] = { "stdin", "stdout", "stderr" };
+
+	for (fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
+		if (patch_fd(device, fd, fd ? O_WRONLY : O_RDONLY)) {
+			ERROR("Failed to redirect %s to %s: %d (%s)\n",
+			      fdname[fd], device, errno, strerror(errno));
+			rv = -1;
+		}
+	}
+
+	return rv;
 }

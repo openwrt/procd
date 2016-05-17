@@ -53,4 +53,7 @@ bool blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2);
 void blobmsg_list_move(struct blobmsg_list *list, struct blobmsg_list *src);
 char* get_cmdline_val(const char* name, char* out, int len);
 
+int patch_fd(const char *device, int fd, int flags);
+int patch_stdio(const char *device);
+
 #endif
