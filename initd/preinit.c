@@ -89,6 +89,7 @@ preinit(void)
 {
 	char *init[] = { "/bin/sh", "/etc/preinit", NULL };
 	char *plug[] = { "/sbin/procd", "-h", "/etc/hotplug-preinit.json", NULL };
+	int fd;
 
 	LOG("- preinit -\n");
 
@@ -106,7 +107,13 @@ preinit(void)
 	uloop_process_add(&plugd_proc);
 
 	setenv("PREINIT", "1", 1);
-	creat("/tmp/.preinit", 0600);
+
+	fd = creat("/tmp/.preinit", 0600);
+
+	if (fd < 0)
+		ERROR("Failed to create sentinel file\n");
+	else
+		close(fd);
 
 	preinit_proc.cb = spawn_procd;
 	preinit_proc.pid = fork();
