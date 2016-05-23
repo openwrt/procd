@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 
+#define _GNU_SOURCE
 #include <libubox/avl.h>
 #include <libubox/avl-cmp.h>
 #include "utils.h"
