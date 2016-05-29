@@ -129,6 +129,12 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
+	/* oldroot can't be MS_SHARED else pivot_root() fails */
+	if (mount("none", "/", NULL, MS_REC|MS_PRIVATE, NULL)) {
+		ERROR("private mount failed %s\n", strerror(errno));
+		return -1;
+	}
+
 	if (mount("tmpfs", jail_root, "tmpfs", MS_NOATIME, "mode=0755")) {
 		ERROR("tmpfs mount failed %s\n", strerror(errno));
 		return -1;
