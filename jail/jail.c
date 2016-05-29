@@ -162,6 +162,10 @@ static int build_jail_fs(void)
 		ERROR("pivot_root failed: %s\n", strerror(errno));
 		return -1;
 	}
+	if (chdir("/")) {
+		ERROR("chdir(/) failed: %s\n", strerror(errno));
+		return -1;
+	}
 
 	snprintf(dirbuf, sizeof(dirbuf), "/old%s", jail_root);
 	rmdir(dirbuf);
