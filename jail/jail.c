@@ -230,10 +230,6 @@ and will only drop capabilities/apply seccomp filter.\n\n");
 
 static int exec_jail(void)
 {
-	char **envp = build_envp(opts.seccomp);
-	if (!envp)
-		exit(EXIT_FAILURE);
-
 	if (opts.capabilities && drop_capabilities(opts.capabilities))
 		exit(EXIT_FAILURE);
 
@@ -241,6 +237,10 @@ static int exec_jail(void)
                 ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %s\n", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
+
+	char **envp = build_envp(opts.seccomp);
+	if (!envp)
+		exit(EXIT_FAILURE);
 
 	INFO("exec-ing %s\n", *opts.jail_argv);
 	execve(*opts.jail_argv, opts.jail_argv, envp);
