@@ -228,13 +228,24 @@ ujail will not use namespace/build a jail,\n\
 and will only drop capabilities/apply seccomp filter.\n\n");
 }
 
-static int exec_jail(void)
+static int exec_jail(void *_notused)
 {
 	if (opts.capabilities && drop_capabilities(opts.capabilities))
 		exit(EXIT_FAILURE);
 
 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
                 ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	if (opts.namespace && opts.hostname
+			&& sethostname(opts.hostname, strlen(opts.hostname))) {
+		ERROR("sethostname(%s) failed: %s\n", opts.hostname, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	if (opts.namespace && build_jail_fs()) {
+		ERROR("failed to build jail fs\n");
 		exit(EXIT_FAILURE);
 	}
 
@@ -247,20 +258,6 @@ static int exec_jail(void)
 	/* we get there only if execve fails */
 	ERROR("failed to execve %s: %s\n", *opts.jail_argv, strerror(errno));
 	exit(EXIT_FAILURE);
-}
-
-static int spawn_jail(void *_notused)
-{
-	if (opts.hostname && sethostname(opts.hostname, strlen(opts.hostname))) {
-		ERROR("sethostname(%s) failed: %s\n", opts.hostname, strerror(errno));
-	}
-
-	if (build_jail_fs()) {
-		ERROR("failed to build jail fs");
-		exit(EXIT_FAILURE);
-	}
-
-	return exec_jail();
 }
 
 static int jail_running = 1;
@@ -322,7 +319,6 @@ int main(int argc, char **argv)
 			break;
 		case 'C':
 			opts.capabilities = optarg;
-			add_mount(optarg, 1, -1);
 			break;
 		case 'c':
 			opts.no_new_privs = 1;
@@ -384,7 +380,7 @@ int main(int argc, char **argv)
 
 	uloop_init();
 	if (opts.namespace) {
-		jail_process.pid = clone(spawn_jail,
+		jail_process.pid = clone(exec_jail,
 			child_stack + STACK_SIZE,
 			CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD, NULL);
 	} else {
@@ -404,7 +400,7 @@ int main(int argc, char **argv)
 		return jail_return_code;
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
-		return exec_jail();
+		return exec_jail(NULL);
 	} else {
 		ERROR("failed to clone/fork: %s\n", strerror(errno));
 		return EXIT_FAILURE;
