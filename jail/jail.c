@@ -76,7 +76,7 @@ static int mkdir_p(char *dir, mode_t mask)
 		return 0;
 
 	if (ret)
-		ERROR("mkdir failed on %s: %s\n", dir, strerror(errno));
+		ERROR("mkdir(%s, %d) failed: %s\n", dir, mask, strerror(errno));
 
 	return ret;
 }
@@ -100,7 +100,7 @@ int mount_bind(const char *root, const char *path, int readonly, int error)
 		snprintf(new, sizeof(new), "%s%s", root, path);
 		fd = creat(new, 0644);
 		if (fd == -1) {
-			ERROR("failed to create %s: %s\n", new, strerror(errno));
+			ERROR("creat(%s) failed: %s\n", new, strerror(errno));
 			return -1;
 		}
 		close(fd);
@@ -116,7 +116,7 @@ int mount_bind(const char *root, const char *path, int readonly, int error)
 		return -1;
 	}
 
-	DEBUG("mount -B %s %s\n", path, new);
+	DEBUG("mount -B %s %s (%s)\n", path, new, readonly?"ro":"rw");
 
 	return 0;
 }
@@ -125,7 +125,7 @@ static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
 	if (mkdtemp(jail_root) == NULL) {
-		ERROR("mkdtemp(jail_root) failed: %s\n", strerror(errno));
+		ERROR("mkdtemp(%s) failed: %s\n", jail_root, strerror(errno));
 		return -1;
 	}
 
@@ -135,7 +135,7 @@ static int build_jail_fs(void)
 	}
 
 	if (chdir(jail_root)) {
-		ERROR("failed to chdir() in the jail root\n");
+		ERROR("chdir(%s) (jail_root) failed: %s\n", jail_root, strerror(errno));
 		return -1;
 	}
 
@@ -149,11 +149,11 @@ static int build_jail_fs(void)
 	mkdir(dirbuf, 0755);
 
 	if (pivot_root(jail_root, dirbuf) == -1) {
-		ERROR("pivot_root failed: %s\n", strerror(errno));
+		ERROR("pivot_root(%s, %s) failed: %s\n", jail_root, dirbuf, strerror(errno));
 		return -1;
 	}
 	if (chdir("/")) {
-		ERROR("chdir(/) failed: %s\n", strerror(errno));
+		ERROR("chdir(/) (after pivot_root) failed: %s\n", strerror(errno));
 		return -1;
 	}
 

@@ -86,7 +86,7 @@ static int add_script_interp(const char *path, const char *map, int size)
 		start++;
 	}
 	if (start >= size) {
-		ERROR("bad script interp (%s)", path);
+		ERROR("bad script interp (%s)\n", path);
 		return -1;
 	}
 	int stop = start + 1;
@@ -94,7 +94,7 @@ static int add_script_interp(const char *path, const char *map, int size)
 		stop++;
 	}
 	if (stop >= size || (stop-start) > PATH_MAX) {
-		ERROR("bad script interp (%s)", path);
+		ERROR("bad script interp (%s)\n", path);
 		return -1;
 	}
 	char buf[PATH_MAX];
