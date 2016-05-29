@@ -139,16 +139,6 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	if (add_path_and_deps(*opts.jail_argv, 1, -1, 0)) {
-		ERROR("failed to load dependencies\n");
-		return -1;
-	}
-
-	if (opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
-		ERROR("failed to load libpreload-seccomp.so\n");
-		return -1;
-	}
-
 	if (mount_all(jail_root)) {
 		ERROR("mount_all() failed\n");
 		return -1;
@@ -378,6 +368,16 @@ int main(int argc, char **argv)
 		opts.seccomp != 0);
 
 	opts.jail_argv = &argv[optind];
+
+	if (opts.namespace && add_path_and_deps(*opts.jail_argv, 1, -1, 0)) {
+		ERROR("failed to load dependencies\n");
+		return -1;
+	}
+
+	if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
+		ERROR("failed to load libpreload-seccomp.so\n");
+		return -1;
+	}
 
 	if (opts.name)
 		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
