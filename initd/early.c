@@ -73,9 +73,9 @@ early_mounts(void)
 		mount("tmpfs", "/tmp/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME,
 				"mode=01777");
 	}
-	mkdir("/tmp/run", 0777);
-	mkdir("/tmp/lock", 0777);
-	mkdir("/tmp/state", 0777);
+	mkdir("/tmp/run", 0755);
+	mkdir("/tmp/lock", 0755);
+	mkdir("/tmp/state", 0755);
 	umask(oldumask);
 }
 
