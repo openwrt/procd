@@ -513,7 +513,7 @@ instance_exit(struct uloop_process *p, int ret)
 
 	uloop_timeout_cancel(&in->timeout);
 	if (in->halt) {
-		/* no action */
+		instance_removepid(in);
 	} else if (in->restart) {
 		instance_start(in);
 	} else if (in->respawn) {
