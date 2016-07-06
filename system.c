@@ -18,6 +18,7 @@
 #endif
 #include <sys/ioctl.h>
 #include <sys/types.h>
+#include <sys/reboot.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -242,6 +243,14 @@ static int system_upgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+static int system_reboot(struct ubus_context *ctx, struct ubus_object *obj,
+			 struct ubus_request_data *req, const char *method,
+			 struct blob_attr *msg)
+{
+	procd_shutdown(RB_AUTOBOOT);
+	return 0;
+}
+
 enum {
 	WDT_FREQUENCY,
 	WDT_TIMEOUT,
@@ -388,6 +397,7 @@ static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("board", system_board),
 	UBUS_METHOD_NOARG("info",  system_info),
 	UBUS_METHOD_NOARG("upgrade", system_upgrade),
+	UBUS_METHOD_NOARG("reboot", system_reboot),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
 	UBUS_METHOD("signal", proc_signal, signal_policy),
 
