@@ -541,7 +541,6 @@ instance_stop(struct service_instance *in)
 	in->halt = true;
 	in->restart = in->respawn = false;
 	kill(in->proc.pid, SIGTERM);
-	instance_removepid(in);
 }
 
 static void
