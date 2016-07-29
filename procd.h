@@ -46,7 +46,6 @@ void procd_inittab_run(const char *action);
 void procd_bcast_event(char *event, struct blob_attr *msg);
 
 struct trigger;
-void trigger_init(void);
 void trigger_event(const char *type, struct blob_attr *data);
 void trigger_add(struct blob_attr *rule, void *id);
 void trigger_del(void *id);

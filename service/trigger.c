@@ -62,7 +62,7 @@ struct job {
 };
 
 static LIST_HEAD(triggers);
-static struct runqueue q;
+static RUNQUEUE(q, 1);
 
 static const char* rule_handle_var(struct json_script_ctx *ctx, const char *name, struct blob_attr *vars)
 {
@@ -310,12 +310,6 @@ void trigger_del(void *id)
 
 		trigger_free(t);
 	}
-}
-
-void trigger_init(void)
-{
-	runqueue_init(&q);
-	q.max_running_tasks = 1;
 }
 
 static bool trigger_match(const char *event, const char *match)
