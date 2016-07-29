@@ -338,14 +338,14 @@ void trigger_event(const char *type, struct blob_attr *data)
 	list_for_each_entry(t, &triggers, list) {
 		if (t->remove)
 			continue;
-		if (trigger_match(type, t->type)) {
-			if (t->timeout) {
-				free(t->data);
-				t->data = blob_memdup(data);
-				uloop_timeout_set(&t->delay, t->timeout);
-			} else {
-				json_script_run(&t->jctx, t->type, data);
-			}
+		if (!trigger_match(type, t->type))
+			continue;
+		if (t->timeout) {
+			free(t->data);
+			t->data = blob_memdup(data);
+			uloop_timeout_set(&t->delay, t->timeout);
+		} else {
+			json_script_run(&t->jctx, t->type, data);
 		}
 	}
 }
