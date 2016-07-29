@@ -217,10 +217,6 @@ static void rule_handle_error(struct json_script_ctx *ctx, const char *msg,
 	free(s);
 }
 
-static void q_empty(struct runqueue *q)
-{
-}
-
 static void trigger_delay_cb(struct uloop_timeout *tout)
 {
 	struct trigger *t = container_of(tout, struct trigger, delay);
@@ -319,7 +315,6 @@ void trigger_del(void *id)
 void trigger_init(void)
 {
 	runqueue_init(&q);
-	q.empty_cb = q_empty;
 	q.max_running_tasks = 1;
 }
 
