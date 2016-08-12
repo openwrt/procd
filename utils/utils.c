@@ -26,6 +26,10 @@
 
 #include "../log.h"
 
+#ifndef O_PATH
+#define O_PATH		010000000
+#endif
+
 void
 __blobmsg_list_init(struct blobmsg_list *list, int offset, int len, blobmsg_list_cmp cmp)
 {

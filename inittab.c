@@ -31,6 +31,10 @@
 #include "procd.h"
 #include "rcS.h"
 
+#ifndef O_PATH
+#define O_PATH		010000000
+#endif
+
 #define TAG_ID		0
 #define TAG_RUNLVL	1
 #define TAG_ACTION	2
