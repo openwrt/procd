@@ -128,6 +128,8 @@ static void state_enter(void)
 
 	case STATE_RUNNING:
 		LOG("- init complete -\n");
+		procd_inittab_run("respawnlate");
+		procd_inittab_run("askconsolelate");
 		break;
 
 	case STATE_SHUTDOWN:

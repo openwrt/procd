@@ -228,6 +228,14 @@ static struct init_handler handlers[] = {
 		.name = "respawn",
 		.cb = rcrespawn,
 		.multi = 1,
+	}, {
+		.name = "askconsolelate",
+		.cb = askconsole,
+		.multi = 1,
+	}, {
+		.name = "respawnlate",
+		.cb = rcrespawn,
+		.multi = 1,
 	}
 };
 
