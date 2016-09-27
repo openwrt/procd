@@ -363,7 +363,7 @@ service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 
 	blobmsg_parse(service_attrs, __SERVICE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
 
-	cur = tb[SERVICE_ATTR_NAME];
+	cur = tb[SERVICE_SET_NAME];
 	if (!cur)
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
