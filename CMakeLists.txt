@@ -28,7 +28,7 @@ ENDIF()
 SET(LIBS ubox ubus json-c blobmsg_json json_script)
 
 IF(DEBUG)
-  ADD_DEFINITIONS(-DDEBUG -g3)
+  ADD_DEFINITIONS(-DUDEV_DEBUG -g3)
 ENDIF()
 
 IF(EARLY_PATH)

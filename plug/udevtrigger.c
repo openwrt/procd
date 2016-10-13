@@ -66,7 +66,7 @@ static void log_message(int priority, const char *format, ...)
         log_message(LOG_INFO ,"%s: " format ,__FUNCTION__ ,## arg); \
     } while (0)
 
-#ifdef DEBUG
+#ifdef UDEV_DEBUG
 #undef dbg
 #define dbg(format, arg...)                         \
     do {                                    \
