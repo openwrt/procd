@@ -568,9 +568,6 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (!blobmsg_list_equal(&in->env, &in_new->env))
 		return true;
 
-	if (!blobmsg_list_equal(&in->data, &in_new->data))
-		return true;
-
 	if (!blobmsg_list_equal(&in->netdev, &in_new->netdev))
 		return true;
 
