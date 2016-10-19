@@ -386,7 +386,7 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
-	if (in->proc.pending)
+	if (in->proc.pending || !in->command)
 		return;
 
 	instance_free_stdio(in);
@@ -753,31 +753,42 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 }
 
 static bool
-instance_config_parse(struct service_instance *in)
+instance_config_parse_command(struct service_instance *in, struct blob_attr **tb)
 {
-	struct blob_attr *tb[__INSTANCE_ATTR_MAX];
 	struct blob_attr *cur, *cur2;
-	int argc = 0;
+	bool ret = false;
 	int rem;
 
-	blobmsg_parse(instance_attr, __INSTANCE_ATTR_MAX, tb,
-		blobmsg_data(in->config), blobmsg_data_len(in->config));
-
 	cur = tb[INSTANCE_ATTR_COMMAND];
-	if (!cur)
-		return false;
+	if (!cur) {
+		in->command = NULL;
+		return true;
+	}
 
 	if (!blobmsg_check_attr_list(cur, BLOBMSG_TYPE_STRING))
 		return false;
 
 	blobmsg_for_each_attr(cur2, cur, rem) {
-		argc++;
+		ret = true;
 		break;
 	}
-	if (!argc)
-		return false;
 
 	in->command = cur;
+	return ret;
+}
+
+static bool
+instance_config_parse(struct service_instance *in)
+{
+	struct blob_attr *tb[__INSTANCE_ATTR_MAX];
+	struct blob_attr *cur, *cur2;
+	int rem;
+
+	blobmsg_parse(instance_attr, __INSTANCE_ATTR_MAX, tb,
+		blobmsg_data(in->config), blobmsg_data_len(in->config));
+
+	if (!instance_config_parse_command(in, tb))
+		return false;
 
 	if (tb[INSTANCE_ATTR_RESPAWN]) {
 		int i = 0;
@@ -981,7 +992,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 	blobmsg_add_u8(b, "running", in->proc.pending);
 	if (in->proc.pending)
 		blobmsg_add_u32(b, "pid", in->proc.pid);
-	blobmsg_add_blob(b, in->command);
+	if (in->command)
+		blobmsg_add_blob(b, in->command);
 
 	if (!avl_is_empty(&in->errors.avl)) {
 		struct blobmsg_list_node *var;
