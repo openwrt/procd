@@ -919,25 +919,21 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in_src->config = NULL;
 }
 
-bool
+void
 instance_update(struct service_instance *in, struct service_instance *in_new)
 {
 	bool changed = instance_config_changed(in, in_new);
 	bool running = in->proc.pending;
 
-	if (!changed && running)
-		return false;
-
 	if (!running) {
-		if (changed)
-			instance_config_move(in, in_new);
+		instance_config_move(in, in_new);
 		instance_start(in);
 	} else {
-		instance_restart(in);
+		if (changed)
+			instance_restart(in);
 		instance_config_move(in, in_new);
 		/* restart happens in the child callback handler */
 	}
-	return true;
 }
 
 void
