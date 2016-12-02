@@ -269,8 +269,14 @@ static int exec_jail(void *_notused)
 static int jail_running = 1;
 static int jail_return_code = 0;
 
+static void jail_process_timeout_cb(struct uloop_timeout *t);
+static struct uloop_timeout jail_process_timeout = {
+	.cb = jail_process_timeout_cb,
+};
+
 static void jail_process_handler(struct uloop_process *c, int ret)
 {
+	uloop_timeout_cancel(&jail_process_timeout);
 	if (WIFEXITED(ret)) {
 		jail_return_code = WEXITSTATUS(ret);
 		INFO("jail (%d) exited with exit: %d\n", c->pid, jail_return_code);
@@ -285,6 +291,12 @@ static void jail_process_handler(struct uloop_process *c, int ret)
 static struct uloop_process jail_process = {
 	.cb = jail_process_handler,
 };
+
+static void jail_process_timeout_cb(struct uloop_timeout *t)
+{
+	DEBUG("jail process failed to stop, sending SIGKILL\n");
+	kill(jail_process.pid, SIGKILL);
+}
 
 int main(int argc, char **argv)
 {
@@ -398,12 +410,13 @@ int main(int argc, char **argv)
 		/* parent process */
 		uloop_process_add(&jail_process);
 		uloop_run();
-		uloop_done();
 		if (jail_running) {
 			DEBUG("uloop interrupted, killing jail process\n");
 			kill(jail_process.pid, SIGTERM);
-			waitpid(jail_process.pid, NULL, 0);
+			uloop_timeout_set(&jail_process_timeout, 1000);
+			uloop_run();
 		}
+		uloop_done();
 		return jail_return_code;
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
