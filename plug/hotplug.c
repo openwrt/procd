@@ -130,6 +130,7 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 	char *minor = hotplug_msg_find_var(msg, "MINOR");
 	char *major = hotplug_msg_find_var(msg, "MAJOR");
 	char *subsystem = hotplug_msg_find_var(msg, "SUBSYSTEM");
+	int ret;
 
 	blobmsg_parse_array(mkdev_policy, 3, tb, blobmsg_data(data), blobmsg_data_len(data));
 	if (tb[0] && tb[1] && minor && major && subsystem) {
@@ -149,8 +150,9 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 			struct group *g = getgrnam(blobmsg_get_string(tb[2]));
 
 			if (g)
-				chown(blobmsg_get_string(tb[0]), 0, g->gr_gid);
-			else
+				ret = chown(blobmsg_get_string(tb[0]), 0, g->gr_gid);
+
+			if (!g || ret < 0)
 				ERROR("cannot set group %s for %s\n",
 					blobmsg_get_string(tb[2]),
 					blobmsg_get_string(tb[0]));
