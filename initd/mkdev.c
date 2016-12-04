@@ -121,5 +121,6 @@ int mkdev(const char *name, int _mode)
 	n_patterns = 1;
 	find_devs(true);
 	find_devs(false);
+	free(pattern);
 	return chdir("/");
 }

@@ -263,6 +263,7 @@ instance_writepid(struct service_instance *in)
 	if (fprintf(_pidfile, "%d\n", in->proc.pid) < 0) {
 		ERROR("failed to write pidfile: %s: %d (%s)",
 			in->pidfile, errno, strerror(errno));
+		fclose(_pidfile);
 		return 2;
 	}
 	if (fclose(_pidfile)) {

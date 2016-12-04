@@ -176,7 +176,7 @@ int main(int argc, char **argv, char **envp)
 	if (child == 0) {
 		char **_argv = calloc(argc + 1, sizeof(char *));
 		char **_envp;
-		char preload[] = "LD_PRELOAD=/lib/libpreload-trace.so";
+		char *preload = "LD_PRELOAD=/lib/libpreload-trace.so";
 		int envc = 1;
 		int ret;
 
@@ -191,6 +191,9 @@ int main(int argc, char **argv, char **envp)
 
 		ret = execve(_argv[0], _argv, envp);
 		ERROR("failed to exec %s: %s\n", _argv[0], strerror(errno));
+
+		free(_argv);
+		free(_envp);
 		return ret;
 	}
 
