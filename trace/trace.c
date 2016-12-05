@@ -187,9 +187,9 @@ int main(int argc, char **argv, char **envp)
 
 		_envp = calloc(envc, sizeof(char *));
 		memcpy(&_envp[1], _envp, envc * sizeof(char *));
-		*envp = preload;
+		*_envp = preload;
 
-		ret = execve(_argv[0], _argv, envp);
+		ret = execve(_argv[0], _argv, _envp);
 		ERROR("failed to exec %s: %s\n", _argv[0], strerror(errno));
 
 		free(_argv);
