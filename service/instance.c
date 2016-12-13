@@ -54,6 +54,7 @@ enum {
 	INSTANCE_ATTR_TRACE,
 	INSTANCE_ATTR_SECCOMP,
 	INSTANCE_ATTR_PIDFILE,
+	INSTANCE_ATTR_RELOADSIG,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -77,6 +78,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_TRACE] = { "trace", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_SECCOMP] = { "seccomp", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
 };
 
 enum {
@@ -551,6 +553,12 @@ instance_restart(struct service_instance *in)
 {
 	if (!in->proc.pending)
 		return;
+
+	if (in->reload_signal) {
+		kill(in->proc.pid, in->reload_signal);
+		return;
+	}
+
 	in->halt = false;
 	in->restart = true;
 	kill(in->proc.pid, SIGTERM);
@@ -854,6 +862,9 @@ instance_config_parse(struct service_instance *in)
 			in->pidfile = pidfile;
 	}
 
+	if (tb[INSTANCE_ATTR_RELOADSIG])
+		in->reload_signal = blobmsg_get_u32(tb[INSTANCE_ATTR_RELOADSIG]);
+
 	if (!in->trace && tb[INSTANCE_ATTR_JAIL])
 		in->has_jail = instance_jail_parse(in, tb[INSTANCE_ATTR_JAIL]);
 
@@ -1020,6 +1031,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 			blobmsg_add_string(b, blobmsg_name(var->data), blobmsg_data(var->data));
 		blobmsg_close_table(b, e);
 	}
+
+	if (in->reload_signal)
+		blobmsg_add_u32(b, "reload_signal", in->reload_signal);
 
 	if (in->respawn) {
 		void *r = blobmsg_open_table(b, "respawn");

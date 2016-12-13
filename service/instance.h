@@ -49,6 +49,7 @@ struct service_instance {
 	bool restart;
 	bool respawn;
 	int respawn_count;
+	int reload_signal;
 	struct timespec start;
 
 	bool trace;
