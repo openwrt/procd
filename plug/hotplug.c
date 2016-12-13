@@ -130,7 +130,7 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 	char *minor = hotplug_msg_find_var(msg, "MINOR");
 	char *major = hotplug_msg_find_var(msg, "MAJOR");
 	char *subsystem = hotplug_msg_find_var(msg, "SUBSYSTEM");
-	int ret;
+	int ret = 0;
 
 	blobmsg_parse_array(mkdev_policy, 3, tb, blobmsg_data(data), blobmsg_data_len(data));
 	if (tb[0] && tb[1] && minor && major && subsystem) {
