@@ -190,6 +190,19 @@ static const struct blobmsg_policy service_list_attrs[__SERVICE_LIST_ATTR_MAX] =
 };
 
 enum {
+	SERVICE_SIGNAL_ATTR_NAME,
+	SERVICE_SIGNAL_ATTR_INSTANCE,
+	SERVICE_SIGNAL_ATTR_SIGNAL,
+	__SERVICE_SIGNAL_ATTR_MAX,
+};
+
+static const struct blobmsg_policy service_signal_attrs[__SERVICE_SIGNAL_ATTR_MAX] = {
+	[SERVICE_SIGNAL_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[SERVICE_SIGNAL_ATTR_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+	[SERVICE_SIGNAL_ATTR_SIGNAL] = { "signal", BLOBMSG_TYPE_INT32 },
+};
+
+enum {
 	EVENT_TYPE,
 	EVENT_DATA,
 	__EVENT_MAX
@@ -354,6 +367,63 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 }
 
 static int
+service_handle_kill(struct service_instance *in, int sig)
+{
+	if (kill(in->proc.pid, sig) == 0)
+		return 0;
+
+	switch (errno) {
+	case EINVAL: return UBUS_STATUS_INVALID_ARGUMENT;
+	case EPERM:  return UBUS_STATUS_PERMISSION_DENIED;
+	case ESRCH:  return UBUS_STATUS_NOT_FOUND;
+	}
+
+	return UBUS_STATUS_UNKNOWN_ERROR;
+}
+
+static int
+service_handle_signal(struct ubus_context *ctx, struct ubus_object *obj,
+		    struct ubus_request_data *req, const char *method,
+		    struct blob_attr *msg)
+{
+	struct blob_attr *tb[__SERVICE_SIGNAL_ATTR_MAX], *cur;
+	struct service *s;
+	struct service_instance *in;
+	int sig = SIGHUP;
+	int rv = 0;
+
+	blobmsg_parse(service_signal_attrs, __SERVICE_SIGNAL_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+
+	cur = tb[SERVICE_SIGNAL_ATTR_SIGNAL];
+	if (cur)
+		sig = blobmsg_get_u32(cur);
+
+	cur = tb[SERVICE_SIGNAL_ATTR_NAME];
+	if (!cur)
+		return UBUS_STATUS_NOT_FOUND;
+
+	s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+	if (!s)
+		return UBUS_STATUS_NOT_FOUND;
+
+	cur = tb[SERVICE_SIGNAL_ATTR_INSTANCE];
+	if (!cur) {
+		vlist_for_each_element(&s->instances, in, node)
+			rv = service_handle_kill(in, sig);
+
+		return rv;
+	}
+
+	in = vlist_find(&s->instances, blobmsg_data(cur), in, node);
+	if (!in) {
+		ERROR("instance %s not found\n", blobmsg_get_string(cur));
+		return UBUS_STATUS_NOT_FOUND;
+	}
+
+	return service_handle_kill(in, sig);
+}
+
+static int
 service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 		      struct ubus_request_data *req, const char *method,
 		      struct blob_attr *msg)
@@ -490,6 +560,7 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
 	UBUS_METHOD("list", service_handle_list, service_list_attrs),
 	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
+	UBUS_METHOD("signal", service_handle_signal, service_signal_attrs),
 	UBUS_METHOD("update_start", service_handle_update, service_attrs),
 	UBUS_METHOD("update_complete", service_handle_update, service_attrs),
 	UBUS_METHOD("event", service_handle_event, event_policy),
