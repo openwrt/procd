@@ -398,6 +398,11 @@ int main(int argc, char **argv)
 
 	uloop_init();
 	if (opts.namespace) {
+		add_mount("/dev/full", 0, -1);
+		add_mount("/dev/null", 0, -1);
+		add_mount("/dev/urandom", 0, -1);
+		add_mount("/dev/zero", 0, -1);
+
 		int flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD;
 		if (opts.hostname)
 			flags |= CLONE_NEWUTS;
