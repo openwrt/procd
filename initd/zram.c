@@ -124,5 +124,11 @@ mount_zram_on_tmp(void)
 
 	LOG("Using up to %ld kB of RAM as ZRAM storage on /mnt\n", zramsize);
 
+	ret = chmod("/tmp", 01777);
+	if (ret < 0) {
+		ERROR("Can't set /tmp mode to 1777: %s\n", strerror(errno));
+		return errno;
+	}
+
 	return 0;
 }
