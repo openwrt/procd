@@ -25,6 +25,7 @@
 #include <libgen.h>
 #include <sched.h>
 #include <linux/limits.h>
+#include <signal.h>
 
 #include "capabilities.h"
 #include "elf.h"
@@ -298,12 +299,19 @@ static void jail_process_timeout_cb(struct uloop_timeout *t)
 	kill(jail_process.pid, SIGKILL);
 }
 
+static void jail_handle_signal(int signo)
+{
+	DEBUG("forwarding signal %d to the jailed process\n", signo);
+	kill(jail_process.pid, signo);
+}
+
 int main(int argc, char **argv)
 {
+	sigset_t sigmask;
 	uid_t uid = getuid();
 	char log[] = "/dev/log";
 	char ubus[] = "/var/run/ubus.sock";
-	int ch;
+	int ch, i;
 
 	if (uid) {
 		ERROR("not root, aborting: %s\n", strerror(errno));
@@ -397,6 +405,20 @@ int main(int argc, char **argv)
 		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
 
 	uloop_init();
+
+	sigfillset(&sigmask);
+	for (i = 0; i < _NSIG; i++) {
+		struct sigaction s = { 0 };
+
+		if (!sigismember(&sigmask, i))
+			continue;
+		if ((i == SIGCHLD) || (i == SIGPIPE))
+			continue;
+
+		s.sa_handler = jail_handle_signal;
+		sigaction(i, &s, NULL);
+	}
+
 	if (opts.namespace) {
 		add_mount("/dev/full", 0, -1);
 		add_mount("/dev/null", 0, -1);
