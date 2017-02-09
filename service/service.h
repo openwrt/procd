@@ -50,7 +50,10 @@ void service_validate_add(struct service *s, struct blob_attr *attr);
 void service_validate_dump(struct blob_buf *b, struct service *s);
 void service_validate_dump_all(struct blob_buf *b, char *p, char *s);
 int service_start_early(char *name, char *cmdline);
+void service_stopped(struct service *s);
 void service_validate_del(struct service *s);
 void service_event(const char *type, const char *service, const char *instance);
+
+
 
 #endif

@@ -55,6 +55,7 @@ enum {
 	INSTANCE_ATTR_SECCOMP,
 	INSTANCE_ATTR_PIDFILE,
 	INSTANCE_ATTR_RELOADSIG,
+	INSTANCE_ATTR_TERMTIMEOUT,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -79,6 +80,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_SECCOMP] = { "seccomp", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
+	[INSTANCE_ATTR_TERMTIMEOUT] = { "term_timeout", BLOBMSG_TYPE_INT32 },
 };
 
 enum {
@@ -389,8 +391,16 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
-	if (in->proc.pending || !in->command)
+	if (!in->command) {
+		LOG("Not starting instance %s::%s, command not set\n", in->srv->name, in->name);
 		return;
+	}
+
+	if (in->proc.pending) {
+		if (in->halt)
+			in->restart = true;
+		return;
+	}
 
 	instance_free_stdio(in);
 	if (in->_stdout.fd.fd > -2) {
@@ -408,7 +418,7 @@ instance_start(struct service_instance *in)
 	}
 
 	in->restart = false;
-	in->halt = !in->respawn;
+	in->halt = false;
 
 	if (!in->valid)
 		return;
@@ -494,7 +504,11 @@ instance_timeout(struct uloop_timeout *t)
 
 	in = container_of(t, struct service_instance, timeout);
 
-	if (!in->halt && (in->restart || in->respawn))
+	if (in->halt) {
+		LOG("Instance %s::%s pid %d not stopped on SIGTERM, sending SIGKILL instead\n",
+				in->srv->name, in->name, in->proc.pid);
+		kill(in->proc.pid, SIGKILL);
+	} else if (in->restart || in->respawn)
 		instance_start(in);
 }
 
@@ -515,8 +529,19 @@ instance_exit(struct uloop_process *p, int ret)
 		return;
 
 	uloop_timeout_cancel(&in->timeout);
+	service_event("instance.stop", in->srv->name, in->name);
+
 	if (in->halt) {
 		instance_removepid(in);
+		if (in->restart)
+			instance_start(in);
+		else {
+			struct service *s = in->srv;
+
+			avl_delete(&s->instances.avl, &in->node.avl);
+			instance_free(in);
+			service_stopped(s);
+		}
 	} else if (in->restart) {
 		instance_start(in);
 	} else if (in->respawn) {
@@ -535,7 +560,6 @@ instance_exit(struct uloop_process *p, int ret)
 			uloop_timeout_set(&in->timeout, in->respawn_timeout * 1000);
 		}
 	}
-	service_event("instance.stop", in->srv->name, in->name);
 }
 
 void
@@ -546,6 +570,7 @@ instance_stop(struct service_instance *in)
 	in->halt = true;
 	in->restart = in->respawn = false;
 	kill(in->proc.pid, SIGTERM);
+	uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
 }
 
 static void
@@ -559,10 +584,10 @@ instance_restart(struct service_instance *in)
 		return;
 	}
 
-	in->halt = false;
+	in->halt = true;
 	in->restart = true;
 	kill(in->proc.pid, SIGTERM);
-	instance_removepid(in);
+	uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
 }
 
 static bool
@@ -796,6 +821,8 @@ instance_config_parse(struct service_instance *in)
 	if (!instance_config_parse_command(in, tb))
 		return false;
 
+	if (tb[INSTANCE_ATTR_TERMTIMEOUT])
+		in->term_timeout = blobmsg_get_u32(tb[INSTANCE_ATTR_TERMTIMEOUT]);
 	if (tb[INSTANCE_ATTR_RESPAWN]) {
 		int i = 0;
 		uint32_t vals[3] = { 3600, 5, 5};
@@ -933,8 +960,9 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 {
 	bool changed = instance_config_changed(in, in_new);
 	bool running = in->proc.pending;
+	bool stopping = in->halt;
 
-	if (!running) {
+	if (!running || stopping) {
 		instance_config_move(in, in_new);
 		instance_start(in);
 	} else {
@@ -967,6 +995,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->config = config;
 	in->timeout.cb = instance_timeout;
 	in->proc.cb = instance_exit;
+	in->term_timeout = 5;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;
@@ -999,6 +1028,7 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_add_u32(b, "pid", in->proc.pid);
 	if (in->command)
 		blobmsg_add_blob(b, in->command);
+	blobmsg_add_u32(b, "term_timeout", in->term_timeout);
 
 	if (!avl_is_empty(&in->errors.avl)) {
 		struct blobmsg_list_node *var;

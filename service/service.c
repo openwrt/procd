@@ -59,11 +59,10 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		instance_update(in_o, in_n);
 		instance_free(in_n);
 	} else if (in_o) {
-		DEBUG(2, "Free instance %s::%s\n", in_o->srv->name, in_o->name);
+		DEBUG(2, "Stop instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_stop(in_o);
-		instance_free(in_o);
 	} else if (in_n) {
-		DEBUG(2, "Create instance %s::%s\n", in_n->srv->name, in_n->name);
+		DEBUG(2, "Start instance %s::%s\n", in_n->srv->name, in_n->name);
 		instance_start(in_n);
 	}
 	blob_buf_init(&b, 0);
@@ -80,7 +79,7 @@ service_alloc(const char *name)
 	strcpy(new_name, name);
 
 	vlist_init(&s->instances, avl_strcmp, service_instance_update);
-	s->instances.keep_old = true;
+	s->instances.no_delete = true;
 	s->name = new_name;
 	s->avl.key = s->name;
 	INIT_LIST_HEAD(&s->validators);
@@ -149,13 +148,8 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 static void
 service_delete(struct service *s)
 {
-	service_event("service.stop", s->name, NULL);
 	vlist_flush_all(&s->instances);
-	avl_delete(&services, &s->avl);
-	trigger_del(s);
-	free(s->trigger);
-	free(s);
-	service_validate_del(s);
+	service_stopped(s);
 }
 
 enum {
@@ -604,6 +598,18 @@ service_start_early(char *name, char *cmdline)
 	blobmsg_close_table(&b, instances);
 
 	return service_handle_set(NULL, NULL, NULL, "add", b.head);
+}
+
+void service_stopped(struct service *s)
+{
+	if (avl_is_empty(&s->instances.avl)) {
+		service_event("service.stop", s->name, NULL);
+		avl_delete(&services, &s->avl);
+		trigger_del(s);
+		free(s->trigger);
+		free(s);
+		service_validate_del(s);
+	}
 }
 
 void service_event(const char *type, const char *service, const char *instance)

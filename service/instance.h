@@ -59,6 +59,7 @@ struct service_instance {
 	char *seccomp;
 	char *pidfile;
 
+	uint32_t term_timeout;
 	uint32_t respawn_timeout;
 	uint32_t respawn_threshold;
 	uint32_t respawn_retry;
