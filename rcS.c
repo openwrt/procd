@@ -121,8 +121,10 @@ static void add_initd(struct runqueue *q, char *file, char *param)
 	}
 	s->proc.task.type = &initd_type;
 	s->proc.task.complete = q_initd_complete;
-	if (!strcmp(param, "stop") || !strcmp(param, "shutdown"))
+	if (!strcmp(param, "stop") || !strcmp(param, "shutdown")) {
 		s->proc.task.run_timeout = 15000;
+		s->proc.task.cancel_timeout = 10000;
+	}
 	s->param = p;
 	s->file = f;
 	strcpy(s->param, param);
