@@ -53,9 +53,9 @@ static int
 early_insmod(char *module)
 {
 	pid_t pid = fork();
+	char *modprobe[] = { "/sbin/modprobe", NULL, NULL };
 
 	if (!pid) {
-		char *modprobe[] = { "/usr/sbin/modprobe", NULL, NULL };
 		char *path;
 		struct utsname ver;
 
@@ -64,12 +64,12 @@ early_insmod(char *module)
 		sprintf(path, module, ver.release);
 		modprobe[1] = path;
 		execvp(modprobe[0], modprobe);
-		ERROR("Can't exec /usr/sbin/modprobe\n");
+		ERROR("Can't exec %s\n", modprobe[0]);
 		exit(-1);
 	}
 
 	if (pid <= 0) {
-		ERROR("Can't exec /usr/sbin/modprobe\n");
+		ERROR("Can't exec %s\n", modprobe[0]);
 		return -1;
 	} else {
 		waitpid(pid, NULL, 0);
@@ -107,10 +107,10 @@ mount_zram_on_tmp(void)
 	pid = fork();
 	if (!pid) {
 		execvp(mkfs[0], mkfs);
-		ERROR("Can't exec /sbin/mkfs.ext4\n");
+		ERROR("Can't exec %s\n", mkfs[0]);
 		exit(-1);
 	} else if (pid <= 0) {
-		ERROR("Can't exec /sbin/mkfs.ext4\n");
+		ERROR("Can't exec %s\n", mkfs[0]);
 		return -1;
 	} else {
 		waitpid(pid, NULL, 0);
