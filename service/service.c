@@ -140,6 +140,8 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 			vlist_flush(&s->instances);
 	}
 
+	s->deleted = false;
+
 	rc(s->name, "running");
 
 	return 0;
@@ -149,6 +151,7 @@ static void
 service_delete(struct service *s)
 {
 	vlist_flush_all(&s->instances);
+	s->deleted = true;
 	service_stopped(s);
 }
 
@@ -602,7 +605,7 @@ service_start_early(char *name, char *cmdline)
 
 void service_stopped(struct service *s)
 {
-	if (avl_is_empty(&s->instances.avl)) {
+	if (s->deleted && avl_is_empty(&s->instances.avl)) {
 		service_event("service.stop", s->name, NULL);
 		avl_delete(&services, &s->avl);
 		trigger_del(s);
