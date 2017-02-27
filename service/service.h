@@ -40,6 +40,7 @@ struct validate {
 struct service {
 	struct avl_node avl;
 	const char *name;
+	bool deleted;
 
 	struct blob_attr *trigger;
 	struct vlist_tree instances;
