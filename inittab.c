@@ -303,7 +303,7 @@ void procd_inittab(void)
 		if (regexec(&pat_inittab, line, 5, matches, 0))
 			continue;
 
-		DEBUG(4, "Parsing inittab - %s", line);
+		DEBUG(4, "Parsing inittab - %s\n", line);
 
 		for (i = TAG_ID; i <= TAG_PROCESS; i++) {
 			line[matches[i].rm_eo] = '\0';
