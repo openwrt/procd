@@ -42,6 +42,7 @@ struct initd {
 
 static void pipe_cb(struct ustream *s, int bytes)
 {
+	struct initd *initd = container_of(s, struct initd, fd.stream);
 	char *newline, *str;
 	int len;
 
@@ -54,9 +55,9 @@ static void pipe_cb(struct ustream *s, int bytes)
 			break;
 		*newline = 0;
 		len = newline + 1 - str;
-		ULOG_NOTE("%s", str);
+		ULOG_NOTE("%s: %s", initd->file, str);
 #ifdef SHOW_BOOT_ON_CONSOLE
-		fprintf(stderr, "%s\n", str);
+		fprintf(stderr, "%s: %s\n", initd->file, str);
 #endif
 		ustream_consume(s, len);
 	} while (1);
