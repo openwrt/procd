@@ -41,6 +41,7 @@ struct service {
 	struct avl_node avl;
 	const char *name;
 	bool deleted;
+	bool autostart;
 
 	struct blob_attr *trigger;
 	struct vlist_tree instances;

@@ -81,7 +81,7 @@ struct service_instance {
 };
 
 void instance_start(struct service_instance *in);
-void instance_stop(struct service_instance *in);
+void instance_stop(struct service_instance *in, bool halt);
 void instance_update(struct service_instance *in, struct service_instance *in_new);
 void instance_init(struct service_instance *in, struct service *s, struct blob_attr *config);
 void instance_free(struct service_instance *in);

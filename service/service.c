@@ -60,8 +60,8 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		instance_free(in_n);
 	} else if (in_o) {
 		DEBUG(2, "Stop instance %s::%s\n", in_o->srv->name, in_o->name);
-		instance_stop(in_o);
-	} else if (in_n) {
+		instance_stop(in_o, true);
+	} else if (in_n && in_n->srv->autostart) {
 		DEBUG(2, "Start instance %s::%s\n", in_n->srv->name, in_n->name);
 		instance_start(in_n);
 	}
@@ -93,6 +93,7 @@ enum {
 	SERVICE_SET_INSTANCES,
 	SERVICE_SET_TRIGGER,
 	SERVICE_SET_VALIDATE,
+	SERVICE_SET_AUTOSTART,
 	__SERVICE_SET_MAX
 };
 
@@ -102,6 +103,7 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 	[SERVICE_SET_INSTANCES] = { "instances", BLOBMSG_TYPE_TABLE },
 	[SERVICE_SET_TRIGGER] = { "triggers", BLOBMSG_TYPE_ARRAY },
 	[SERVICE_SET_VALIDATE] = { "validate", BLOBMSG_TYPE_ARRAY },
+	[SERVICE_SET_AUTOSTART] = { "autostart", BLOBMSG_TYPE_BOOL },
 };
 
 static int
@@ -117,6 +119,11 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 	}
 
 	service_validate_del(s);
+
+	if (tb[SERVICE_SET_AUTOSTART] && !blobmsg_get_bool(tb[SERVICE_SET_AUTOSTART]))
+		s->autostart = false;
+	else
+		s->autostart = true;
 
 	if (tb[SERVICE_SET_TRIGGER] && blobmsg_data_len(tb[SERVICE_SET_TRIGGER])) {
 		s->trigger = blob_memdup(tb[SERVICE_SET_TRIGGER]);
@@ -197,6 +204,17 @@ static const struct blobmsg_policy service_signal_attrs[__SERVICE_SIGNAL_ATTR_MA
 	[SERVICE_SIGNAL_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
 	[SERVICE_SIGNAL_ATTR_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
 	[SERVICE_SIGNAL_ATTR_SIGNAL] = { "signal", BLOBMSG_TYPE_INT32 },
+};
+
+enum {
+	SERVICE_STATE_ATTR_SPAWN,
+	SERVICE_STATE_ATTR_NAME,
+	__SERVICE_STATE_ATTR_MAX,
+};
+
+static const struct blobmsg_policy service_state_attrs[__SERVICE_STATE_ATTR_MAX] = {
+	[SERVICE_STATE_ATTR_SPAWN] = { "spawn", BLOBMSG_TYPE_BOOL },
+	[SERVICE_STATE_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -283,6 +301,9 @@ service_dump(struct service *s, bool verbose)
 	void *c, *i;
 
 	c = blobmsg_open_table(&b, s->name);
+
+	if (!s->autostart)
+		blobmsg_add_u8(&b, "autostart", false);
 
 	if (!avl_is_empty(&s->instances.avl)) {
 		i = blobmsg_open_table(&b, "instances");
@@ -418,6 +439,41 @@ service_handle_signal(struct ubus_context *ctx, struct ubus_object *obj,
 	}
 
 	return service_handle_kill(in, sig);
+}
+
+static int
+service_handle_state(struct ubus_context *ctx, struct ubus_object *obj,
+		     struct ubus_request_data *req, const char *method,
+		     struct blob_attr *msg)
+{
+	struct blob_attr *tb[__SERVICE_STATE_ATTR_MAX];
+	struct service *s;
+	struct service_instance *in;
+	int spawn;
+
+	blobmsg_parse(service_state_attrs, __SERVICE_STATE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+
+	if (!tb[SERVICE_STATE_ATTR_SPAWN])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (!tb[SERVICE_STATE_ATTR_NAME])
+		return UBUS_STATUS_NOT_FOUND;
+
+	s = avl_find_element(&services, blobmsg_data(tb[SERVICE_STATE_ATTR_NAME]), s, avl);
+	if (!s)
+		return UBUS_STATUS_NOT_FOUND;
+
+	spawn = !!blobmsg_get_u8(tb[SERVICE_STATE_ATTR_SPAWN]);
+	vlist_for_each_element(&s->instances, in, node) {
+		if (!!in->proc.pending == !!spawn)
+			continue;
+		else if (!in->proc.pending)
+			instance_start(in);
+		else
+			instance_stop(in, false);
+	}
+
+	return UBUS_STATUS_OK;
 }
 
 static int
@@ -563,6 +619,7 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("event", service_handle_event, event_policy),
 	UBUS_METHOD("validate", service_handle_validate, validate_policy),
 	UBUS_METHOD("get_data", service_get_data, get_data_policy),
+	UBUS_METHOD("state", service_handle_state, service_state_attrs),
 };
 
 static struct ubus_object_type main_object_type =

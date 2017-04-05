@@ -563,11 +563,11 @@ instance_exit(struct uloop_process *p, int ret)
 }
 
 void
-instance_stop(struct service_instance *in)
+instance_stop(struct service_instance *in, bool halt)
 {
 	if (!in->proc.pending)
 		return;
-	in->halt = true;
+	in->halt = halt;
 	in->restart = in->respawn = false;
 	kill(in->proc.pid, SIGTERM);
 	uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
