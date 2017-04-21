@@ -344,12 +344,12 @@ static int proc_signal(struct ubus_context *ctx, struct ubus_object *obj,
 }
 
 enum {
-	NAND_PATH,
-	__NAND_MAX
+	SYSUPGRADE_PATH,
+	__SYSUPGRADE_MAX
 };
 
-static const struct blobmsg_policy nand_policy[__NAND_MAX] = {
-	[NAND_PATH] = { .name = "path", .type = BLOBMSG_TYPE_STRING },
+static const struct blobmsg_policy sysupgrade_policy[__SYSUPGRADE_MAX] = {
+	[SYSUPGRADE_PATH] = { .name = "path", .type = BLOBMSG_TYPE_STRING },
 };
 
 static void
@@ -368,20 +368,20 @@ procd_spawn_upgraded(char *path)
 	execvp(argv[0], argv);
 }
 
-static int nand_set(struct ubus_context *ctx, struct ubus_object *obj,
-			struct ubus_request_data *req, const char *method,
-			struct blob_attr *msg)
+static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
+		      struct ubus_request_data *req, const char *method,
+		      struct blob_attr *msg)
 {
-	struct blob_attr *tb[__NAND_MAX];
+	struct blob_attr *tb[__SYSUPGRADE_MAX];
 
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	blobmsg_parse(nand_policy, __NAND_MAX, tb, blob_data(msg), blob_len(msg));
-	if (!tb[NAND_PATH])
+	blobmsg_parse(sysupgrade_policy, __SYSUPGRADE_MAX, tb, blob_data(msg), blob_len(msg));
+	if (!tb[SYSUPGRADE_PATH])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	procd_spawn_upgraded(blobmsg_get_string(tb[NAND_PATH]));
+	procd_spawn_upgraded(blobmsg_get_string(tb[SYSUPGRADE_PATH]));
 	fprintf(stderr, "Yikees, something went wrong. no /sbin/upgraded ?\n");
 	return 0;
 }
@@ -400,9 +400,8 @@ static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("reboot", system_reboot),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
 	UBUS_METHOD("signal", proc_signal, signal_policy),
-
-	/* must remain at the end as it ia not always loaded */
-	UBUS_METHOD("nandupgrade", nand_set, nand_policy),
+	UBUS_METHOD("nandupgrade", sysupgrade, sysupgrade_policy),
+	UBUS_METHOD("sysupgrade", sysupgrade, sysupgrade_policy),
 };
 
 static struct ubus_object_type system_object_type =
@@ -431,11 +430,7 @@ procd_bcast_event(char *event, struct blob_attr *msg)
 
 void ubus_init_system(struct ubus_context *ctx)
 {
-	struct stat s;
 	int ret;
-
-	if (stat("/sbin/upgraded", &s))
-		system_object.n_methods -= 1;
 
 	_ctx = ctx;
 	ret = ubus_add_object(ctx, &system_object);
