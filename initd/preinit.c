@@ -27,6 +27,7 @@
 
 #include "init.h"
 #include "../watchdog.h"
+#include "../sysupgrade.h"
 
 static struct uloop_process preinit_proc;
 static struct uloop_process plugd_proc;
@@ -49,23 +50,58 @@ check_dbglvl(void)
 }
 
 static void
+check_sysupgrade(void)
+{
+	char *prefix = NULL, *path = NULL, *command = NULL;
+	size_t n;
+
+	if (chdir("/"))
+		return;
+
+	FILE *sysupgrade = fopen("/tmp/sysupgrade", "r");
+	if (!sysupgrade)
+		return;
+
+	n = 0;
+	if (getdelim(&prefix, &n, 0, sysupgrade) < 0)
+		goto fail;
+	n = 0;
+	if (getdelim(&path, &n, 0, sysupgrade) < 0)
+		goto fail;
+	n = 0;
+	if (getdelim(&command, &n, 0, sysupgrade) < 0)
+		goto fail;
+
+	fclose(sysupgrade);
+
+	sysupgrade_exec_upgraded(prefix, path, command);
+
+	while (true)
+		sleep(1);
+
+fail:
+	fclose(sysupgrade);
+	free(prefix);
+	free(path);
+	free(command);
+}
+
+static void
 spawn_procd(struct uloop_process *proc, int ret)
 {
 	char *wdt_fd = watchdog_fd();
 	char *argv[] = { "/sbin/procd", NULL};
-	struct stat s;
 	char dbg[2];
 
 	if (plugd_proc.pid > 0)
 		kill(plugd_proc.pid, SIGKILL);
 
-	if (!stat("/tmp/sysupgrade", &s))
-		while (true)
-			sleep(1);
-
 	unsetenv("INITRAMFS");
 	unsetenv("PREINIT");
 	unlink("/tmp/.preinit");
+
+	check_sysupgrade();
+
 	DEBUG(2, "Exec to real procd now\n");
 	if (wdt_fd)
 		setenv("WDTFD", wdt_fd, 1);

@@ -18,7 +18,7 @@ INSTALL(TARGETS setlbf
 )
 
 
-SET(SOURCES procd.c signal.c state.c inittab.c rcS.c ubus.c system.c
+SET(SOURCES procd.c signal.c state.c inittab.c rcS.c ubus.c system.c sysupgrade.c
 	service/service.c service/instance.c service/validate.c service/trigger.c service/watch.c
 	utils/utils.c)
 IF(NOT DISABLE_INIT)
@@ -54,7 +54,7 @@ INCLUDE_DIRECTORIES(${ubox_include_dir})
 IF(DISABLE_INIT)
 ADD_DEFINITIONS(-DDISABLE_INIT)
 ELSE()
-ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c watchdog.c
+ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c sysupgrade.c watchdog.c
 	utils/utils.c ${SOURCES_ZRAM})
 TARGET_LINK_LIBRARIES(init ${LIBS})
 INSTALL(TARGETS init

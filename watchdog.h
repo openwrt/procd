@@ -15,6 +15,8 @@
 #ifndef __PROCD_WATCHDOG_H
 #define __PROCD_WATCHDOG_H
 
+#include <stdbool.h>
+
 #ifndef DISABLE_INIT
 void watchdog_init(int preinit);
 char* watchdog_fd(void);
