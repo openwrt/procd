@@ -14,6 +14,7 @@
 
 #include <sys/reboot.h>
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,10 @@
 #include <libubox/uloop.h>
 
 #include "../watchdog.h"
+
+#ifndef O_PATH
+#define O_PATH		010000000
+#endif
 
 static struct uloop_process upgrade_proc;
 unsigned int debug = 2;
@@ -34,7 +39,7 @@ static void upgrade_proc_cb(struct uloop_process *proc, int ret)
 	uloop_end();
 }
 
-static void sysupgarde(char *folder)
+static void sysupgrade(char *folder)
 {
 	char *args[] = { "/sbin/sysupgrade", "nand", NULL, NULL };
 
@@ -47,7 +52,7 @@ static void sysupgarde(char *folder)
 		exit(-1);
 	}
 	if (upgrade_proc.pid <= 0) {
-		fprintf(stderr, "Failed to start sysupgarde\n");
+		fprintf(stderr, "Failed to start sysupgrade\n");
 		uloop_end();
 	}
 }
@@ -60,10 +65,21 @@ int main(int argc, char **argv)
 		fprintf(stderr, "this tool needs to run as pid 1\n");
 		return -1;
 	}
-	if (chdir("/tmp") == -1) {
-		fprintf(stderr, "failed to chdir to /tmp: %s\n", strerror(errno));
+
+	int fd = open("/", O_DIRECTORY|O_PATH);
+	if (fd < 0) {
+		fprintf(stderr, "unable to open prefix directory: %s\n", strerror(errno));
 		return -1;
 	}
+
+	chroot(".");
+
+	if (fchdir(fd) == -1) {
+		fprintf(stderr, "failed to chdir to prefix directory: %s\n", strerror(errno));
+		return -1;
+	}
+	close(fd);
+
 	if (argc != 2) {
 		fprintf(stderr, "sysupgrade stage 2 failed, no folder specified\n");
 		return -1;
@@ -71,7 +87,7 @@ int main(int argc, char **argv)
 
 	uloop_init();
 	watchdog_init(0);
-	sysupgarde(argv[1]);
+	sysupgrade(argv[1]);
 	uloop_run();
 
 	reboot(RB_AUTOBOOT);

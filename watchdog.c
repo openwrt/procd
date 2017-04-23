@@ -126,10 +126,15 @@ void watchdog_init(int preinit)
 }
 
 
-void watchdog_no_cloexec(void)
+void watchdog_set_cloexec(bool val)
 {
 	if (wdt_fd < 0)
 		return;
 
-	fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) & ~FD_CLOEXEC);
+	int flags = fcntl(wdt_fd, F_GETFD);
+	if (val)
+		flags |= FD_CLOEXEC;
+	else
+		flags &= ~FD_CLOEXEC;
+	fcntl(wdt_fd, F_SETFD,  flags);
 }
