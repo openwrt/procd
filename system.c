@@ -34,8 +34,6 @@ static struct blob_buf b;
 static int notify;
 static struct ubus_context *_ctx;
 
-int upgrade_running = 0;
-
 static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
                  struct ubus_request_data *req, const char *method,
                  struct blob_attr *msg)
@@ -235,14 +233,6 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
-static int system_upgrade(struct ubus_context *ctx, struct ubus_object *obj,
-			struct ubus_request_data *req, const char *method,
-			struct blob_attr *msg)
-{
-	upgrade_running = 1;
-	return 0;
-}
-
 static int system_reboot(struct ubus_context *ctx, struct ubus_object *obj,
 			 struct ubus_request_data *req, const char *method,
 			 struct blob_attr *msg)
@@ -413,11 +403,9 @@ procd_subscribe_cb(struct ubus_context *ctx, struct ubus_object *obj)
 static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("board", system_board),
 	UBUS_METHOD_NOARG("info",  system_info),
-	UBUS_METHOD_NOARG("upgrade", system_upgrade),
 	UBUS_METHOD_NOARG("reboot", system_reboot),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
 	UBUS_METHOD("signal", proc_signal, signal_policy),
-	UBUS_METHOD("nandupgrade", sysupgrade, sysupgrade_policy),
 	UBUS_METHOD("sysupgrade", sysupgrade, sysupgrade_policy),
 };
 

@@ -27,7 +27,6 @@
 #define __init __attribute__((constructor))
 
 extern char *ubus_socket;
-extern int upgrade_running;
 
 void procd_connect_ubus(void);
 void procd_reconnect_ubus(int reconnect);
