@@ -88,8 +88,14 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 		return;
 	}
 	close(pipefd[0]);
+
+	int devnull = open("/dev/null", O_RDONLY);
+	dup2(devnull, STDIN_FILENO);
 	dup2(pipefd[1], STDOUT_FILENO);
 	dup2(pipefd[1], STDERR_FILENO);
+
+	if (devnull > STDERR_FILENO)
+		close(devnull);
 
 	execlp(s->file, s->file, s->param, NULL);
 	exit(1);
