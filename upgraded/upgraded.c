@@ -12,6 +12,8 @@
  * GNU General Public License for more details.
  */
 
+#define _GNU_SOURCE
+
 #include <sys/reboot.h>
 
 #include <fcntl.h>
