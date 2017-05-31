@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 2.6)
 
 PROJECT(upgraded C)
+FIND_PATH(ubox_include_dir libubox/uloop.h)
+INCLUDE_DIRECTORIES(${ubox_include_dir})
 ADD_DEFINITIONS(-Os -ggdb -Wall -Werror --std=gnu99 -Wmissing-declarations)
 set(CMAKE_EXE_LINKER_FLAGS "-static -fPIC")
 set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
