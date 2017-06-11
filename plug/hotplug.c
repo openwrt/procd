@@ -431,8 +431,11 @@ static void handle_button_complete(struct blob_attr *msg, struct blob_attr *data
 	if (!timeout)
 		return;
 
+	if (!name)
+		return;
+
 	b = malloc(sizeof(*b));
-	if (!b || !name)
+	if (!b)
 		return;
 
 	memset(b, 0, sizeof(*b));
