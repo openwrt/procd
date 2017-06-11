@@ -609,9 +609,9 @@ void service_stopped(struct service *s)
 		service_event("service.stop", s->name, NULL);
 		avl_delete(&services, &s->avl);
 		trigger_del(s);
+		service_validate_del(s);
 		free(s->trigger);
 		free(s);
-		service_validate_del(s);
 	}
 }
 
