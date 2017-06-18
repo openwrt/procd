@@ -80,7 +80,7 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 		fclose(f);
 	}
 
-	if ((f = fopen("/tmp/sysinfo/board_name", "r")) != NULL ||
+	if ((f = fopen("/tmp/sysinfo/model", "r")) != NULL ||
 	    (f = fopen("/proc/device-tree/model", "r")) != NULL)
 	{
 		if (fgets(line, sizeof(line), f))
@@ -108,6 +108,40 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 			{
 				blobmsg_add_string(&b, "model", val + 2);
 				break;
+			}
+		}
+
+		fclose(f);
+	}
+
+	if ((f = fopen("/tmp/sysinfo/board_name", "r")) != NULL)
+	{
+		if (fgets(line, sizeof(line), f))
+		{
+			val = strtok(line, "\t\n");
+
+			if (val)
+				blobmsg_add_string(&b, "board_name", val);
+		}
+
+		fclose(f);
+	}
+	else if ((f = fopen("/proc/device-tree/compatible", "r")) != NULL)
+	{
+		if (fgets(line, sizeof(line), f))
+		{
+			val = strtok(line, "\t\n");
+
+			if (val)
+			{
+				next = val;
+				while ((next = strchr(next, ',')) != NULL)
+				{
+					*next = '-';
+					next++;
+				}
+
+				blobmsg_add_string(&b, "board_name", val);
 			}
 		}
 
