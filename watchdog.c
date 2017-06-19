@@ -31,6 +31,7 @@
 static struct uloop_timeout wdt_timeout;
 static int wdt_fd = -1;
 static int wdt_frequency = 5;
+static bool wdt_magicclose = false;
 
 void watchdog_ping(void)
 {
@@ -45,12 +46,66 @@ static void watchdog_timeout_cb(struct uloop_timeout *t)
 	uloop_timeout_set(t, wdt_frequency * 1000);
 }
 
+static int watchdog_open(bool cloexec)
+{
+	char *env = getenv("WDTFD");
+
+	if (wdt_fd >= 0)
+		return wdt_fd;
+
+	if (env) {
+		DEBUG(2, "Watchdog handover: fd=%s\n", env);
+		wdt_fd = atoi(env);
+		unsetenv("WDTFD");
+	} else {
+		wdt_fd = open(WDT_PATH, O_WRONLY);
+	}
+
+	if (wdt_fd < 0)
+		return wdt_fd;
+
+	if (cloexec)
+		fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
+
+	return wdt_fd;
+}
+
+static void watchdog_close(void)
+{
+	if (wdt_fd < 0)
+		return;
+
+	if (write(wdt_fd, "V", 1) < 0)
+		ERROR("WDT failed to write release: %s\n", strerror(errno));
+
+	if (close(wdt_fd) == -1)
+		ERROR("WDT failed to close watchdog: %s\n", strerror(errno));
+
+	wdt_fd = -1;
+}
+
+void watchdog_set_magicclose(bool val)
+{
+	wdt_magicclose = val;
+}
+
+bool watchdog_get_magicclose(void)
+{
+	return wdt_magicclose;
+}
+
 void watchdog_set_stopped(bool val)
 {
-	if (val)
+	if (val) {
 		uloop_timeout_cancel(&wdt_timeout);
-	else
+
+		if (wdt_magicclose)
+			watchdog_close();
+	}
+	else {
+		watchdog_open(true);
 		watchdog_timeout_cb(&wdt_timeout);
+	}
 }
 
 bool watchdog_get_stopped(void)
@@ -98,25 +153,10 @@ char* watchdog_fd(void)
 
 void watchdog_init(int preinit)
 {
-	char *env = getenv("WDTFD");
-
-	if (wdt_fd >= 0)
-		return;
-
 	wdt_timeout.cb = watchdog_timeout_cb;
-	if (env) {
-		DEBUG(2, "Watchdog handover: fd=%s\n", env);
-		wdt_fd = atoi(env);
-		unsetenv("WDTFD");
-	} else {
-		wdt_fd = open("/dev/watchdog", O_WRONLY);
-	}
 
-	if (wdt_fd < 0)
+	if (watchdog_open(!preinit) < 0)
 		return;
-
-	if (!preinit)
-		fcntl(wdt_fd, F_SETFD, fcntl(wdt_fd, F_GETFD) | FD_CLOEXEC);
 
 	LOG("- watchdog -\n");
 	watchdog_timeout(30);

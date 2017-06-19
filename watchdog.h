@@ -20,6 +20,8 @@ void watchdog_init(int preinit);
 char* watchdog_fd(void);
 int watchdog_timeout(int timeout);
 int watchdog_frequency(int frequency);
+void watchdog_set_magicclose(bool val);
+bool watchdog_get_magicclose(void);
 void watchdog_set_stopped(bool val);
 bool watchdog_get_stopped(void);
 void watchdog_no_cloexec(void);
@@ -42,6 +44,14 @@ static inline int watchdog_timeout(int timeout)
 static inline int watchdog_frequency(int frequency)
 {
 	return 0;
+}
+
+static inline void watchdog_set_magicclose(bool val)
+{
+}
+
+static inline void watchdog_get_magicclose(bool val)
+{
 }
 
 static inline void watchdog_set_stopped(bool val)

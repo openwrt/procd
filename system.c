@@ -288,6 +288,7 @@ static int system_reboot(struct ubus_context *ctx, struct ubus_object *obj,
 enum {
 	WDT_FREQUENCY,
 	WDT_TIMEOUT,
+	WDT_MAGICCLOSE,
 	WDT_STOP,
 	__WDT_MAX
 };
@@ -295,6 +296,7 @@ enum {
 static const struct blobmsg_policy watchdog_policy[__WDT_MAX] = {
 	[WDT_FREQUENCY] = { .name = "frequency", .type = BLOBMSG_TYPE_INT32 },
 	[WDT_TIMEOUT] = { .name = "timeout", .type = BLOBMSG_TYPE_INT32 },
+	[WDT_MAGICCLOSE] = { .name = "magicclose", .type = BLOBMSG_TYPE_BOOL },
 	[WDT_STOP] = { .name = "stop", .type = BLOBMSG_TYPE_BOOL },
 };
 
@@ -329,6 +331,9 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 		 watchdog_timeout(timeout);
 	}
 
+	if (tb[WDT_MAGICCLOSE])
+		watchdog_set_magicclose(blobmsg_get_bool(tb[WDT_MAGICCLOSE]));
+
 	if (tb[WDT_STOP])
 		watchdog_set_stopped(blobmsg_get_bool(tb[WDT_STOP]));
 
@@ -343,6 +348,7 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_add_string(&b, "status", status);
 	blobmsg_add_u32(&b, "timeout", watchdog_timeout(0));
 	blobmsg_add_u32(&b, "frequency", watchdog_frequency(0));
+	blobmsg_add_u8(&b, "magicclose", watchdog_get_magicclose());
 	ubus_send_reply(ctx, req, b.head);
 
 	return 0;
