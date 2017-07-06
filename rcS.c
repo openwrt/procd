@@ -82,6 +82,7 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 
 	if (pid) {
 		close(pipefd[1]);
+		fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
 		s->fd.stream.string_data = true,
 		s->fd.stream.notify_read = pipe_cb,
 		runqueue_process_add(q, &s->proc, pid);
