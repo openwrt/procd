@@ -444,11 +444,13 @@ instance_start(struct service_instance *in)
 	if (opipe[0] > -1) {
 		ustream_fd_init(&in->_stdout, opipe[0]);
 		closefd(opipe[1]);
+		fcntl(opipe[0], F_SETFD, FD_CLOEXEC);
 	}
 
 	if (epipe[0] > -1) {
 		ustream_fd_init(&in->_stderr, epipe[0]);
 		closefd(epipe[1]);
+		fcntl(epipe[0], F_SETFD, FD_CLOEXEC);
 	}
 
 	service_event("instance.start", in->srv->name, in->name);
