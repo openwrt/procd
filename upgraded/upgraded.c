@@ -58,6 +58,8 @@ static void sysupgrade(char *path, char *command)
 		fprintf(stderr, "Failed to start sysupgrade\n");
 		uloop_end();
 	}
+
+	uloop_process_add(&upgrade_proc);
 }
 
 int main(int argc, char **argv)
