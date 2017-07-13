@@ -43,23 +43,24 @@ static void upgrade_proc_cb(struct uloop_process *proc, int ret)
 
 static void sysupgrade(char *path, char *command)
 {
-	char *args[] = { "/lib/upgrade/stage2", NULL, NULL, NULL };
+	char *args[] = { "/lib/upgrade/stage2", path, command, NULL };
 
-	args[1] = path;
-	args[2] = command;
 	upgrade_proc.cb = upgrade_proc_cb;
 	upgrade_proc.pid = fork();
-	if (!upgrade_proc.pid) {
-		execvp(args[0], args);
+	if (upgrade_proc.pid < 0) {
 		fprintf(stderr, "Failed to fork sysupgrade\n");
-		exit(-1);
+		return;
 	}
-	if (upgrade_proc.pid <= 0) {
-		fprintf(stderr, "Failed to start sysupgrade\n");
-		uloop_end();
+
+	if (!upgrade_proc.pid) {
+		/* Child */
+		execvp(args[0], args);
+		fprintf(stderr, "Failed to exec sysupgrade\n");
+		_exit(-1);
 	}
 
 	uloop_process_add(&upgrade_proc);
+	uloop_run();
 }
 
 int main(int argc, char **argv)
@@ -68,32 +69,31 @@ int main(int argc, char **argv)
 
 	if (p != 1) {
 		fprintf(stderr, "this tool needs to run as pid 1\n");
-		return -1;
+		return 1;
 	}
 
 	int fd = open("/", O_DIRECTORY|O_PATH);
 	if (fd < 0) {
 		fprintf(stderr, "unable to open prefix directory: %s\n", strerror(errno));
-		return -1;
+		return 1;
 	}
 
 	chroot(".");
 
 	if (fchdir(fd) == -1) {
 		fprintf(stderr, "failed to chdir to prefix directory: %s\n", strerror(errno));
-		return -1;
+		return 1;
 	}
 	close(fd);
 
 	if (argc != 3) {
 		fprintf(stderr, "sysupgrade stage 2 failed, invalid command line\n");
-		return -1;
+		return 1;
 	}
 
 	uloop_init();
 	watchdog_init(0);
 	sysupgrade(argv[1], argv[2]);
-	uloop_run();
 
 	reboot(RB_AUTOBOOT);
 
