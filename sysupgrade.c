@@ -26,8 +26,10 @@ void sysupgrade_exec_upgraded(const char *prefix, char *path, char *command)
 {
 	char *wdt_fd = watchdog_fd();
 	char *argv[] = { "/sbin/upgraded", NULL, NULL, NULL};
+	int ret;
 
-	if (chroot(prefix)) {
+	ret = chroot(prefix);
+	if (ret < 0) {
 		fprintf(stderr, "Failed to chroot for upgraded exec.\n");
 		return;
 	}
@@ -45,5 +47,9 @@ void sysupgrade_exec_upgraded(const char *prefix, char *path, char *command)
 	fprintf(stderr, "Failed to exec upgraded.\n");
 	unsetenv("WDTFD");
 	watchdog_set_cloexec(true);
-	chroot(".");
+	ret = chroot(".");
+	if (ret < 0) {
+		fprintf(stderr, "Failed to reset chroot, exiting.\n");
+		exit(EXIT_FAILURE);
+	}
 }
