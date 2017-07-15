@@ -78,7 +78,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	chroot(".");
+	if (chroot(".") < 0) {
+		fprintf(stderr, "failed to chroot: %s\n", strerror(errno));
+		return 1;
+	}
 
 	if (fchdir(fd) == -1) {
 		fprintf(stderr, "failed to chdir to prefix directory: %s\n", strerror(errno));
