@@ -403,7 +403,9 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	sysupgrade_exec_upgraded(blobmsg_get_string(tb[SYSUPGRADE_PREFIX]),
 				 blobmsg_get_string(tb[SYSUPGRADE_PATH]),
 				 tb[SYSUPGRADE_COMMAND] ? blobmsg_get_string(tb[SYSUPGRADE_COMMAND]) : NULL);
-	return 0;
+
+	/* sysupgrade_exec_upgraded() will never return unless something has gone wrong */
+	return UBUS_STATUS_UNKNOWN_ERROR;
 }
 
 static void
