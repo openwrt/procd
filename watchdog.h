@@ -50,8 +50,9 @@ static inline void watchdog_set_magicclose(bool val)
 {
 }
 
-static inline void watchdog_get_magicclose(bool val)
+static inline bool watchdog_get_magicclose(void)
 {
+	return false;
 }
 
 static inline void watchdog_set_stopped(bool val)
