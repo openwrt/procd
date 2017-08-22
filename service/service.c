@@ -25,6 +25,7 @@
 AVL_TREE(services, avl_strcmp, false, NULL);
 static struct blob_buf b;
 static struct ubus_context *ctx;
+static struct ubus_object main_object;
 
 static void
 service_instance_add(struct service *s, struct blob_attr *attr)
@@ -502,12 +503,27 @@ service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+static void ubus_event_bcast(const char *type, const char *param1, const char *val1,
+			     const char *param2, const char *val2)
+{
+	if (!ctx)
+		return;
+
+	blob_buf_init(&b, 0);
+	if (param1 && val1)
+		blobmsg_add_string(&b, param1, val1);
+	if (param2 && val2)
+		blobmsg_add_string(&b, param2, val2);
+	ubus_notify(ctx, &main_object, type, b.head, -1);
+}
+
 static int
 service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
 			struct ubus_request_data *req, const char *method,
 			struct blob_attr *msg)
 {
 	struct blob_attr *tb[__EVENT_MAX];
+	const char *event;
 
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -516,8 +532,18 @@ service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!tb[EVENT_TYPE] || !tb[EVENT_DATA])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	trigger_event(blobmsg_get_string(tb[EVENT_TYPE]), tb[EVENT_DATA]);
+	event = blobmsg_get_string(tb[EVENT_TYPE]);
+	trigger_event(event, tb[EVENT_DATA]);
 
+	if (!strcmp(event, "config.change")) {
+		struct blob_attr *tb2[__DATA_MAX];
+
+		blobmsg_parse(validate_policy, __VALIDATE_MAX, tb2,
+			      blobmsg_data(tb[EVENT_DATA]), blobmsg_len(tb[EVENT_DATA]));
+		if (tb2[VALIDATE_PACKAGE])
+			ubus_event_bcast("config.change", "config",
+					 blobmsg_get_string(tb2[VALIDATE_PACKAGE]), NULL, NULL);
+	}
 	return 0;
 }
 
@@ -674,14 +700,7 @@ void service_stopped(struct service *s)
 
 void service_event(const char *type, const char *service, const char *instance)
 {
-	if (!ctx)
-		return;
-
-	blob_buf_init(&b, 0);
-	blobmsg_add_string(&b, "service", service);
-	if (instance)
-		blobmsg_add_string(&b, "instance", instance);
-	ubus_notify(ctx, &main_object, type, b.head, -1);
+	ubus_event_bcast(type, "service", service, "instance", instance);
 }
 
 void ubus_init_service(struct ubus_context *_ctx)
