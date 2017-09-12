@@ -27,6 +27,11 @@ static int __preload_main__(int argc, char **argv, char **envp)
 {
 	char *env_file = getenv("SECCOMP_FILE");
 
+	if (!env_file || !env_file[0]) {
+		ERROR("SECCOMP_FILE not specified\n");
+		return -1;
+	}
+
 	if (install_syscall_filter(*argv, env_file))
 		return -1;
 
