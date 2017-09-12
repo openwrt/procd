@@ -941,6 +941,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->command = in_src->command;
 	in->pidfile = in_src->pidfile;
 	in->name = in_src->name;
+	in->trace = in_src->trace;
 	in->node.avl.key = in_src->node.avl.key;
 
 	free(in->config);
