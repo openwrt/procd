@@ -20,6 +20,10 @@
 	syslog(LOG_INFO,"preload-seccomp: "fmt, ## __VA_ARGS__); \
 	fprintf(stderr,"preload-seccomp: "fmt, ## __VA_ARGS__); \
 	} while (0)
+#define ERROR(fmt, ...) do { \
+	syslog(LOG_ERR,"preload-seccomp: "fmt, ## __VA_ARGS__); \
+	fprintf(stderr,"preload-seccomp: "fmt, ## __VA_ARGS__); \
+	} while (0)
 
 int install_syscall_filter(const char *argv, const char *file);
 

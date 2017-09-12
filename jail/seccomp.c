@@ -67,13 +67,13 @@ int install_syscall_filter(const char *argv, const char *file)
 
 	blob_buf_init(&b, 0);
 	if (!blobmsg_add_json_from_file(&b, file)) {
-		INFO("%s: failed to load %s\n", argv, file);
+		ERROR("%s: failed to load %s\n", argv, file);
 		return -1;
 	}
 
 	blobmsg_parse(policy, __SECCOMP_MAX, tb, blob_data(b.head), blob_len(b.head));
 	if (!tb[SECCOMP_WHITELIST]) {
-		INFO("%s: %s is missing the syscall table\n", argv, file);
+		ERROR("%s: %s is missing the syscall table\n", argv, file);
 		return -1;
 	}
 
@@ -85,7 +85,7 @@ int install_syscall_filter(const char *argv, const char *file)
 
 	filter = calloc(sz, sizeof(struct sock_filter));
 	if (!filter) {
-		INFO("failed to allocate filter memory\n");
+		ERROR("failed to allocate filter memory\n");
 		return -1;
 	}
 
@@ -125,7 +125,7 @@ int install_syscall_filter(const char *argv, const char *file)
 		set_filter(&filter[idx], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_KILL);
 
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
-		INFO("%s: prctl(PR_SET_NO_NEW_PRIVS) failed: %s\n", argv, strerror(errno));
+		ERROR("%s: prctl(PR_SET_NO_NEW_PRIVS) failed: %s\n", argv, strerror(errno));
 		return errno;
 	}
 
@@ -133,7 +133,7 @@ int install_syscall_filter(const char *argv, const char *file)
 	prog.filter = filter;
 
 	if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) {
-		INFO("%s: prctl(PR_SET_SECCOMP) failed: %s\n", argv, strerror(errno));
+		ERROR("%s: prctl(PR_SET_SECCOMP) failed: %s\n", argv, strerror(errno));
 		return errno;
 	}
 	return 0;
