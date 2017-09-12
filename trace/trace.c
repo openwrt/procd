@@ -77,6 +77,16 @@ static void set_syscall(const char *name, int val)
 		}
 }
 
+struct syscall {
+	int syscall;
+	int count;
+};
+
+static int cmp_count(const void *a, const void *b)
+{
+	return ((struct syscall*)b)->count - ((struct syscall*)a)->count;
+}
+
 static void print_syscalls(int policy, const char *json)
 {
 	void *c;
@@ -88,19 +98,29 @@ static void print_syscalls(int policy, const char *json)
 	set_syscall("exit_group", 1);
 	set_syscall("exit", 1);
 
+	struct syscall sorted[ARRAY_SIZE(syscall_names)];
+
+	for (i = 0; i < ARRAY_SIZE(syscall_names); i++) {
+		sorted[i].syscall = i;
+		sorted[i].count = syscall_count[i];
+	}
+
+	qsort(sorted, ARRAY_SIZE(syscall_names), sizeof(sorted[0]), cmp_count);
+
 	blob_buf_init(&b, 0);
 	c = blobmsg_open_array(&b, "whitelist");
 
 	for (i = 0; i < ARRAY_SIZE(syscall_names); i++) {
-		if (!syscall_count[i])
-			continue;
-		if (syscall_names[i]) {
+		int sc = sorted[i].syscall;
+		if (!sorted[i].count)
+			break;
+		if (syscall_names[sc]) {
 			if (debug)
 				printf("syscall %d (%s) was called %d times\n",
-					i, syscall_names[i], syscall_count[i]);
-			blobmsg_add_string(&b, NULL, syscall_names[i]);
+					sc, syscall_names[sc], sorted[i].count);
+			blobmsg_add_string(&b, NULL, syscall_names[sc]);
 		} else {
-			ERROR("no name found for syscall(%d)\n", i);
+			ERROR("no name found for syscall(%d)\n", sc);
 		}
 	}
 	blobmsg_close_array(&b, c);
