@@ -25,7 +25,6 @@
 #include <errno.h>
 #include <string.h>
 #include <syslog.h>
-#include <err.h>
 
 #ifndef PTRACE_EVENT_STOP
 /* PTRACE_EVENT_STOP is defined in linux/ptrace.h, but this header
@@ -33,6 +32,7 @@
 #define PTRACE_EVENT_STOP 128
 #endif
 
+#include <libubox/ulog.h>
 #include <libubox/uloop.h>
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
@@ -65,21 +65,6 @@ enum mode {
 	UTRACE,
 	SECCOMP_TRACE,
 } mode = UTRACE;
-
-#define PROC_NAME(mode) (mode == UTRACE ? "utrace" : "seccomp-trace")
-
-#define INFO(fmt, ...) do { \
-	fprintf(stderr, "%s: "fmt, PROC_NAME(mode), ## __VA_ARGS__); \
-} while (0)
-
-#define ERROR(fmt, ...) do { \
-	syslog(LOG_ERR, "%s: "fmt, PROC_NAME(mode), ## __VA_ARGS__); \
-	fprintf(stderr, "%s: "fmt, PROC_NAME(mode), ## __VA_ARGS__);  \
-} while (0)
-
-#define LOGERR(fmt, ...) do { \
-	syslog(LOG_ERR, "%s: "fmt, PROC_NAME(mode), ## __VA_ARGS__); \
-} while (0)
 
 struct tracee {
 	struct uloop_process proc;
@@ -152,7 +137,7 @@ static void print_syscalls(int policy, const char *json)
 				       sc, syscall_name(sc), sorted[i].count);
 			blobmsg_add_string(&b, NULL, syscall_name(sc));
 		} else {
-			ERROR("no name found for syscall(%d)\n", sc);
+			ULOG_ERR("no name found for syscall(%d)\n", sc);
 		}
 	}
 	blobmsg_close_array(&b, c);
@@ -162,9 +147,9 @@ static void print_syscalls(int policy, const char *json)
 		if (fp) {
 			fprintf(fp, "%s", blobmsg_format_json_indent(b.head, true, 0));
 			fclose(fp);
-			INFO("saving syscall trace to %s\n", json);
+			ULOG_INFO("saving syscall trace to %s\n", json);
 		} else {
-			ERROR("failed to open %s\n", json);
+			ULOG_ERR("failed to open %s\n", json);
 		}
 	} else {
 		printf("%s\n",
@@ -190,11 +175,11 @@ static void report_seccomp_vialation(pid_t pid, unsigned syscall)
 	int i = syscall_index(syscall);
 	if (i >= 0) {
 		syscall_count[i]++;
-		LOGERR("%s[%u] tried to call non-whitelisted syscall: %s (see %s)\n",
-		       buf, pid,  syscall_name(syscall), json);
+		ULOG_ERR("%s[%u] tried to call non-whitelisted syscall: %s (see %s)\n",
+			 buf, pid,  syscall_name(syscall), json);
 	} else {
-		LOGERR("%s[%u] tried to call non-whitelisted syscall: %d (see %s)\n",
-		       buf, pid,  syscall, json);
+		ULOG_ERR("%s[%u] tried to call non-whitelisted syscall: %d (see %s)\n",
+			 buf, pid,  syscall, json);
 	}
 }
 
@@ -341,7 +326,7 @@ int main(int argc, char **argv, char **envp)
 		memcpy(&_envp[newenv], envp, envc * sizeof(char *));
 
 		ret = execve(_argv[0], _argv, _envp);
-		ERROR("failed to exec %s: %s\n", _argv[0], strerror(errno));
+		ULOG_ERR("failed to exec %s: %s\n", _argv[0], strerror(errno));
 
 		free(_argv);
 		free(_envp);
@@ -353,7 +338,7 @@ int main(int argc, char **argv, char **envp)
 
 	waitpid(child, &status, WUNTRACED);
 	if (!WIFSTOPPED(status)) {
-		ERROR("failed to start %s\n", *argv);
+		ULOG_ERR("failed to start %s\n", *argv);
 		return -1;
 	}
 
@@ -368,10 +353,14 @@ int main(int argc, char **argv, char **envp)
 		ptrace_restart = PTRACE_CONT;
 		break;
 	}
-	if (ptrace(PTRACE_SEIZE, child, 0, ptrace_options) == -1)
-		err(1, "PTRACE_SEIZE");
-	if (ptrace(ptrace_restart, child, 0, SIGCONT) == -1)
-		err(1, "ptrace restart");
+	if (ptrace(PTRACE_SEIZE, child, 0, ptrace_options) == -1) {
+		ULOG_ERR("PTRACE_SEIZE: %s\n", strerror(errno));
+		return -1;
+	}
+	if (ptrace(ptrace_restart, child, 0, SIGCONT) == -1) {
+		ULOG_ERR("ptrace_restart: %s\n", strerror(errno));
+		return -1;
+	}
 
 	uloop_init();
 	tracer.proc.pid = child;
@@ -386,7 +375,7 @@ int main(int argc, char **argv, char **envp)
 	case UTRACE:
 		if (!json)
 			if (asprintf(&json, "/tmp/%s.%u.json", basename(*argv), child) < 0)
-				ERROR("failed to allocate output path: %s\n", strerror(errno));
+				ULOG_ERR("failed to allocate output path: %s\n", strerror(errno));
 		break;
 	case SECCOMP_TRACE:
 		if (!violation_count)
