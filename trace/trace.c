@@ -263,6 +263,15 @@ static void tracer_cb(struct uloop_process *c, int ret)
 	uloop_process_add(c);
 }
 
+static void sigterm_handler(int signum)
+{
+	/* When we receive SIGTERM, we forward it to the tracee. After
+	 * the tracee exits, trace_cb() will be called and make us
+	 * exit too. */
+	kill(tracer.proc.pid, SIGTERM);
+}
+
+
 int main(int argc, char **argv, char **envp)
 {
 	int status, ch, policy = EPERM;
@@ -370,6 +379,7 @@ int main(int argc, char **argv, char **envp)
 	tracer.proc.pid = child;
 	tracer.proc.cb = tracer_cb;
 	uloop_process_add(&tracer.proc);
+	signal(SIGTERM, sigterm_handler); /* Override uloop's SIGTERM handler */
 	uloop_run();
 	uloop_done();
 
