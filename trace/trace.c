@@ -186,7 +186,7 @@ int main(int argc, char **argv, char **envp)
 			;
 
 		_envp = calloc(envc, sizeof(char *));
-		memcpy(&_envp[1], _envp, envc * sizeof(char *));
+		memcpy(&_envp[1], envp, envc * sizeof(char *));
 		*_envp = preload;
 
 		ret = execve(_argv[0], _argv, _envp);
