@@ -32,7 +32,6 @@ static main_t __main__;
 static int __preload_main__(int argc, char **argv, char **envp)
 {
 	unsetenv("LD_PRELOAD");
-	ptrace(PTRACE_TRACEME);
 	kill(getpid(), SIGSTOP);
 
 	return (*__main__)(argc, argv, envp);

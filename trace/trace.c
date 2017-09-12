@@ -24,6 +24,12 @@
 #include <string.h>
 #include <syslog.h>
 
+#ifndef PTRACE_EVENT_STOP
+/* PTRACE_EVENT_STOP is defined in linux/ptrace.h, but this header
+ * collides with musl's sys/ptrace.h */
+#define PTRACE_EVENT_STOP 128
+#endif
+
 #include <libubox/uloop.h>
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
@@ -150,7 +156,10 @@ static void tracer_cb(struct uloop_process *c, int ret)
 	struct tracee *tracee = container_of(c, struct tracee, proc);
 	int inject_signal = 0;
 
-	if (WIFSTOPPED(ret)) {
+	/* We explicitely check for events in upper 16 bits, because
+	 * musl (as opposed to glibc) does not report
+	 * PTRACE_EVENT_STOP as WIFSTOPPED */
+	if (WIFSTOPPED(ret) || (ret >> 16)) {
 		if (WSTOPSIG(ret) & 0x80) {
 			if (!tracee->in_syscall) {
 				int syscall = ptrace(PTRACE_PEEKUSER, c->pid, reg_syscall_nr);
@@ -175,6 +184,8 @@ static void tracer_cb(struct uloop_process *c, int ret)
 			uloop_process_add(&child->proc);
 			if (debug)
 				fprintf(stderr, "Tracing new child %d\n", child->proc.pid);
+		} else if ((ret >> 16) == PTRACE_EVENT_STOP) {
+			/* Nothing special to do here */
 		} else {
 			inject_signal = WSTOPSIG(ret);
 			if (debug)
@@ -254,18 +265,18 @@ int main(int argc, char **argv, char **envp)
 
 	syscall_max = ARRAY_SIZE(syscall_names);
 	syscall_count = calloc(syscall_max, sizeof(int));
-	waitpid(child, &status, 0);
+	waitpid(child, &status, WUNTRACED);
 	if (!WIFSTOPPED(status)) {
 		ERROR("failed to start %s\n", *argv);
 		return -1;
 	}
 
-	ptrace(PTRACE_SETOPTIONS, child, 0,
+	ptrace(PTRACE_SEIZE, child, 0,
 	       PTRACE_O_TRACESYSGOOD |
 	       PTRACE_O_TRACEFORK |
 	       PTRACE_O_TRACEVFORK |
 	       PTRACE_O_TRACECLONE);
-	ptrace(PTRACE_SYSCALL, child, 0, 0);
+	ptrace(PTRACE_SYSCALL, child, 0, SIGCONT);
 
 	uloop_init();
 	tracer.proc.pid = child;
