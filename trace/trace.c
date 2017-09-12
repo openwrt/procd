@@ -57,11 +57,15 @@
 	fprintf(stderr, "utrace: "fmt, ## __VA_ARGS__); \
 } while (0)
 
-static struct uloop_process tracer;
+struct tracee {
+	struct uloop_process proc;
+	int in_syscall;
+};
+
+static struct tracee tracer;
 static int *syscall_count;
 static struct blob_buf b;
 static int syscall_max;
-static int in_syscall;
 static int debug;
 
 static int max_syscall = ARRAY_SIZE(syscall_names);
@@ -143,25 +147,45 @@ static void print_syscalls(int policy, const char *json)
 
 static void tracer_cb(struct uloop_process *c, int ret)
 {
-	if (WIFSTOPPED(ret) && WSTOPSIG(ret) & 0x80) {
-		if (!in_syscall) {
-			int syscall = ptrace(PTRACE_PEEKUSER, c->pid, reg_syscall_nr);
+	struct tracee *tracee = container_of(c, struct tracee, proc);
 
-			if (syscall < syscall_max) {
-				syscall_count[syscall]++;
-				if (debug)
-					fprintf(stderr, "%s()\n", syscall_names[syscall]);
-			} else if (debug) {
-				fprintf(stderr, "syscal(%d)\n", syscall);
+	if (WIFSTOPPED(ret)) {
+		if (WSTOPSIG(ret) & 0x80) {
+			if (!tracee->in_syscall) {
+				int syscall = ptrace(PTRACE_PEEKUSER, c->pid, reg_syscall_nr);
+
+				if (syscall < syscall_max) {
+					syscall_count[syscall]++;
+					if (debug)
+						fprintf(stderr, "%s()\n", syscall_names[syscall]);
+				} else if (debug) {
+					fprintf(stderr, "syscal(%d)\n", syscall);
+				}
 			}
+			tracee->in_syscall = !tracee->in_syscall;
+		} else if ((ret >> 8) == (SIGTRAP | (PTRACE_EVENT_FORK << 8))) {
+			struct tracee *child = calloc(1, sizeof(struct tracee));
+
+			ptrace(PTRACE_GETEVENTMSG, c->pid, 0, &child->proc.pid);
+			child->proc.cb = tracer_cb;
+			ptrace(PTRACE_SYSCALL, child->proc.pid, 0, 0);
+			uloop_process_add(&child->proc);
+			if (debug)
+				fprintf(stderr, "Tracing new child %d\n", child->proc.pid);
 		}
-		in_syscall = !in_syscall;
 	} else if (WIFEXITED(ret)) {
-		uloop_end();
+		if (tracee == &tracer) {
+			uloop_end(); /* Main process exit */
+		} else {
+			if (debug)
+				fprintf(stderr, "Child %d exited\n", tracee->proc.pid);
+			free(tracee);
+		}
 		return;
 	}
+
 	ptrace(PTRACE_SYSCALL, c->pid, 0, 0);
-	uloop_process_add(&tracer);
+	uloop_process_add(c);
 }
 
 int main(int argc, char **argv, char **envp)
@@ -228,13 +252,15 @@ int main(int argc, char **argv, char **envp)
 		return -1;
 	}
 
-	ptrace(PTRACE_SETOPTIONS, child, 0, PTRACE_O_TRACESYSGOOD);
+	ptrace(PTRACE_SETOPTIONS, child, 0,
+	       PTRACE_O_TRACESYSGOOD |
+	       PTRACE_O_TRACEFORK);
 	ptrace(PTRACE_SYSCALL, child, 0, 0);
 
 	uloop_init();
-	tracer.pid = child;
-	tracer.cb = tracer_cb;
-	uloop_process_add(&tracer);
+	tracer.proc.pid = child;
+	tracer.proc.cb = tracer_cb;
+	uloop_process_add(&tracer.proc);
 	uloop_run();
 	uloop_done();
 
