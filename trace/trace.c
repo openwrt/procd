@@ -177,7 +177,7 @@ int main(int argc, char **argv, char **envp)
 		char **_argv = calloc(argc + 1, sizeof(char *));
 		char **_envp;
 		char *preload = "LD_PRELOAD=/lib/libpreload-trace.so";
-		int envc = 1;
+		int envc = 0;
 		int ret;
 
 		memcpy(_argv, argv, argc * sizeof(char *));
@@ -185,7 +185,7 @@ int main(int argc, char **argv, char **envp)
 		while (envp[envc++])
 			;
 
-		_envp = calloc(envc, sizeof(char *));
+		_envp = calloc(envc + 1, sizeof(char *));
 		memcpy(&_envp[1], envp, envc * sizeof(char *));
 		*_envp = preload;
 
