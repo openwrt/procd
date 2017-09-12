@@ -163,7 +163,9 @@ static void tracer_cb(struct uloop_process *c, int ret)
 				}
 			}
 			tracee->in_syscall = !tracee->in_syscall;
-		} else if ((ret >> 8) == (SIGTRAP | (PTRACE_EVENT_FORK << 8))) {
+		} else if ((ret >> 8) == (SIGTRAP | (PTRACE_EVENT_FORK << 8)) ||
+			   (ret >> 8) == (SIGTRAP | (PTRACE_EVENT_VFORK << 8)) ||
+			   (ret >> 8) == (SIGTRAP | (PTRACE_EVENT_CLONE << 8))) {
 			struct tracee *child = calloc(1, sizeof(struct tracee));
 
 			ptrace(PTRACE_GETEVENTMSG, c->pid, 0, &child->proc.pid);
@@ -254,7 +256,9 @@ int main(int argc, char **argv, char **envp)
 
 	ptrace(PTRACE_SETOPTIONS, child, 0,
 	       PTRACE_O_TRACESYSGOOD |
-	       PTRACE_O_TRACEFORK);
+	       PTRACE_O_TRACEFORK |
+	       PTRACE_O_TRACEVFORK |
+	       PTRACE_O_TRACECLONE);
 	ptrace(PTRACE_SYSCALL, child, 0, 0);
 
 	uloop_init();
