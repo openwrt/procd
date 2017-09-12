@@ -303,16 +303,13 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	if (seccomp)
 		setenv("SECCOMP_FILE", in->seccomp, 1);
 
-	if ((seccomp || setlbf) && asprintf(&ld_preload, "LD_PRELOAD=%s%s%s",
-			seccomp ? "/lib/libpreload-seccomp.so" : "",
-			seccomp && setlbf ? ":" : "",
-			setlbf ? "/lib/libsetlbf.so" : "") > 0)
+	if (setlbf && asprintf(&ld_preload, "LD_PRELOAD=/lib/libsetlbf.so") > 0)
 		putenv(ld_preload);
 
 	blobmsg_list_for_each(&in->limits, var)
 		instance_limits(blobmsg_name(var->data), blobmsg_data(var->data));
 
-	if (in->trace)
+	if (in->trace || seccomp)
 		argc += 1;
 
 	argv = alloca(sizeof(char *) * (argc + in->jail.argc));
@@ -320,6 +317,8 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 
 	if (in->trace)
 		argv[argc++] = trace;
+	else if (seccomp)
+		argv[argc++] = "/sbin/seccomp-trace";
 
 	if (in->has_jail)
 		argc = jail_run(in, argv);
