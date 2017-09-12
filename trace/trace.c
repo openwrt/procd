@@ -148,6 +148,7 @@ static void print_syscalls(int policy, const char *json)
 static void tracer_cb(struct uloop_process *c, int ret)
 {
 	struct tracee *tracee = container_of(c, struct tracee, proc);
+	int inject_signal = 0;
 
 	if (WIFSTOPPED(ret)) {
 		if (WSTOPSIG(ret) & 0x80) {
@@ -174,8 +175,13 @@ static void tracer_cb(struct uloop_process *c, int ret)
 			uloop_process_add(&child->proc);
 			if (debug)
 				fprintf(stderr, "Tracing new child %d\n", child->proc.pid);
+		} else {
+			inject_signal = WSTOPSIG(ret);
+			if (debug)
+				fprintf(stderr, "Injecting signal %d into pid %d\n",
+					inject_signal, tracee->proc.pid);
 		}
-	} else if (WIFEXITED(ret)) {
+	} else if (WIFEXITED(ret) || (WIFSIGNALED(ret) && WTERMSIG(ret))) {
 		if (tracee == &tracer) {
 			uloop_end(); /* Main process exit */
 		} else {
@@ -186,7 +192,7 @@ static void tracer_cb(struct uloop_process *c, int ret)
 		return;
 	}
 
-	ptrace(PTRACE_SYSCALL, c->pid, 0, 0);
+	ptrace(PTRACE_SYSCALL, c->pid, 0, inject_signal);
 	uloop_process_add(c);
 }
 
