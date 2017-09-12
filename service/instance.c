@@ -873,15 +873,8 @@ instance_config_parse(struct service_instance *in)
 	if (tb[INSTANCE_ATTR_NO_NEW_PRIVS])
 		in->no_new_privs = blobmsg_get_bool(tb[INSTANCE_ATTR_NO_NEW_PRIVS]);
 
-	if (!in->trace && tb[INSTANCE_ATTR_SECCOMP]) {
-		char *seccomp = blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]);
-		struct stat s;
-
-		if (stat(seccomp, &s))
-			ERROR("%s: not starting seccomp as %s is missing\n", in->name, seccomp);
-		else
-			in->seccomp = seccomp;
-	}
+	if (!in->trace && tb[INSTANCE_ATTR_SECCOMP])
+		in->seccomp = blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]);
 
 	if (tb[INSTANCE_ATTR_PIDFILE]) {
 		char *pidfile = blobmsg_get_string(tb[INSTANCE_ATTR_PIDFILE]);
