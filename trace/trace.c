@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <string.h>
 #include <syslog.h>
+#include <err.h>
 
 #ifndef PTRACE_EVENT_STOP
 /* PTRACE_EVENT_STOP is defined in linux/ptrace.h, but this header
@@ -360,8 +361,10 @@ int main(int argc, char **argv, char **envp)
 		ptrace_restart = PTRACE_CONT;
 		break;
 	}
-	ptrace(PTRACE_SEIZE, child, 0, ptrace_options);
-	ptrace(ptrace_restart, child, 0, SIGCONT);
+	if (ptrace(PTRACE_SEIZE, child, 0, ptrace_options) == -1)
+		err(1, "PTRACE_SEIZE");
+	if (ptrace(ptrace_restart, child, 0, SIGCONT) == -1)
+		err(1, "ptrace restart");
 
 	uloop_init();
 	tracer.proc.pid = child;
