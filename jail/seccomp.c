@@ -118,8 +118,8 @@ int install_syscall_filter(const char *argv, const char *file)
 	}
 
 	if (default_policy)
-		/* return -1 and set errno */
-		set_filter(&filter[idx], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_LOGGER(default_policy));
+		/* notify tracer; without tracer return -1 and set errno to ENOSYS */
+		set_filter(&filter[idx], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_TRACE);
 	else
 		/* kill the process */
 		set_filter(&filter[idx], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_KILL);

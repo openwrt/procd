@@ -12,8 +12,10 @@
  */
 
 #define _GNU_SOURCE
+#include <fcntl.h>
 #include <stddef.h>
 #include <sys/ptrace.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/user.h>
 #include <sys/wait.h>
@@ -49,18 +51,33 @@
 # endif
 #define reg_syscall_nr	(EF_REG2 / 4)
 #elif defined(__arm__)
+#include <asm/ptrace.h>		/* for PTRACE_SET_SYSCALL */
 #define reg_syscall_nr	_offsetof(struct user, regs.uregs[7])
+# if defined(__ARM_EABI__)
+# define reg_retval_nr	_offsetof(struct user, regs.uregs[0])
+# endif
 #else
 #error tracing is not supported on this architecture
 #endif
 
+enum mode {
+	UTRACE,
+	SECCOMP_TRACE,
+} mode = UTRACE;
+
+#define PROC_NAME(mode) (mode == UTRACE ? "utrace" : "seccomp-trace")
+
 #define INFO(fmt, ...) do { \
-	fprintf(stderr, "utrace: "fmt, ## __VA_ARGS__); \
+	fprintf(stderr, "%s: "fmt, PROC_NAME(mode), ## __VA_ARGS__); \
 } while (0)
 
 #define ERROR(fmt, ...) do { \
-	syslog(LOG_ERR, "utrace: "fmt, ## __VA_ARGS__); \
-	fprintf(stderr, "utrace: "fmt, ## __VA_ARGS__); \
+	syslog(LOG_ERR, "%s: "fmt, PROC_NAME(mode), ## __VA_ARGS__); \
+	fprintf(stderr, "%s: "fmt, PROC_NAME(mode), ## __VA_ARGS__);  \
+} while (0)
+
+#define LOGERR(fmt, ...) do { \
+	syslog(LOG_ERR, "%s: "fmt, PROC_NAME(mode), ## __VA_ARGS__); \
 } while (0)
 
 struct tracee {
@@ -70,9 +87,12 @@ struct tracee {
 
 static struct tracee tracer;
 static int *syscall_count;
+static int violation_count;
 static struct blob_buf b;
 static int syscall_max;
 static int debug;
+char *json = NULL;
+int ptrace_restart;
 
 static int max_syscall = ARRAY_SIZE(syscall_names);
 
@@ -102,11 +122,13 @@ static void print_syscalls(int policy, const char *json)
 	void *c;
 	int i;
 
-	set_syscall("rt_sigaction", 1);
-	set_syscall("sigreturn", 1);
-	set_syscall("rt_sigreturn", 1);
-	set_syscall("exit_group", 1);
-	set_syscall("exit", 1);
+	if (mode == UTRACE) {
+		set_syscall("rt_sigaction", 1);
+		set_syscall("sigreturn", 1);
+		set_syscall("rt_sigreturn", 1);
+		set_syscall("exit_group", 1);
+		set_syscall("exit", 1);
+	}
 
 	struct syscall sorted[ARRAY_SIZE(syscall_names)];
 
@@ -151,6 +173,30 @@ static void print_syscalls(int policy, const char *json)
 
 }
 
+static void report_seccomp_vialation(pid_t pid, unsigned syscall)
+{
+	char buf[200];
+	snprintf(buf, sizeof(buf), "/proc/%d/cmdline", pid);
+	int f = open(buf, O_RDONLY);
+	int r = read(f, buf, sizeof(buf) - 1);
+	if (r >= 0)
+		buf[r] = 0;
+	else
+		strcpy(buf, "unknown?");
+	close(f);
+
+	if (violation_count < INT_MAX)
+		violation_count++;
+	if (syscall < ARRAY_SIZE(syscall_names)) {
+		syscall_count[syscall]++;
+		LOGERR("%s[%u] tried to call non-whitelisted syscall: %s (see %s)\n",
+		       buf, pid,  syscall_names[syscall], json);
+	} else {
+		LOGERR("%s[%u] tried to call non-whitelisted syscall: %d (see %s)\n",
+		       buf, pid,  syscall, json);
+	}
+}
+
 static void tracer_cb(struct uloop_process *c, int ret)
 {
 	struct tracee *tracee = container_of(c, struct tracee, proc);
@@ -180,12 +226,21 @@ static void tracer_cb(struct uloop_process *c, int ret)
 
 			ptrace(PTRACE_GETEVENTMSG, c->pid, 0, &child->proc.pid);
 			child->proc.cb = tracer_cb;
-			ptrace(PTRACE_SYSCALL, child->proc.pid, 0, 0);
+			ptrace(ptrace_restart, child->proc.pid, 0, 0);
 			uloop_process_add(&child->proc);
 			if (debug)
 				fprintf(stderr, "Tracing new child %d\n", child->proc.pid);
 		} else if ((ret >> 16) == PTRACE_EVENT_STOP) {
 			/* Nothing special to do here */
+		} else if ((ret >> 8) == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) {
+			int syscall = ptrace(PTRACE_PEEKUSER, c->pid, reg_syscall_nr);
+#if defined(__arm__)
+			ptrace(PTRACE_SET_SYSCALL, c->pid, 0, -1);
+			ptrace(PTRACE_POKEUSER, c->pid, reg_retval_nr, -ENOSYS);
+#else
+			ptrace(PTRACE_POKEUSER, c->pid, reg_syscall_nr, -1);
+#endif
+			report_seccomp_vialation(c->pid, syscall);
 		} else {
 			inject_signal = WSTOPSIG(ret);
 			if (debug)
@@ -203,15 +258,19 @@ static void tracer_cb(struct uloop_process *c, int ret)
 		return;
 	}
 
-	ptrace(PTRACE_SYSCALL, c->pid, 0, inject_signal);
+	ptrace(ptrace_restart, c->pid, 0, inject_signal);
 	uloop_process_add(c);
 }
 
 int main(int argc, char **argv, char **envp)
 {
-	char *json = NULL;
 	int status, ch, policy = EPERM;
 	pid_t child;
+
+	/* When invoked via seccomp-trace symlink, work as seccomp
+	 * violation logger rather than as syscall tracer */
+	if (strstr(argv[0], "seccomp-trace"))
+		mode = SECCOMP_TRACE;
 
 	while ((ch = getopt(argc, argv, "f:p:")) != -1) {
 		switch (ch) {
@@ -223,6 +282,9 @@ int main(int argc, char **argv, char **envp)
 			break;
 		}
 	}
+
+	if (!json)
+		json = getenv("SECCOMP_FILE");
 
 	argc -= optind;
 	argv += optind;
@@ -239,7 +301,9 @@ int main(int argc, char **argv, char **envp)
 	if (child == 0) {
 		char **_argv = calloc(argc + 1, sizeof(char *));
 		char **_envp;
-		char *preload = "LD_PRELOAD=/lib/libpreload-trace.so";
+		char *preload = NULL;
+		const char *old_preload = getenv("LD_PRELOAD");
+		int newenv = 0;
 		int envc = 0;
 		int ret;
 
@@ -248,9 +312,23 @@ int main(int argc, char **argv, char **envp)
 		while (envp[envc++])
 			;
 
-		_envp = calloc(envc + 1, sizeof(char *));
-		memcpy(&_envp[1], envp, envc * sizeof(char *));
-		*_envp = preload;
+		_envp = calloc(envc + 2, sizeof(char *));
+		switch (mode) {
+		case UTRACE:
+			preload = "/lib/libpreload-trace.so";
+			newenv = 1;
+			break;
+		case SECCOMP_TRACE:
+			preload = "/lib/libpreload-seccomp.so";
+			newenv = 2;
+			asprintf(&_envp[1], "SECCOMP_FILE=%s", json ? json : "");
+			kill(getpid(), SIGSTOP);
+			break;
+		}
+		asprintf(&_envp[0], "LD_PRELOAD=%s%s%s", preload,
+			 old_preload ? ":" : "",
+			 old_preload ? old_preload : "");
+		memcpy(&_envp[newenv], envp, envc * sizeof(char *));
 
 		ret = execve(_argv[0], _argv, _envp);
 		ERROR("failed to exec %s: %s\n", _argv[0], strerror(errno));
@@ -271,12 +349,19 @@ int main(int argc, char **argv, char **envp)
 		return -1;
 	}
 
-	ptrace(PTRACE_SEIZE, child, 0,
-	       PTRACE_O_TRACESYSGOOD |
-	       PTRACE_O_TRACEFORK |
-	       PTRACE_O_TRACEVFORK |
-	       PTRACE_O_TRACECLONE);
-	ptrace(PTRACE_SYSCALL, child, 0, SIGCONT);
+	int ptrace_options = PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE;
+	switch (mode) {
+	case UTRACE:
+		ptrace_options |= PTRACE_O_TRACESYSGOOD;
+		ptrace_restart = PTRACE_SYSCALL;
+		break;
+	case SECCOMP_TRACE:
+		ptrace_options |= PTRACE_O_TRACESECCOMP;
+		ptrace_restart = PTRACE_CONT;
+		break;
+	}
+	ptrace(PTRACE_SEIZE, child, 0, ptrace_options);
+	ptrace(ptrace_restart, child, 0, SIGCONT);
 
 	uloop_init();
 	tracer.proc.pid = child;
@@ -285,11 +370,19 @@ int main(int argc, char **argv, char **envp)
 	uloop_run();
 	uloop_done();
 
-	if (!json)
-		if (asprintf(&json, "/tmp/%s.%u.json", basename(*argv), child) < 0)
-			ERROR("failed to allocate output path: %s\n", strerror(errno));
 
+	switch (mode) {
+	case UTRACE:
+		if (!json)
+			if (asprintf(&json, "/tmp/%s.%u.json", basename(*argv), child) < 0)
+				ERROR("failed to allocate output path: %s\n", strerror(errno));
+		break;
+	case SECCOMP_TRACE:
+		if (!violation_count)
+			return 0;
+		asprintf(&json, "/tmp/%s.%u.violations.json", basename(*argv), child);
+		break;
+	}
 	print_syscalls(policy, json);
-
 	return 0;
 }
