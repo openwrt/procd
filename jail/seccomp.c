@@ -22,15 +22,15 @@
 #include "seccomp.h"
 #include "../syscall-names.h"
 
-static int max_syscall = ARRAY_SIZE(syscall_names);
-
 static int find_syscall(const char *name)
 {
 	int i;
 
-	for (i = 0; i < max_syscall; i++)
-		if (syscall_names[i] && !strcmp(syscall_names[i], name))
-			return i;
+	for (i = 0; i < SYSCALL_COUNT; i++) {
+		int sc = syscall_index_to_number(i);
+		if (syscall_name(sc) && !strcmp(syscall_name(sc), name))
+			return sc;
+	}
 
 	return -1;
 }

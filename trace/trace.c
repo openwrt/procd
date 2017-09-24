@@ -87,25 +87,24 @@ struct tracee {
 };
 
 static struct tracee tracer;
-static int *syscall_count;
+static int syscall_count[SYSCALL_COUNT];
 static int violation_count;
 static struct blob_buf b;
-static int syscall_max;
 static int debug;
 char *json = NULL;
 int ptrace_restart;
-
-static int max_syscall = ARRAY_SIZE(syscall_names);
 
 static void set_syscall(const char *name, int val)
 {
 	int i;
 
-	for (i = 0; i < max_syscall; i++)
-		if (syscall_names[i] && !strcmp(syscall_names[i], name)) {
+	for (i = 0; i < SYSCALL_COUNT; i++) {
+		int sc = syscall_index_to_number(i);
+		if (syscall_name(sc) && !strcmp(syscall_name(sc), name)) {
 			syscall_count[i] = val;
 			return;
 		}
+	}
 }
 
 struct syscall {
@@ -131,27 +130,27 @@ static void print_syscalls(int policy, const char *json)
 		set_syscall("exit", 1);
 	}
 
-	struct syscall sorted[ARRAY_SIZE(syscall_names)];
+	struct syscall sorted[SYSCALL_COUNT];
 
-	for (i = 0; i < ARRAY_SIZE(syscall_names); i++) {
-		sorted[i].syscall = i;
+	for (i = 0; i < SYSCALL_COUNT; i++) {
+		sorted[i].syscall = syscall_index_to_number(i);
 		sorted[i].count = syscall_count[i];
 	}
 
-	qsort(sorted, ARRAY_SIZE(syscall_names), sizeof(sorted[0]), cmp_count);
+	qsort(sorted, SYSCALL_COUNT, sizeof(sorted[0]), cmp_count);
 
 	blob_buf_init(&b, 0);
 	c = blobmsg_open_array(&b, "whitelist");
 
-	for (i = 0; i < ARRAY_SIZE(syscall_names); i++) {
+	for (i = 0; i < SYSCALL_COUNT; i++) {
 		int sc = sorted[i].syscall;
 		if (!sorted[i].count)
 			break;
-		if (syscall_names[sc]) {
+		if (syscall_name(sc)) {
 			if (debug)
 				printf("syscall %d (%s) was called %d times\n",
-					sc, syscall_names[sc], sorted[i].count);
-			blobmsg_add_string(&b, NULL, syscall_names[sc]);
+				       sc, syscall_name(sc), sorted[i].count);
+			blobmsg_add_string(&b, NULL, syscall_name(sc));
 		} else {
 			ERROR("no name found for syscall(%d)\n", sc);
 		}
@@ -188,10 +187,11 @@ static void report_seccomp_vialation(pid_t pid, unsigned syscall)
 
 	if (violation_count < INT_MAX)
 		violation_count++;
-	if (syscall < ARRAY_SIZE(syscall_names)) {
-		syscall_count[syscall]++;
+	int i = syscall_index(syscall);
+	if (i >= 0) {
+		syscall_count[i]++;
 		LOGERR("%s[%u] tried to call non-whitelisted syscall: %s (see %s)\n",
-		       buf, pid,  syscall_names[syscall], json);
+		       buf, pid,  syscall_name(syscall), json);
 	} else {
 		LOGERR("%s[%u] tried to call non-whitelisted syscall: %d (see %s)\n",
 		       buf, pid,  syscall, json);
@@ -210,11 +210,11 @@ static void tracer_cb(struct uloop_process *c, int ret)
 		if (WSTOPSIG(ret) & 0x80) {
 			if (!tracee->in_syscall) {
 				int syscall = ptrace(PTRACE_PEEKUSER, c->pid, reg_syscall_nr);
-
-				if (syscall < syscall_max) {
-					syscall_count[syscall]++;
+				int i = syscall_index(syscall);
+				if (i >= 0) {
+					syscall_count[i]++;
 					if (debug)
-						fprintf(stderr, "%s()\n", syscall_names[syscall]);
+						fprintf(stderr, "%s()\n", syscall_name(syscall));
 				} else if (debug) {
 					fprintf(stderr, "syscal(%d)\n", syscall);
 				}
@@ -351,8 +351,6 @@ int main(int argc, char **argv, char **envp)
 	if (child < 0)
 		return -1;
 
-	syscall_max = ARRAY_SIZE(syscall_names);
-	syscall_count = calloc(syscall_max, sizeof(int));
 	waitpid(child, &status, WUNTRACED);
 	if (!WIFSTOPPED(status)) {
 		ERROR("failed to start %s\n", *argv);
