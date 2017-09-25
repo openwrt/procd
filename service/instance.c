@@ -626,6 +626,13 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (!in->pidfile && in_new->pidfile)
 		return true;
 
+	if (in->respawn_retry != in_new->respawn_retry)
+		return true;
+	if (in->respawn_threshold != in_new->respawn_threshold)
+		return true;
+	if (in->respawn_timeout != in_new->respawn_timeout)
+		return true;
+
 	if (!blobmsg_list_equal(&in->limits, &in_new->limits))
 		return true;
 
@@ -939,6 +946,9 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->trigger = in_src->trigger;
 	in->command = in_src->command;
 	in->pidfile = in_src->pidfile;
+	in->respawn_retry = in_src->respawn_retry;
+	in->respawn_threshold = in_src->respawn_threshold;
+	in->respawn_timeout = in_src->respawn_timeout;
 	in->name = in_src->name;
 	in->trace = in_src->trace;
 	in->node.avl.key = in_src->node.avl.key;
