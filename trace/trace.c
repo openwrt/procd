@@ -342,6 +342,9 @@ int main(int argc, char **argv, char **envp)
 		return -1;
 	}
 
+	/* Initialize uloop to catch all ptrace stops from now on. */
+	uloop_init();
+
 	int ptrace_options = PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE;
 	switch (mode) {
 	case UTRACE:
@@ -362,7 +365,6 @@ int main(int argc, char **argv, char **envp)
 		return -1;
 	}
 
-	uloop_init();
 	tracer.proc.pid = child;
 	tracer.proc.cb = tracer_cb;
 	uloop_process_add(&tracer.proc);
