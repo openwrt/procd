@@ -536,7 +536,7 @@ service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
 	trigger_event(event, tb[EVENT_DATA]);
 
 	if (!strcmp(event, "config.change")) {
-		struct blob_attr *tb2[__DATA_MAX];
+		struct blob_attr *tb2[__VALIDATE_MAX];
 
 		blobmsg_parse(validate_policy, __VALIDATE_MAX, tb2,
 			      blobmsg_data(tb[EVENT_DATA]), blobmsg_len(tb[EVENT_DATA]));
