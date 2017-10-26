@@ -492,15 +492,13 @@ static void rule_handle_command(struct json_script_ctx *ctx, const char *name,
 	int rem, i;
 
 	if (debug > 3) {
-		DEBUG(4, "Command: %s", name);
+		DEBUG(4, "Command: %s\n", name);
 		blobmsg_for_each_attr(cur, data, rem)
-			DEBUG(4, " %s", (char *) blobmsg_data(cur));
-		DEBUG(4, "\n");
+			DEBUG(4, " %s\n", (char *) blobmsg_data(cur));
 
-		DEBUG(4, "Message:");
+		DEBUG(4, "Message:\n");
 		blobmsg_for_each_attr(cur, vars, rem)
-			DEBUG(4, " %s=%s", blobmsg_name(cur), (char *) blobmsg_data(cur));
-		DEBUG(4, "\n");
+			DEBUG(4, " %s=%s\n", blobmsg_name(cur), (char *) blobmsg_data(cur));
 	}
 
 	for (i = 0; i < ARRAY_SIZE(handlers); i++)
