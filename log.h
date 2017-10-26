@@ -19,7 +19,7 @@
 
 #define DEBUG(level, fmt, ...) do { \
 	if (debug >= level) { \
-		ulog(LOG_DEBUG, fmt, ## __VA_ARGS__); \
+		ulog(LOG_NOTICE, fmt, ## __VA_ARGS__); \
 	} } while (0)
 
 #define LOG   ULOG_INFO
