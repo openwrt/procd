@@ -141,8 +141,6 @@ static const struct rlimit_name rlimit_names[] = {
 	{ NULL, 0 }
 };
 
-static char trace[] = "/sbin/utrace";
-
 static void closefd(int fd)
 {
 	if (fd > STDERR_FILENO)
@@ -315,10 +313,15 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	argv = alloca(sizeof(char *) * (argc + in->jail.argc));
 	argc = 0;
 
+#ifdef SECCOMP_SUPPORT
 	if (in->trace)
-		argv[argc++] = trace;
+		argv[argc++] = "/sbin/utrace";
 	else if (seccomp)
 		argv[argc++] = "/sbin/seccomp-trace";
+#else
+	if (in->trace || seccomp)
+		ULOG_WARN("Seccomp support for %s::%s not available\n", in->srv->name, in->name);
+#endif
 
 	if (in->has_jail)
 		argc = jail_run(in, argv);

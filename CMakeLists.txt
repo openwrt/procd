@@ -88,6 +88,7 @@ ADD_CUSTOM_COMMAND(
 ADD_CUSTOM_TARGET(capabilities-names-h DEPENDS capabilities-names.h)
 
 IF(SECCOMP_SUPPORT)
+ADD_DEFINITIONS(-DSECCOMP_SUPPORT)
 ADD_LIBRARY(preload-seccomp SHARED jail/preload.c jail/seccomp.c)
 TARGET_LINK_LIBRARIES(preload-seccomp dl ubox blobmsg_json)
 INSTALL(TARGETS preload-seccomp
