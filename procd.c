@@ -69,6 +69,7 @@ int main(int argc, char **argv)
 	}
 
 	ulog_open(ulog_channels, LOG_DAEMON, "procd");
+	ulog_threshold(LOG_DEBUG + 1);
 
 	setsid();
 	uloop_init();
