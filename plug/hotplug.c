@@ -434,11 +434,9 @@ static void handle_button_complete(struct blob_attr *msg, struct blob_attr *data
 	if (!name)
 		return;
 
-	b = malloc(sizeof(*b));
+	b = calloc(1, sizeof(*b));
 	if (!b)
 		return;
-
-	memset(b, 0, sizeof(*b));
 
 	b->data = malloc(blob_pad_len(data));
 	b->name = strdup(name);
@@ -584,11 +582,10 @@ void hotplug_last_event(uloop_timeout_handler handler)
 
 void hotplug(char *rules)
 {
-	struct sockaddr_nl nls;
+	struct sockaddr_nl nls = {};
 	int nlbufsize = 512 * 1024;
 
 	rule_file = strdup(rules);
-	memset(&nls,0,sizeof(struct sockaddr_nl));
 	nls.nl_family = AF_NETLINK;
 	nls.nl_pid = getpid();
 	nls.nl_groups = -1;

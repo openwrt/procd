@@ -284,8 +284,7 @@ void procd_inittab(void)
 
 	regcomp(&pat_inittab, "([a-zA-Z0-9]*):([a-zA-Z0-9]*):([a-zA-Z0-9]*):(.*)", REG_EXTENDED);
 	line = malloc(LINE_LEN);
-	a = malloc(sizeof(struct init_action));
-	memset(a, 0, sizeof(struct init_action));
+	a = calloc(1, sizeof(struct init_action));
 
 	while (fgets(line, LINE_LEN, fp)) {
 		char *tags[TAG_PROCESS + 1];
@@ -322,8 +321,7 @@ void procd_inittab(void)
 		if (add_action(a, tags[TAG_ACTION]))
 			continue;
 		line = malloc(LINE_LEN);
-		a = malloc(sizeof(struct init_action));
-		memset(a, 0, sizeof(struct init_action));
+		a = calloc(1, sizeof(struct init_action));
 	}
 
 	fclose(fp);
