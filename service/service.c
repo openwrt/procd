@@ -266,7 +266,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	bool add = !strcmp(method, "add");
 	int ret;
 
-	blobmsg_parse(service_set_attrs, __SERVICE_SET_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_set_attrs, __SERVICE_SET_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 	cur = tb[SERVICE_SET_NAME];
 	if (!cur)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -329,7 +329,7 @@ service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 	const char *name = NULL;
 	bool verbose = false;
 
-	blobmsg_parse(service_list_attrs, __SERVICE_LIST_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_list_attrs, __SERVICE_LIST_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
 	if (tb[SERVICE_LIST_ATTR_VERBOSE])
 		verbose = blobmsg_get_bool(tb[SERVICE_LIST_ATTR_VERBOSE]);
@@ -358,7 +358,7 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 	struct service *s;
 	struct service_instance *in;
 
-	blobmsg_parse(service_del_attrs, __SERVICE_DEL_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_del_attrs, __SERVICE_DEL_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
 	cur = tb[SERVICE_DEL_ATTR_NAME];
 	if (!cur)
@@ -411,7 +411,7 @@ service_handle_signal(struct ubus_context *ctx, struct ubus_object *obj,
 	int sig = SIGHUP;
 	int rv = 0;
 
-	blobmsg_parse(service_signal_attrs, __SERVICE_SIGNAL_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_signal_attrs, __SERVICE_SIGNAL_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
 	cur = tb[SERVICE_SIGNAL_ATTR_SIGNAL];
 	if (cur)
@@ -452,7 +452,7 @@ service_handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	struct service_instance *in;
 	int spawn;
 
-	blobmsg_parse(service_state_attrs, __SERVICE_STATE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_state_attrs, __SERVICE_STATE_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
 	if (!tb[SERVICE_STATE_ATTR_SPAWN])
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -485,7 +485,7 @@ service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *tb[__SERVICE_ATTR_MAX], *cur;
 	struct service *s;
 
-	blobmsg_parse(service_attrs, __SERVICE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(service_attrs, __SERVICE_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
 	cur = tb[SERVICE_SET_NAME];
 	if (!cur)
@@ -528,7 +528,7 @@ service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	blobmsg_parse(event_policy, __EVENT_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(event_policy, __EVENT_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 	if (!tb[EVENT_TYPE] || !tb[EVENT_DATA])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
@@ -539,7 +539,7 @@ service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
 		struct blob_attr *tb2[__VALIDATE_MAX];
 
 		blobmsg_parse(validate_policy, __VALIDATE_MAX, tb2,
-			      blobmsg_data(tb[EVENT_DATA]), blobmsg_len(tb[EVENT_DATA]));
+			      blobmsg_data(tb[EVENT_DATA]), blobmsg_data_len(tb[EVENT_DATA]));
 		if (tb2[VALIDATE_PACKAGE])
 			ubus_event_bcast("config.change", "config",
 					 blobmsg_get_string(tb2[VALIDATE_PACKAGE]), NULL, NULL);
@@ -558,7 +558,7 @@ service_handle_validate(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	blobmsg_parse(validate_policy, __VALIDATE_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(validate_policy, __VALIDATE_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 	if (tb[VALIDATE_SERVICE]) {
 		return 0;
 	}
@@ -587,7 +587,7 @@ service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
 	const char *instance = NULL;
 	const char *type = NULL;
 
-	blobmsg_parse(get_data_policy, __DATA_MAX, tb, blob_data(msg), blob_len(msg));
+	blobmsg_parse(get_data_policy, __DATA_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 	if (tb[DATA_NAME])
 		name = blobmsg_data(tb[DATA_NAME]);
 	if (tb[DATA_INSTANCE])
