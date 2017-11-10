@@ -18,6 +18,7 @@
 #include <libubox/avl.h>
 #include <libubox/vlist.h>
 #include <libubox/list.h>
+#include "../utils/utils.h"
 
 extern struct avl_tree services;
 
@@ -46,6 +47,8 @@ struct service {
 	struct blob_attr *trigger;
 	struct vlist_tree instances;
 	struct list_head validators;
+	struct blob_attr *data;
+	struct blobmsg_list data_blob;
 };
 
 void service_validate_add(struct service *s, struct blob_attr *attr);

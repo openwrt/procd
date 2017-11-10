@@ -84,6 +84,7 @@ service_alloc(const char *name)
 	s->name = new_name;
 	s->avl.key = s->name;
 	INIT_LIST_HEAD(&s->validators);
+	blobmsg_list_simple_init(&s->data_blob);
 
 	return s;
 }
@@ -95,6 +96,7 @@ enum {
 	SERVICE_SET_TRIGGER,
 	SERVICE_SET_VALIDATE,
 	SERVICE_SET_AUTOSTART,
+	SERVICE_SET_DATA,
 	__SERVICE_SET_MAX
 };
 
@@ -105,6 +107,7 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 	[SERVICE_SET_TRIGGER] = { "triggers", BLOBMSG_TYPE_ARRAY },
 	[SERVICE_SET_VALIDATE] = { "validate", BLOBMSG_TYPE_ARRAY },
 	[SERVICE_SET_AUTOSTART] = { "autostart", BLOBMSG_TYPE_BOOL },
+	[SERVICE_SET_DATA] = { "data", BLOBMSG_TYPE_TABLE },
 };
 
 static int
@@ -117,6 +120,12 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 		trigger_del(s);
 		free(s->trigger);
 		s->trigger = NULL;
+	}
+
+	if (s->data) {
+		blobmsg_list_free(&s->data_blob);
+		free(s->data);
+		s->data = NULL;
 	}
 
 	service_validate_del(s);
@@ -148,6 +157,14 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 			vlist_flush(&s->instances);
 	}
 
+	if (tb[SERVICE_SET_DATA] && blobmsg_data_len(tb[SERVICE_SET_DATA])) {
+		s->data = blob_memdup(tb[SERVICE_SET_DATA]);
+		if (!s->data)
+			return -1;
+		blobmsg_list_fill(&s->data_blob, blobmsg_data(s->data),
+				blobmsg_data_len(s->data), false);
+	}
+
 	s->deleted = false;
 
 	rc(s->name, "running");
@@ -158,6 +175,8 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 static void
 service_delete(struct service *s)
 {
+	blobmsg_list_free(&s->data_blob);
+	free(s->data);
 	vlist_flush_all(&s->instances);
 	s->deleted = true;
 	service_stopped(s);
@@ -305,6 +324,14 @@ service_dump(struct service *s, bool verbose)
 
 	if (!s->autostart)
 		blobmsg_add_u8(&b, "autostart", false);
+
+	if (!avl_is_empty(&s->data_blob.avl)) {
+		struct blobmsg_list_node *var;
+		i = blobmsg_open_table(&b, "data");
+		blobmsg_list_for_each(&s->data_blob, var)
+			blobmsg_add_blob(&b, var->data);
+		blobmsg_close_table(&b, i);
+	}
 
 	if (!avl_is_empty(&s->instances.avl)) {
 		i = blobmsg_open_table(&b, "instances");
@@ -598,13 +625,24 @@ service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
 	blob_buf_init(&b, 0);
 	avl_for_each_element(&services, s, avl) {
 		void *cs = NULL;
+		void *ci = NULL;
+		struct blobmsg_list_node *var;
 
 		if (name && strcmp(name, s->name))
 			continue;
 
+		blobmsg_list_for_each(&s->data_blob, var) {
+			if (type && strcmp(blobmsg_name(var->data), type))
+				continue;
+
+			if (!cs)
+				cs = blobmsg_open_table(&b, s->name);
+
+			blobmsg_add_blob(&b, var->data);
+		}
+
 		vlist_for_each_element(&s->instances, in, node) {
-			struct blobmsg_list_node *var;
-			void *ci = NULL;
+			ci = NULL;
 
 			if (instance && strcmp(instance, in->name))
 				continue;
