@@ -30,7 +30,7 @@ proc_meminfo(void)
 
 	fp = fopen("/proc/meminfo", "r");
 	if (fp == NULL) {
-		ERROR("Can't open /proc/meminfo: %s\n", strerror(errno));
+		ERROR("Can't open /proc/meminfo: %m\n");
 		return errno;
 	}
 
@@ -98,7 +98,7 @@ mount_zram_on_tmp(void)
 	zramsize = proc_meminfo() / 2;
 	fp = fopen("/sys/block/zram0/disksize", "r+");
 	if (fp == NULL) {
-		ERROR("Can't open /sys/block/zram0/disksize: %s\n", strerror(errno));
+		ERROR("Can't open /sys/block/zram0/disksize: %m\n");
 		return errno;
 	}
 	fprintf(fp, "%ld", KB(zramsize));
@@ -118,7 +118,7 @@ mount_zram_on_tmp(void)
 
 	ret = mount("/dev/zram0", "/tmp", "ext4", MS_NOSUID | MS_NODEV | MS_NOATIME, "errors=continue,noquota");
 	if (ret < 0) {
-		ERROR("Can't mount /dev/zram0 on /tmp: %s\n", strerror(errno));
+		ERROR("Can't mount /dev/zram0 on /tmp: %m\n");
 		return errno;
 	}
 
@@ -126,7 +126,7 @@ mount_zram_on_tmp(void)
 
 	ret = chmod("/tmp", 01777);
 	if (ret < 0) {
-		ERROR("Can't set /tmp mode to 1777: %s\n", strerror(errno));
+		ERROR("Can't set /tmp mode to 1777: %m\n");
 		return errno;
 	}
 

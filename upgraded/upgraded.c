@@ -74,17 +74,17 @@ int main(int argc, char **argv)
 
 	int fd = open("/", O_DIRECTORY|O_PATH);
 	if (fd < 0) {
-		fprintf(stderr, "unable to open prefix directory: %s\n", strerror(errno));
+		fprintf(stderr, "unable to open prefix directory: %m\n");
 		return 1;
 	}
 
 	if (chroot(".") < 0) {
-		fprintf(stderr, "failed to chroot: %s\n", strerror(errno));
+		fprintf(stderr, "failed to chroot: %m\n");
 		return 1;
 	}
 
 	if (fchdir(fd) == -1) {
-		fprintf(stderr, "failed to chdir to prefix directory: %s\n", strerror(errno));
+		fprintf(stderr, "failed to chdir to prefix directory: %m\n");
 		return 1;
 	}
 	close(fd);

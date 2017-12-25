@@ -591,16 +591,16 @@ void hotplug(char *rules)
 	nls.nl_groups = -1;
 
 	if ((hotplug_fd.fd = socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT)) == -1) {
-		ERROR("Failed to open hotplug socket: %s\n", strerror(errno));
+		ERROR("Failed to open hotplug socket: %m\n");
 		exit(1);
 	}
 	if (bind(hotplug_fd.fd, (void *)&nls, sizeof(struct sockaddr_nl))) {
-		ERROR("Failed to bind hotplug socket: %s\n", strerror(errno));
+		ERROR("Failed to bind hotplug socket: %m\n");
 		exit(1);
 	}
 
 	if (setsockopt(hotplug_fd.fd, SOL_SOCKET, SO_RCVBUFFORCE, &nlbufsize, sizeof(nlbufsize)))
-		ERROR("Failed to resize receive buffer: %s\n", strerror(errno));
+		ERROR("Failed to resize receive buffer: %m\n");
 
 	json_script_init(&jctx);
 	queue_proc.cb = queue_proc_cb;

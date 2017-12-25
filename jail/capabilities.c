@@ -104,7 +104,7 @@ int drop_capabilities(const char *file)
 		if ( (capdrop & (1LLU << cap)) == 0) {
 			DEBUG("dropping capability %s (%d)\n", capabilities_names[cap], cap);
 			if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)) {
-				ERROR("prctl(PR_CAPBSET_DROP, %d) failed: %s\n", cap, strerror(errno));
+				ERROR("prctl(PR_CAPBSET_DROP, %d) failed: %m\n", cap);
 				return errno;
 			}
 		} else {

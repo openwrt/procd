@@ -326,7 +326,7 @@ int main(int argc, char **argv, char **envp)
 		memcpy(&_envp[newenv], envp, envc * sizeof(char *));
 
 		ret = execve(_argv[0], _argv, _envp);
-		ULOG_ERR("failed to exec %s: %s\n", _argv[0], strerror(errno));
+		ULOG_ERR("failed to exec %s: %m\n", _argv[0]);
 
 		free(_argv);
 		free(_envp);
@@ -357,11 +357,11 @@ int main(int argc, char **argv, char **envp)
 		break;
 	}
 	if (ptrace(PTRACE_SEIZE, child, 0, ptrace_options) == -1) {
-		ULOG_ERR("PTRACE_SEIZE: %s\n", strerror(errno));
+		ULOG_ERR("PTRACE_SEIZE: %m\n");
 		return -1;
 	}
 	if (ptrace(ptrace_restart, child, 0, SIGCONT) == -1) {
-		ULOG_ERR("ptrace_restart: %s\n", strerror(errno));
+		ULOG_ERR("ptrace_restart: %m\n");
 		return -1;
 	}
 
@@ -377,7 +377,7 @@ int main(int argc, char **argv, char **envp)
 	case UTRACE:
 		if (!json)
 			if (asprintf(&json, "/tmp/%s.%u.json", basename(*argv), child) < 0)
-				ULOG_ERR("failed to allocate output path: %s\n", strerror(errno));
+				ULOG_ERR("failed to allocate output path: %m\n");
 		break;
 	case SECCOMP_TRACE:
 		if (!violation_count)

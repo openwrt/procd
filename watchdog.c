@@ -37,7 +37,7 @@ void watchdog_ping(void)
 {
 	DEBUG(4, "Ping\n");
 	if (wdt_fd >= 0 && write(wdt_fd, "X", 1) < 0)
-		ERROR("WDT failed to write: %s\n", strerror(errno));
+		ERROR("WDT failed to write: %m\n");
 }
 
 static void watchdog_timeout_cb(struct uloop_timeout *t)
@@ -76,10 +76,10 @@ static void watchdog_close(void)
 		return;
 
 	if (write(wdt_fd, "V", 1) < 0)
-		ERROR("WDT failed to write release: %s\n", strerror(errno));
+		ERROR("WDT failed to write release: %m\n");
 
 	if (close(wdt_fd) == -1)
-		ERROR("WDT failed to close watchdog: %s\n", strerror(errno));
+		ERROR("WDT failed to close watchdog: %m\n");
 
 	wdt_fd = -1;
 }

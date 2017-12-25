@@ -125,7 +125,7 @@ int install_syscall_filter(const char *argv, const char *file)
 		set_filter(&filter[idx], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_KILL);
 
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
-		ERROR("%s: prctl(PR_SET_NO_NEW_PRIVS) failed: %s\n", argv, strerror(errno));
+		ERROR("%s: prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n", argv);
 		return errno;
 	}
 
@@ -133,7 +133,7 @@ int install_syscall_filter(const char *argv, const char *file)
 	prog.filter = filter;
 
 	if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) {
-		ERROR("%s: prctl(PR_SET_SECCOMP) failed: %s\n", argv, strerror(errno));
+		ERROR("%s: prctl(PR_SET_SECCOMP) failed: %m\n", argv);
 		return errno;
 	}
 	return 0;

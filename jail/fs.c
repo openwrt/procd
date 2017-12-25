@@ -135,7 +135,7 @@ int add_path_and_deps(const char *path, int readonly, int error, int lib)
 
 	struct stat s;
 	if (fstat(fd, &s) == -1) {
-		ERROR("fstat(%s) failed: %s\n", path, strerror(errno));
+		ERROR("fstat(%s) failed: %m\n", path);
 		ret = error;
 		goto out;
 	}

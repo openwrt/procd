@@ -77,7 +77,7 @@ static int mkdir_p(char *dir, mode_t mask)
 		return 0;
 
 	if (ret)
-		ERROR("mkdir(%s, %d) failed: %s\n", dir, mask, strerror(errno));
+		ERROR("mkdir(%s, %d) failed: %m\n", dir, mask);
 
 	return ret;
 }
@@ -89,7 +89,7 @@ int mount_bind(const char *root, const char *path, int readonly, int error)
 	int fd;
 
 	if (stat(path, &s)) {
-		ERROR("stat(%s) failed: %s\n", path, strerror(errno));
+		ERROR("stat(%s) failed: %m\n", path);
 		return error;
 	}
 
@@ -101,19 +101,19 @@ int mount_bind(const char *root, const char *path, int readonly, int error)
 		snprintf(new, sizeof(new), "%s%s", root, path);
 		fd = creat(new, 0644);
 		if (fd == -1) {
-			ERROR("creat(%s) failed: %s\n", new, strerror(errno));
+			ERROR("creat(%s) failed: %m\n", new);
 			return -1;
 		}
 		close(fd);
 	}
 
 	if (mount(path, new, NULL, MS_BIND, NULL)) {
-		ERROR("failed to mount -B %s %s: %s\n", path, new, strerror(errno));
+		ERROR("failed to mount -B %s %s: %m\n", path, new);
 		return -1;
 	}
 
 	if (readonly && mount(NULL, new, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL)) {
-		ERROR("failed to remount ro %s: %s\n", new, strerror(errno));
+		ERROR("failed to remount ro %s: %m\n", new);
 		return -1;
 	}
 
@@ -126,23 +126,23 @@ static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
 	if (mkdtemp(jail_root) == NULL) {
-		ERROR("mkdtemp(%s) failed: %s\n", jail_root, strerror(errno));
+		ERROR("mkdtemp(%s) failed: %m\n", jail_root);
 		return -1;
 	}
 
 	/* oldroot can't be MS_SHARED else pivot_root() fails */
 	if (mount("none", "/", NULL, MS_REC|MS_PRIVATE, NULL)) {
-		ERROR("private mount failed %s\n", strerror(errno));
+		ERROR("private mount failed %m\n");
 		return -1;
 	}
 
 	if (mount("tmpfs", jail_root, "tmpfs", MS_NOATIME, "mode=0755")) {
-		ERROR("tmpfs mount failed %s\n", strerror(errno));
+		ERROR("tmpfs mount failed %m\n");
 		return -1;
 	}
 
 	if (chdir(jail_root)) {
-		ERROR("chdir(%s) (jail_root) failed: %s\n", jail_root, strerror(errno));
+		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
 		return -1;
 	}
 
@@ -156,11 +156,11 @@ static int build_jail_fs(void)
 	mkdir(dirbuf, 0755);
 
 	if (pivot_root(jail_root, dirbuf) == -1) {
-		ERROR("pivot_root(%s, %s) failed: %s\n", jail_root, dirbuf, strerror(errno));
+		ERROR("pivot_root(%s, %s) failed: %m\n", jail_root, dirbuf);
 		return -1;
 	}
 	if (chdir("/")) {
-		ERROR("chdir(/) (after pivot_root) failed: %s\n", strerror(errno));
+		ERROR("chdir(/) (after pivot_root) failed: %m\n");
 		return -1;
 	}
 
@@ -241,13 +241,13 @@ static int exec_jail(void *_notused)
 		exit(EXIT_FAILURE);
 
 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
-                ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %s\n", strerror(errno));
+                ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
 		exit(EXIT_FAILURE);
 	}
 
 	if (opts.namespace && opts.hostname && strlen(opts.hostname) > 0
 			&& sethostname(opts.hostname, strlen(opts.hostname))) {
-		ERROR("sethostname(%s) failed: %s\n", opts.hostname, strerror(errno));
+		ERROR("sethostname(%s) failed: %m\n", opts.hostname);
 		exit(EXIT_FAILURE);
 	}
 
@@ -263,7 +263,7 @@ static int exec_jail(void *_notused)
 	INFO("exec-ing %s\n", *opts.jail_argv);
 	execve(*opts.jail_argv, opts.jail_argv, envp);
 	/* we get there only if execve fails */
-	ERROR("failed to execve %s: %s\n", *opts.jail_argv, strerror(errno));
+	ERROR("failed to execve %s: %m\n", *opts.jail_argv);
 	exit(EXIT_FAILURE);
 }
 
@@ -314,7 +314,7 @@ int main(int argc, char **argv)
 	int ch, i;
 
 	if (uid) {
-		ERROR("not root, aborting: %s\n", strerror(errno));
+		ERROR("not root, aborting: %m\n");
 		return EXIT_FAILURE;
 	}
 
@@ -449,7 +449,7 @@ int main(int argc, char **argv)
 		/* fork child process */
 		return exec_jail(NULL);
 	} else {
-		ERROR("failed to clone/fork: %s\n", strerror(errno));
+		ERROR("failed to clone/fork: %m\n");
 		return EXIT_FAILURE;
 	}
 }
