@@ -104,7 +104,7 @@ static void fork_worker(struct init_action *a)
 		tcsetpgrp(STDIN_FILENO, p);
 
 		execvp(a->argv[0], a->argv);
-		ERROR("Failed to execute %s\n", a->argv[0]);
+		ERROR("Failed to execute %s: %m\n", a->argv[0]);
 		exit(-1);
 	}
 
@@ -278,7 +278,7 @@ void procd_inittab(void)
 	char *line;
 
 	if (!fp) {
-		ERROR("Failed to open %s\n", tab);
+		ERROR("Failed to open %s: %m\n", tab);
 		return;
 	}
 

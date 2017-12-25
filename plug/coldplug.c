@@ -54,12 +54,12 @@ void procd_coldplug(void)
 	udevtrigger.pid = fork();
 	if (!udevtrigger.pid) {
 		execvp(argv[0], argv);
-		ERROR("Failed to start coldplug\n");
+		ERROR("Failed to start coldplug: %m\n");
 		exit(-1);
 	}
 
 	if (udevtrigger.pid <= 0) {
-		ERROR("Failed to start new coldplug instance\n");
+		ERROR("Failed to start new coldplug instance: %m\n");
 		return;
 	}
 

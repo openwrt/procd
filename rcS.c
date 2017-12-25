@@ -72,7 +72,7 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 
 	DEBUG(2, "start %s %s \n", s->file, s->param);
 	if (pipe(pipefd) == -1) {
-		ERROR("Failed to create pipe\n");
+		ERROR("Failed to create pipe: %m\n");
 		return;
 	}
 

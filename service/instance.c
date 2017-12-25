@@ -241,8 +241,7 @@ instance_removepid(struct service_instance *in) {
 	if (!in->pidfile)
 		return 0;
 	if (unlink(in->pidfile)) {
-		ERROR("Failed to removed pidfile: %s: %m\n",
-			in->pidfile);
+		ERROR("Failed to removed pidfile: %s: %m\n", in->pidfile);
 		return 1;
 	}
 	return 0;
@@ -258,19 +257,16 @@ instance_writepid(struct service_instance *in)
 	}
 	_pidfile = fopen(in->pidfile, "w");
 	if (_pidfile == NULL) {
-		ERROR("failed to open pidfile for writing: %s: %m",
-			in->pidfile);
+		ERROR("failed to open pidfile for writing: %s: %m", in->pidfile);
 		return 1;
 	}
 	if (fprintf(_pidfile, "%d\n", in->proc.pid) < 0) {
-		ERROR("failed to write pidfile: %s: %m",
-			in->pidfile);
+		ERROR("failed to write pidfile: %s: %m", in->pidfile);
 		fclose(_pidfile);
 		return 2;
 	}
 	if (fclose(_pidfile)) {
-		ERROR("failed to close pidfile: %s: %m",
-			in->pidfile);
+		ERROR("failed to close pidfile: %s: %m", in->pidfile);
 		return 3;
 	}
 

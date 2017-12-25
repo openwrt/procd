@@ -39,7 +39,7 @@ early_console(const char *dev)
 	struct stat s;
 
 	if (stat(dev, &s)) {
-		ERROR("Failed to stat %s\n", dev);
+		ERROR("Failed to stat %s: %m\n", dev);
 		return;
 	}
 

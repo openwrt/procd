@@ -153,7 +153,7 @@ int add_path_and_deps(const char *path, int readonly, int error, int lib)
 
 	map = mmap(NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	if (map == MAP_FAILED) {
-		ERROR("failed to mmap %s\n", path);
+		ERROR("failed to mmap %s: %m\n", path);
 		ret = -1;
 		goto out;
 	}

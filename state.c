@@ -48,7 +48,7 @@ static void set_stdio(const char* tty)
 	    !freopen(tty, "w", stdout) ||
 	    !freopen(tty, "w", stderr) ||
 	    chdir("/"))
-		ERROR("failed to set stdio\n");
+		ERROR("failed to set stdio: %m\n");
 	else
 		fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
 }
@@ -73,7 +73,7 @@ static void set_console(void)
 	}
 
 	if (chdir("/dev")) {
-		ERROR("failed to change dir to /dev\n");
+		ERROR("failed to change dir to /dev: %m\n");
 		return;
 	}
 	while (tty!=NULL) {
@@ -87,7 +87,7 @@ static void set_console(void)
 		i++;
 	}
 	if (chdir("/"))
-		ERROR("failed to change dir to /\n");
+		ERROR("failed to change dir to /: %m\n");
 
 	if (tty != NULL)
 		set_stdio(tty);

@@ -90,11 +90,11 @@ main(int argc, char **argv)
 			patch_stdio("/dev/null");
 
 		execvp(kmod[0], kmod);
-		ERROR("Failed to start kmodloader\n");
+		ERROR("Failed to start kmodloader: %m\n");
 		exit(-1);
 	}
 	if (pid <= 0) {
-		ERROR("Failed to start kmodloader instance\n");
+		ERROR("Failed to start kmodloader instance: %m\n");
 	} else {
 		int i;
 

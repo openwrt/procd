@@ -238,7 +238,7 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 	sprintf(path, "%s/%s", dir, file);
 
 	if (stat(path, &s)) {
-		ERROR("Could not find firmware %s\n", path);
+		ERROR("Could not find firmware %s: %m\n", path);
 		src = -1;
 		s.st_size = 0;
 		goto send_to_kernel;
@@ -246,7 +246,7 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 
 	src = open(path, O_RDONLY);
 	if (src < 0) {
-		ERROR("Failed to open %s\n", path);
+		ERROR("Failed to open %s: %m\n", path);
 		s.st_size = 0;
 		goto send_to_kernel;
 	}
@@ -255,11 +255,11 @@ send_to_kernel:
 	snprintf(loadpath, sizeof(loadpath), "/sys/%s/loading", dev);
 	load = open(loadpath, O_WRONLY);
 	if (!load) {
-		ERROR("Failed to open %s\n", loadpath);
+		ERROR("Failed to open %s: %m\n", loadpath);
 		exit(-1);
 	}
 	if (write(load, "1", 1) == -1) {
-		ERROR("Failed to write to %s\n", loadpath);
+		ERROR("Failed to write to %s: %m\n", loadpath);
 		exit(-1);
 	}
 	close(load);
@@ -267,7 +267,7 @@ send_to_kernel:
 	snprintf(syspath, sizeof(syspath), "/sys/%s/data", dev);
 	fw = open(syspath, O_WRONLY);
 	if (fw < 0) {
-		ERROR("Failed to open %s\n", syspath);
+		ERROR("Failed to open %s: %m\n", syspath);
 		exit(-1);
 	}
 
@@ -278,7 +278,7 @@ send_to_kernel:
 			break;
 
 		if (write(fw, buf, len) == -1) {
-			ERROR("failed to write firmware file %s/%s to %s\n", dir, file, dev);
+			ERROR("failed to write firmware file %s/%s to %s: %m\n", dir, file, dev);
 			break;
 		}
 	}
@@ -289,7 +289,7 @@ send_to_kernel:
 
 	load = open(loadpath, O_WRONLY);
 	if (write(load, "0", 1) == -1)
-		ERROR("failed to write to %s\n", loadpath);
+		ERROR("failed to write to %s: %m\n", loadpath);
 	close(load);
 
 	DEBUG(2, "Done loading %s\n", path);

@@ -42,7 +42,7 @@ check_dbglvl(void)
 	if (!fp)
 		return;
 	if (fscanf(fp, "%d", &lvl) == EOF)
-		ERROR("failed to read debug level\n");
+		ERROR("failed to read debug level: %m\n");
 	fclose(fp);
 	unlink("/tmp/debug_level");
 
@@ -134,11 +134,11 @@ preinit(void)
 	plugd_proc.pid = fork();
 	if (!plugd_proc.pid) {
 		execvp(plug[0], plug);
-		ERROR("Failed to start plugd\n");
+		ERROR("Failed to start plugd: %m\n");
 		exit(-1);
 	}
 	if (plugd_proc.pid <= 0) {
-		ERROR("Failed to start new plugd instance\n");
+		ERROR("Failed to start new plugd instance: %m\n");
 		return;
 	}
 	uloop_process_add(&plugd_proc);
@@ -148,7 +148,7 @@ preinit(void)
 	fd = creat("/tmp/.preinit", 0600);
 
 	if (fd < 0)
-		ERROR("Failed to create sentinel file\n");
+		ERROR("Failed to create sentinel file: %m\n");
 	else
 		close(fd);
 
@@ -156,11 +156,11 @@ preinit(void)
 	preinit_proc.pid = fork();
 	if (!preinit_proc.pid) {
 		execvp(init[0], init);
-		ERROR("Failed to start preinit\n");
+		ERROR("Failed to start preinit: %m\n");
 		exit(-1);
 	}
 	if (preinit_proc.pid <= 0) {
-		ERROR("Failed to start new preinit instance\n");
+		ERROR("Failed to start new preinit instance: %m\n");
 		return;
 	}
 	uloop_process_add(&preinit_proc);
