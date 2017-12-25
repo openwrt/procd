@@ -241,8 +241,8 @@ instance_removepid(struct service_instance *in) {
 	if (!in->pidfile)
 		return 0;
 	if (unlink(in->pidfile)) {
-		ERROR("Failed to removed pidfile: %s: %d - %m\n",
-			in->pidfile, errno);
+		ERROR("Failed to removed pidfile: %s: %m\n",
+			in->pidfile);
 		return 1;
 	}
 	return 0;
@@ -258,19 +258,19 @@ instance_writepid(struct service_instance *in)
 	}
 	_pidfile = fopen(in->pidfile, "w");
 	if (_pidfile == NULL) {
-		ERROR("failed to open pidfile for writing: %s: %d (%m)",
-			in->pidfile, errno);
+		ERROR("failed to open pidfile for writing: %s: %m",
+			in->pidfile);
 		return 1;
 	}
 	if (fprintf(_pidfile, "%d\n", in->proc.pid) < 0) {
-		ERROR("failed to write pidfile: %s: %d (%m)",
-			in->pidfile, errno);
+		ERROR("failed to write pidfile: %s: %m",
+			in->pidfile);
 		fclose(_pidfile);
 		return 2;
 	}
 	if (fclose(_pidfile)) {
-		ERROR("failed to close pidfile: %s: %d (%m)",
-			in->pidfile, errno);
+		ERROR("failed to close pidfile: %s: %m",
+			in->pidfile);
 		return 3;
 	}
 
@@ -353,11 +353,11 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	}
 
 	if (in->gid && setgid(in->gid)) {
-		ERROR("failed to set group id %d: %d (%m)\n", in->gid, errno);
+		ERROR("failed to set group id %d: %m\n", in->gid);
 		exit(127);
 	}
 	if (in->uid && setuid(in->uid)) {
-		ERROR("failed to set user id %d: %d (%m)\n", in->uid, errno);
+		ERROR("failed to set user id %d: %m\n", in->uid);
 		exit(127);
 	}
 
@@ -407,14 +407,14 @@ instance_start(struct service_instance *in)
 	instance_free_stdio(in);
 	if (in->_stdout.fd.fd > -2) {
 		if (pipe(opipe)) {
-			ULOG_WARN("pipe() failed: %d (%m)\n", errno);
+			ULOG_WARN("pipe() failed: %m\n");
 			opipe[0] = opipe[1] = -1;
 		}
 	}
 
 	if (in->_stderr.fd.fd > -2) {
 		if (pipe(epipe)) {
-			ULOG_WARN("pipe() failed: %d (%m)\n", errno);
+			ULOG_WARN("pipe() failed: %m\n");
 			epipe[0] = epipe[1] = -1;
 		}
 	}

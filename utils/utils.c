@@ -203,8 +203,8 @@ int patch_stdio(const char *device)
 
 	for (fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
 		if (patch_fd(device, fd, fd ? O_WRONLY : O_RDONLY)) {
-			ERROR("Failed to redirect %s to %s: %d (%m)\n",
-			      fdname[fd], device, errno);
+			ERROR("Failed to redirect %s to %s: %m\n",
+			      fdname[fd], device);
 			rv = -1;
 		}
 	}
