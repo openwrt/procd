@@ -392,11 +392,11 @@ static void queue_add(struct cmd_handler *h, struct blob_attr *msg, struct blob_
 		&_data, blob_pad_len(data),
 		NULL);
 
-	c->msg = _msg;
-	c->data = _data;
-
 	if (!c)
 		return;
+
+	c->msg = _msg;
+	c->data = _data;
 
 	memcpy(c->msg, msg, blob_pad_len(msg));
 	memcpy(c->data, data, blob_pad_len(data));
