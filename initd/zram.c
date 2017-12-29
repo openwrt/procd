@@ -60,7 +60,7 @@ early_insmod(char *module)
 		struct utsname ver;
 
 		uname(&ver);
-		path = alloca(sizeof(module) + strlen(ver.release) + 1);
+		path = alloca(strlen(module) + strlen(ver.release) + 1);
 		sprintf(path, module, ver.release);
 		modprobe[1] = path;
 		execvp(modprobe[0], modprobe);
