@@ -37,6 +37,7 @@ static struct runqueue q, r;
 struct initd {
 	struct ustream_fd fd;
 	struct runqueue_process proc;
+	struct timespec ts_start;
 	char *file;
 	char *param;
 };
@@ -70,6 +71,7 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 	int pipefd[2];
 	pid_t pid;
 
+	clock_gettime(CLOCK_MONOTONIC_RAW, &s->ts_start);
 	DEBUG(2, "start %s %s \n", s->file, s->param);
 	if (pipe(pipefd) == -1) {
 		ERROR("Failed to create pipe: %m\n");
@@ -106,8 +108,17 @@ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
 static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 {
 	struct initd *s = container_of(p, struct initd, proc.task);
+	struct timespec ts_stop, ts_res;
 
-	DEBUG(2, "stop %s %s \n", s->file, s->param);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &ts_stop);
+	ts_res.tv_sec = ts_stop.tv_sec - s->ts_start.tv_sec;
+	ts_res.tv_nsec = ts_stop.tv_nsec - s->ts_start.tv_nsec;
+	if (ts_res.tv_nsec < 0) {
+		--ts_res.tv_sec;
+		ts_res.tv_nsec += 1000000000;
+	}
+
+	DEBUG(2, "stop %s %s - took %lu.%09lus\n", s->file, s->param, ts_res.tv_sec, ts_res.tv_nsec);
 	ustream_free(&s->fd.stream);
 	close(s->fd.fd.fd);
 	free(s);
