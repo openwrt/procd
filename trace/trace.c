@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <string.h>
 #include <syslog.h>
+#include <limits.h>
 
 #include <libubox/uloop.h>
 #include <libubox/blobmsg.h>
