@@ -317,13 +317,17 @@ int main(int argc, char **argv, char **envp)
 		case SECCOMP_TRACE:
 			preload = "/lib/libpreload-seccomp.so";
 			newenv = 2;
-			asprintf(&_envp[1], "SECCOMP_FILE=%s", json ? json : "");
+			if (asprintf(&_envp[1], "SECCOMP_FILE=%s", json ? json : "") < 0)
+				ULOG_ERR("failed to allocate SECCOMP_FILE env: %m\n");
+
 			kill(getpid(), SIGSTOP);
 			break;
 		}
-		asprintf(&_envp[0], "LD_PRELOAD=%s%s%s", preload,
-			 old_preload ? ":" : "",
-			 old_preload ? old_preload : "");
+		if (asprintf(&_envp[0], "LD_PRELOAD=%s%s%s", preload,
+			     old_preload ? ":" : "",
+			      old_preload ? old_preload : "") < 0)
+			ULOG_ERR("failed to allocate LD_PRELOAD env: %m\n");
+
 		memcpy(&_envp[newenv], envp, envc * sizeof(char *));
 
 		ret = execve(_argv[0], _argv, _envp);
@@ -383,7 +387,8 @@ int main(int argc, char **argv, char **envp)
 	case SECCOMP_TRACE:
 		if (!violation_count)
 			return 0;
-		asprintf(&json, "/tmp/%s.%u.violations.json", basename(*argv), child);
+		if (asprintf(&json, "/tmp/%s.%u.violations.json", basename(*argv), child) < 0)
+			ULOG_ERR("failed to allocate violations output path: %m\n");
 		break;
 	}
 	print_syscalls(policy, json);
