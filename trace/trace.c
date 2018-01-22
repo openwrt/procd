@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <string.h>
 #include <syslog.h>
+#include <limits.h>
 
 #ifndef PTRACE_EVENT_STOP
 /* PTRACE_EVENT_STOP is defined in linux/ptrace.h, but this header
