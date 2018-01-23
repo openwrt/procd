@@ -279,7 +279,6 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	struct blobmsg_list_node *var;
 	struct blob_attr *cur;
 	char **argv;
-	char *ld_preload;
 	int argc = 1; /* NULL terminated */
 	int rem, _stdin;
 	bool seccomp = !in->trace && !in->has_jail && in->seccomp;
@@ -297,8 +296,8 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	if (seccomp)
 		setenv("SECCOMP_FILE", in->seccomp, 1);
 
-	if (setlbf && asprintf(&ld_preload, "LD_PRELOAD=/lib/libsetlbf.so") > 0)
-		putenv(ld_preload);
+	if (setlbf)
+		setenv("LD_PRELOAD", "/lib/libsetlbf.so", 1);
 
 	blobmsg_list_for_each(&in->limits, var)
 		instance_limits(blobmsg_name(var->data), blobmsg_data(var->data));
