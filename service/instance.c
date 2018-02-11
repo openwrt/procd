@@ -587,6 +587,11 @@ instance_restart(struct service_instance *in)
 	uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
 }
 
+static bool string_changed(const char *a, const char *b)
+{
+	return !((!a && !b) || (a && b && !strcmp(a, b)));
+}
+
 static bool
 instance_config_changed(struct service_instance *in, struct service_instance *in_new)
 {
@@ -614,14 +619,7 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (in->gid != in_new->gid)
 		return true;
 
-	if (in->pidfile && in_new->pidfile)
-		if (strcmp(in->pidfile, in_new->pidfile))
-			return true;
-
-	if (in->pidfile && !in_new->pidfile)
-		return true;
-
-	if (!in->pidfile && in_new->pidfile)
+	if (string_changed(in->pidfile, in_new->pidfile))
 		return true;
 
 	if (in->respawn_retry != in_new->respawn_retry)
