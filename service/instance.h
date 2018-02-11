@@ -42,6 +42,7 @@ struct service_instance {
 	int8_t nice;
 	bool valid;
 
+	char *user;
 	uid_t uid;
 	gid_t gid;
 

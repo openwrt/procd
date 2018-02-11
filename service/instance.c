@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <grp.h>
 #include <net/if.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -347,6 +348,10 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 		closefd(_stderr);
 	}
 
+	if (in->user && in->gid && initgroups(in->user, in->gid)) {
+		ERROR("failed to initgroups() for user %s: %m\n", in->user);
+		exit(127);
+	}
 	if (in->gid && setgid(in->gid)) {
 		ERROR("failed to set group id %d: %m\n", in->gid);
 		exit(127);
@@ -613,6 +618,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (in->nice != in_new->nice)
 		return true;
 
+	if (string_changed(in->user, in_new->user))
+		return true;
+
 	if (in->uid != in_new->uid)
 		return true;
 
@@ -862,8 +870,10 @@ instance_config_parse(struct service_instance *in)
 	}
 
 	if (tb[INSTANCE_ATTR_USER]) {
-		struct passwd *p = getpwnam(blobmsg_get_string(tb[INSTANCE_ATTR_USER]));
+		const char *user = blobmsg_get_string(tb[INSTANCE_ATTR_USER]);
+		struct passwd *p = getpwnam(user);
 		if (p) {
+			in->user = strdup(user);
 			in->uid = p->pw_uid;
 			in->gid = p->pw_gid;
 		}
@@ -982,6 +992,7 @@ instance_free(struct service_instance *in)
 	watch_del(in);
 	instance_config_cleanup(in);
 	free(in->config);
+	free(in->user);
 	free(in);
 }
 
