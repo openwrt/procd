@@ -469,18 +469,20 @@ instance_stdio(struct ustream *s, int prio, struct service_instance *in)
 	ulog_open(ULOG_SYSLOG, LOG_DAEMON, ident);
 
 	do {
-		str = ustream_get_read_buf(s, NULL);
+		str = ustream_get_read_buf(s, &len);
 		if (!str)
 			break;
 
-		newline = strchr(str, '\n');
-		if (!newline)
+		newline = memchr(str, '\n', len);
+		if (!newline && (s->r.buffer_len != len))
 			break;
 
-		*newline = 0;
+		if (newline) {
+			*newline = 0;
+			len = newline + 1 - str;
+		}
 		ulog(prio, "%s\n", str);
 
-		len = newline + 1 - str;
 		ustream_consume(s, len);
 	} while (1);
 
