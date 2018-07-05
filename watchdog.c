@@ -142,10 +142,11 @@ int watchdog_frequency(int frequency)
 
 char* watchdog_fd(void)
 {
-	static char fd_buf[3];
+	static char fd_buf[12];
 
 	if (wdt_fd < 0)
 		return NULL;
+
 	snprintf(fd_buf, sizeof(fd_buf), "%d", wdt_fd);
 
 	return fd_buf;
