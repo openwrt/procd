@@ -639,6 +639,11 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (in->respawn_timeout != in_new->respawn_timeout)
 		return true;
 
+	if ((!in->seccomp && in_new->seccomp) ||
+	    (in->seccomp && !in_new->seccomp) ||
+	    (in->seccomp && in_new->seccomp && strcmp(in->seccomp, in_new->seccomp)))
+		return true;
+
 	if (!blobmsg_list_equal(&in->limits, &in_new->limits))
 		return true;
 
@@ -959,6 +964,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->respawn_timeout = in_src->respawn_timeout;
 	in->name = in_src->name;
 	in->trace = in_src->trace;
+	in->seccomp = in_src->seccomp;
 	in->node.avl.key = in_src->node.avl.key;
 
 	free(in->config);
