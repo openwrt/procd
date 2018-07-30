@@ -211,7 +211,9 @@ static void tracer_cb(struct uloop_process *c, int ret)
 			   (ret >> 8) == (SIGTRAP | (PTRACE_EVENT_CLONE << 8))) {
 			struct tracee *child = calloc(1, sizeof(struct tracee));
 
-			ptrace(PTRACE_GETEVENTMSG, c->pid, 0, &child->proc.pid);
+			unsigned long msg;
+			ptrace(PTRACE_GETEVENTMSG, c->pid, 0, &msg);
+			child->proc.pid = msg;
 			child->proc.cb = tracer_cb;
 			ptrace(ptrace_restart, child->proc.pid, 0, 0);
 			uloop_process_add(&child->proc);
