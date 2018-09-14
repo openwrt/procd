@@ -65,6 +65,7 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 
 			if (!strcasecmp(key, "system type") ||
 			    !strcasecmp(key, "processor") ||
+			    !strcasecmp(key, "cpu") ||
 			    !strcasecmp(key, "model name"))
 			{
 				strtoul(val + 2, &key, 0);
