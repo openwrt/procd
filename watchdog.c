@@ -30,6 +30,7 @@
 
 static struct uloop_timeout wdt_timeout;
 static int wdt_fd = -1;
+static int wdt_drv_timeout = 30;
 static int wdt_frequency = 5;
 static bool wdt_magicclose = false;
 
@@ -84,6 +85,14 @@ static void watchdog_close(void)
 	wdt_fd = -1;
 }
 
+static int watchdog_set_drv_timeout(void)
+{
+	if (wdt_fd < 0)
+		return -1;
+
+	return ioctl(wdt_fd, WDIOC_SETTIMEOUT, &wdt_drv_timeout);
+}
+
 void watchdog_set_magicclose(bool val)
 {
 	wdt_magicclose = val;
@@ -104,6 +113,7 @@ void watchdog_set_stopped(bool val)
 	}
 	else {
 		watchdog_open(true);
+		watchdog_set_drv_timeout();
 		watchdog_timeout_cb(&wdt_timeout);
 	}
 }
@@ -115,23 +125,19 @@ bool watchdog_get_stopped(void)
 
 int watchdog_timeout(int timeout)
 {
-	if (wdt_fd < 0)
-		return 0;
-
 	if (timeout) {
 		DEBUG(4, "Set watchdog timeout: %ds\n", timeout);
-		ioctl(wdt_fd, WDIOC_SETTIMEOUT, &timeout);
-	}
-	ioctl(wdt_fd, WDIOC_GETTIMEOUT, &timeout);
+		wdt_drv_timeout = timeout;
 
-	return timeout;
+		if (wdt_fd >= 0)
+			watchdog_set_drv_timeout();
+	}
+
+	return wdt_drv_timeout;
 }
 
 int watchdog_frequency(int frequency)
 {
-	if (wdt_fd < 0)
-		return 0;
-
 	if (frequency) {
 		DEBUG(4, "Set watchdog frequency: %ds\n", frequency);
 		wdt_frequency = frequency;
@@ -160,7 +166,7 @@ void watchdog_init(int preinit)
 		return;
 
 	LOG("- watchdog -\n");
-	watchdog_timeout(30);
+	watchdog_set_drv_timeout();
 	watchdog_timeout_cb(&wdt_timeout);
 
 	DEBUG(4, "Opened watchdog with timeout %ds\n", watchdog_timeout(0));

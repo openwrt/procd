@@ -304,7 +304,8 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	blobmsg_parse(watchdog_policy, __WDT_MAX, tb, blob_data(msg), blob_len(msg));
 	if (tb[WDT_FREQUENCY]) {
-		unsigned int timeout = watchdog_timeout(0);
+		unsigned int timeout = tb[WDT_TIMEOUT] ? blobmsg_get_u32(tb[WDT_TIMEOUT]) :
+						watchdog_timeout(0);
 		unsigned int freq = blobmsg_get_u32(tb[WDT_FREQUENCY]);
 
 		if (freq) {
