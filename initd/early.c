@@ -67,7 +67,7 @@ early_mounts(void)
 
 	early_console("/dev/console");
 	if (mount_zram_on_tmp()) {
-		mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, 0);
+		mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, "mode=01777");
 		mkdir("/tmp/shm", 01777);
 	} else {
 		mkdir("/tmp/shm", 01777);
