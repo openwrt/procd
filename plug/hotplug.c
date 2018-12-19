@@ -545,10 +545,12 @@ static void hotplug_handler(struct uloop_fd *u, unsigned int ev)
 {
 	int i = 0;
 	static char buf[4096];
-	int len = recv(u->fd, buf, sizeof(buf), MSG_DONTWAIT);
+	int len = recv(u->fd, buf, sizeof(buf) - 1, MSG_DONTWAIT);
 	void *index;
 	if (len < 1)
 		return;
+
+	buf[len] = '\0';
 
 	blob_buf_init(&b, 0);
 	index = blobmsg_open_table(&b, NULL);
