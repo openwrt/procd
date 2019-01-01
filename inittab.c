@@ -276,12 +276,9 @@ void procd_inittab_run(const char *handler)
 
 	list_for_each_entry(a, &actions, list)
 		if (!strcmp(a->handler->name, handler)) {
-			if (a->handler->multi) {
-				a->handler->cb(a);
-				continue;
-			}
 			a->handler->cb(a);
-			break;
+			if (!a->handler->multi)
+				break;
 		}
 }
 
