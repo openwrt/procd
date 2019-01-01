@@ -2,6 +2,7 @@ procd
 askfirst
 udevtrigger
 init
+upgraded/upgraded
 .*
 Makefile
 CMakeCache.txt
