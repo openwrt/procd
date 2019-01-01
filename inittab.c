@@ -120,14 +120,17 @@ static void child_exit(struct uloop_process *proc, int ret)
 {
 	struct init_action *a = container_of(proc, struct init_action, proc);
 
-	DEBUG(4, "pid:%d\n", proc->pid);
-        uloop_timeout_set(&a->tout, a->respawn);
+	DEBUG(4, "pid:%d, exitcode:%d\n", proc->pid, ret);
+	proc->pid = 0;
+
+	uloop_timeout_set(&a->tout, a->respawn);
 }
 
 static void respawn(struct uloop_timeout *tout)
 {
 	struct init_action *a = container_of(tout, struct init_action, tout);
-	fork_worker(a);
+	if (!a->proc.pid)
+		fork_worker(a);
 }
 
 static void rcdone(struct runqueue *q)
@@ -163,7 +166,8 @@ static void askfirst(struct init_action *a)
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
-	fork_worker(a);
+	if (!a->proc.pid)
+		fork_worker(a);
 }
 
 static void askconsole(struct init_action *a)
@@ -197,7 +201,8 @@ static void askconsole(struct init_action *a)
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
-	fork_worker(a);
+	if (!a->proc.pid)
+		fork_worker(a);
 }
 
 static void rcrespawn(struct init_action *a)
@@ -206,7 +211,8 @@ static void rcrespawn(struct init_action *a)
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
-	fork_worker(a);
+	if (!a->proc.pid)
+		fork_worker(a);
 }
 
 static struct init_handler handlers[] = {
