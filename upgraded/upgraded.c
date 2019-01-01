@@ -56,7 +56,7 @@ static void sysupgrade(char *path, char *command)
 		/* Child */
 		execvp(args[0], args);
 		fprintf(stderr, "Failed to exec sysupgrade\n");
-		_exit(-1);
+		_exit(EXIT_FAILURE);
 	}
 
 	uloop_process_add(&upgrade_proc);

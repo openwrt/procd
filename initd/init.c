@@ -92,7 +92,7 @@ main(int argc, char **argv)
 
 		execvp(kmod[0], kmod);
 		ERROR("Failed to start kmodloader: %m\n");
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 	if (pid <= 0) {
 		ERROR("Failed to start kmodloader instance: %m\n");

@@ -16,6 +16,7 @@
 #include <sys/types.h>
 #include <sys/mount.h>
 
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "../procd.h"
@@ -59,7 +60,7 @@ void procd_coldplug(void)
 	if (!udevtrigger.pid) {
 		execvp(argv[0], argv);
 		ERROR("Failed to start coldplug: %m\n");
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 
 	if (udevtrigger.pid <= 0) {

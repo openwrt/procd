@@ -66,7 +66,7 @@ early_insmod(char *module)
 		modprobe[1] = path;
 		execvp(modprobe[0], modprobe);
 		ERROR("Can't exec %s: %m\n", modprobe[0]);
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 
 	if (pid <= 0) {
@@ -109,7 +109,7 @@ mount_zram_on_tmp(void)
 	if (!pid) {
 		execvp(mkfs[0], mkfs);
 		ERROR("Can't exec %s: %m\n", mkfs[0]);
-		exit(-1);
+		exit(EXIT_FAILURE);
 	} else if (pid <= 0) {
 		ERROR("Can't exec %s: %m\n", mkfs[0]);
 		return -1;
