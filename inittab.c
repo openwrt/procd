@@ -123,6 +123,11 @@ static void child_exit(struct uloop_process *proc, int ret)
 	DEBUG(4, "pid:%d, exitcode:%d\n", proc->pid, ret);
 	proc->pid = 0;
 
+	if (!dev_exist(a->id)) {
+		DEBUG(4, "Skipping respawn: device '%s' does not exist anymore\n", a->id);
+		return;
+	}
+
 	uloop_timeout_set(&a->tout, a->respawn);
 }
 
