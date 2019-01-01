@@ -312,12 +312,27 @@ send_to_kernel:
 	exit(-1);
 }
 
+static void handle_start_console(struct blob_attr *msg, struct blob_attr *data)
+{
+	char *dev = blobmsg_get_string(blobmsg_data(data));
+
+	DEBUG(2, "Start console request for %s\n", dev);
+
+	procd_inittab_run("respawn");
+	procd_inittab_run("askfirst");
+
+	DEBUG(2, "Done starting console for %s\n", dev);
+
+	exit(-1);
+}
+
 enum {
 	HANDLER_MKDEV = 0,
 	HANDLER_RM,
 	HANDLER_EXEC,
 	HANDLER_BUTTON,
 	HANDLER_FW,
+	HANDLER_START_CONSOLE,
 };
 
 static struct cmd_handler {
@@ -350,6 +365,10 @@ static struct cmd_handler {
 	[HANDLER_FW] = {
 		.name = "load-firmware",
 		.handler = handle_firmware,
+	},
+	[HANDLER_START_CONSOLE] = {
+		.name = "start-console",
+		.handler = handle_start_console,
 	},
 };
 
