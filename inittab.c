@@ -165,9 +165,12 @@ static void askfirst(struct init_action *a)
 	}
 
 	a->tout.cb = respawn;
-	for (i = MAX_ARGS - 1; i >= 1; i--)
-		a->argv[i] = a->argv[i - 1];
-	a->argv[0] = ask;
+	/* shift arguments only if not yet done */
+	if (a->argv[0] != ask) {
+		for (i = MAX_ARGS - 1; i >= 1; i--)
+			a->argv[i] = a->argv[i - 1];
+		a->argv[0] = ask;
+	}
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
@@ -200,9 +203,12 @@ static void askconsole(struct init_action *a)
 	}
 
 	a->tout.cb = respawn;
-	for (i = MAX_ARGS - 1; i >= 1; i--)
-		a->argv[i] = a->argv[i - 1];
-	a->argv[0] = ask;
+	/* shift arguments only if not yet done */
+	if (a->argv[0] != ask) {
+		for (i = MAX_ARGS - 1; i >= 1; i--)
+			a->argv[i] = a->argv[i - 1];
+		a->argv[0] = ask;
+	}
 	a->respawn = 500;
 
 	a->proc.cb = child_exit;
