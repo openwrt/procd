@@ -81,6 +81,9 @@ struct seccomp_data {
 # else
 #  define ARCH_NR	AUDIT_ARCH_ARMEB
 # endif
+#elif defined(__PPC__)
+# define REG_SYSCALL	regs.gpr[0]
+# define ARCH_NR	AUDIT_ARCH_PPC
 #else
 # warning "Platform does not support seccomp filter yet"
 # define REG_SYSCALL	0

@@ -58,6 +58,9 @@
 # if defined(__ARM_EABI__)
 # define reg_retval_nr	_offsetof(struct user, regs.uregs[0])
 # endif
+#elif defined(__PPC__)
+#define reg_syscall_nr	_offsetof(struct user, regs.gpr[0])
+#define reg_retval_nr	_offsetof(struct user, regs.gpr[3])
 #else
 #error tracing is not supported on this architecture
 #endif
