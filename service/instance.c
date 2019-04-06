@@ -519,6 +519,16 @@ instance_timeout(struct uloop_timeout *t)
 }
 
 static void
+instance_delete(struct service_instance *in)
+{
+	struct service *s = in->srv;
+
+	avl_delete(&s->instances.avl, &in->node.avl);
+	instance_free(in);
+	service_stopped(s);
+}
+
+static void
 instance_exit(struct uloop_process *p, int ret)
 {
 	struct service_instance *in;
@@ -539,13 +549,8 @@ instance_exit(struct uloop_process *p, int ret)
 		instance_removepid(in);
 		if (in->restart)
 			instance_start(in);
-		else {
-			struct service *s = in->srv;
-
-			avl_delete(&s->instances.avl, &in->node.avl);
-			instance_free(in);
-			service_stopped(s);
-		}
+		else
+			instance_delete(in);
 	} else if (in->restart) {
 		instance_start(in);
 	} else if (in->respawn) {
@@ -569,8 +574,11 @@ instance_exit(struct uloop_process *p, int ret)
 void
 instance_stop(struct service_instance *in, bool halt)
 {
-	if (!in->proc.pending)
+	if (!in->proc.pending) {
+		if (halt)
+			instance_delete(in);
 		return;
+	}
 	in->halt = halt;
 	in->restart = in->respawn = false;
 	kill(in->proc.pid, SIGTERM);
