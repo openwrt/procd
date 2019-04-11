@@ -44,7 +44,9 @@ struct service_instance {
 
 	char *user;
 	uid_t uid;
-	gid_t gid;
+	gid_t pw_gid;
+	char *group;
+	gid_t gr_gid;
 
 	bool halt;
 	bool restart;

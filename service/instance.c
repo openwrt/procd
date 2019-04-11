@@ -50,6 +50,7 @@ enum {
 	INSTANCE_ATTR_WATCH,
 	INSTANCE_ATTR_ERROR,
 	INSTANCE_ATTR_USER,
+	INSTANCE_ATTR_GROUP,
 	INSTANCE_ATTR_STDOUT,
 	INSTANCE_ATTR_STDERR,
 	INSTANCE_ATTR_NO_NEW_PRIVS,
@@ -76,6 +77,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_WATCH] = { "watch", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_ERROR] = { "error", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_USER] = { "user", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_GROUP] = { "group", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_STDOUT] = { "stdout", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_STDERR] = { "stderr", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_NO_NEW_PRIVS] = { "no_new_privs", BLOBMSG_TYPE_BOOL },
@@ -364,12 +366,12 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 		closefd(_stderr);
 	}
 
-	if (in->user && in->gid && initgroups(in->user, in->gid)) {
+	if (in->user && in->pw_gid && initgroups(in->user, in->pw_gid)) {
 		ERROR("failed to initgroups() for user %s: %m\n", in->user);
 		exit(127);
 	}
-	if (in->gid && setgid(in->gid)) {
-		ERROR("failed to set group id %d: %m\n", in->gid);
+	if (in->gr_gid && setgid(in->gr_gid)) {
+		ERROR("failed to set group id %d: %m\n", in->gr_gid);
 		exit(127);
 	}
 	if (in->uid && setuid(in->uid)) {
@@ -650,10 +652,13 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->user, in_new->user))
 		return true;
 
+	if (string_changed(in->group, in_new->group))
+		return true;
+
 	if (in->uid != in_new->uid)
 		return true;
 
-	if (in->gid != in_new->gid)
+	if (in->pw_gid != in_new->pw_gid)
 		return true;
 
 	if (string_changed(in->pidfile, in_new->pidfile))
@@ -909,7 +914,16 @@ instance_config_parse(struct service_instance *in)
 		if (p) {
 			in->user = strdup(user);
 			in->uid = p->pw_uid;
-			in->gid = p->pw_gid;
+			in->gr_gid = in->pw_gid = p->pw_gid;
+		}
+	}
+
+	if (tb[INSTANCE_ATTR_GROUP]) {
+		const char *group = blobmsg_get_string(tb[INSTANCE_ATTR_GROUP]);
+		struct group *p = getgrnam(group);
+		if (p) {
+			in->group = strdup(group);
+			in->gr_gid = p->gr_gid;
 		}
 	}
 
@@ -1039,6 +1053,7 @@ instance_free(struct service_instance *in)
 	instance_config_cleanup(in);
 	free(in->config);
 	free(in->user);
+	free(in->group);
 	free(in);
 }
 
