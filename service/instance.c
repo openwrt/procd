@@ -26,6 +26,8 @@
 #include <pwd.h>
 #include <libgen.h>
 #include <unistd.h>
+#define SYSLOG_NAMES
+#include <syslog.h>
 
 #include <libubox/md5.h>
 
@@ -57,6 +59,7 @@ enum {
 	INSTANCE_ATTR_PIDFILE,
 	INSTANCE_ATTR_RELOADSIG,
 	INSTANCE_ATTR_TERMTIMEOUT,
+	INSTANCE_ATTR_FACILITY,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -82,6 +85,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
 	[INSTANCE_ATTR_TERMTIMEOUT] = { "term_timeout", BLOBMSG_TYPE_INT32 },
+	[INSTANCE_ATTR_FACILITY] = { "facility", BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -146,6 +150,18 @@ static void closefd(int fd)
 {
 	if (fd > STDERR_FILENO)
 		close(fd);
+}
+
+/* convert a string into numeric syslog facility or return -1 if no match found */
+static int
+syslog_facility_str_to_int(const char *facility)
+{
+	CODE *p = facilitynames;
+
+	while (p->c_name && strcasecmp(p->c_name, facility))
+		p++;
+
+	return p->c_val;
 }
 
 static void
@@ -466,7 +482,7 @@ instance_stdio(struct ustream *s, int prio, struct service_instance *in)
 
 	arg0 = basename(blobmsg_data(blobmsg_data(in->command)));
 	snprintf(ident, sizeof(ident), "%s[%d]", arg0, in->proc.pid);
-	ulog_open(ULOG_SYSLOG, LOG_DAEMON, ident);
+	ulog_open(ULOG_SYSLOG, in->syslog_facility, ident);
 
 	do {
 		str = ustream_get_read_buf(s, &len);
@@ -626,6 +642,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 
 	if (in->nice != in_new->nice)
+		return true;
+
+	if (in->syslog_facility != in_new->syslog_facility)
 		return true;
 
 	if (string_changed(in->user, in_new->user))
@@ -938,6 +957,15 @@ instance_config_parse(struct service_instance *in)
 	if (!instance_fill_array(&in->errors, tb[INSTANCE_ATTR_ERROR], NULL, true))
 		return false;
 
+	if (tb[INSTANCE_ATTR_FACILITY]) {
+		int facility = syslog_facility_str_to_int(blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
+		if (facility != -1) {
+			in->syslog_facility = facility;
+			DEBUG(3, "setting facility '%s'\n", blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
+		} else
+			DEBUG(3, "unknown syslog facility '%s' given, using default (LOG_DAEMON)\n", blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
+	}
+
 	return true;
 }
 
@@ -975,6 +1003,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->trace = in_src->trace;
 	in->seccomp = in_src->seccomp;
 	in->node.avl.key = in_src->node.avl.key;
+	in->syslog_facility = in_src->syslog_facility;
 
 	free(in->config);
 	in->config = in_src->config;
@@ -1023,6 +1052,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->timeout.cb = instance_timeout;
 	in->proc.cb = instance_exit;
 	in->term_timeout = 5;
+	in->syslog_facility = LOG_DAEMON;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;

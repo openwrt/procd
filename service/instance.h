@@ -59,6 +59,7 @@ struct service_instance {
 	struct jail jail;
 	char *seccomp;
 	char *pidfile;
+	int syslog_facility;
 
 	uint32_t term_timeout;
 	uint32_t respawn_timeout;
