@@ -967,6 +967,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->trigger = in_src->trigger;
 	in->command = in_src->command;
 	in->pidfile = in_src->pidfile;
+	in->respawn = in_src->respawn;
 	in->respawn_retry = in_src->respawn_retry;
 	in->respawn_threshold = in_src->respawn_threshold;
 	in->respawn_timeout = in_src->respawn_timeout;
