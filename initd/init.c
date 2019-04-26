@@ -77,6 +77,7 @@ main(int argc, char **argv)
 	sigaction(SIGTERM, &sa_shutdown, NULL);
 	sigaction(SIGUSR1, &sa_shutdown, NULL);
 	sigaction(SIGUSR2, &sa_shutdown, NULL);
+	sigaction(SIGPWR, &sa_shutdown, NULL);
 
 	early();
 	cmdline();

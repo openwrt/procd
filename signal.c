@@ -44,6 +44,7 @@ static void signal_shutdown(int signal, siginfo_t *siginfo, void *data)
 		break;
 	case SIGUSR1:
 	case SIGUSR2:
+	case SIGPWR:
 		event = RB_POWER_OFF;
 		msg = "poweroff";
 		break;
@@ -90,6 +91,7 @@ void procd_signal(void)
 	sigaction(SIGINT, &sa_shutdown, NULL);
 	sigaction(SIGUSR1, &sa_shutdown, NULL);
 	sigaction(SIGUSR2, &sa_shutdown, NULL);
+	sigaction(SIGPWR, &sa_shutdown, NULL);
 	sigaction(SIGSEGV, &sa_crash, NULL);
 	sigaction(SIGBUS, &sa_crash, NULL);
 	sigaction(SIGHUP, &sa_dummy, NULL);
