@@ -1157,6 +1157,12 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 	if (in->pidfile)
 		blobmsg_add_string(b, "pidfile", in->pidfile);
 
+	if (in->user)
+		blobmsg_add_string(b, "user", in->user);
+
+	if (in->group)
+		blobmsg_add_string(b, "group", in->group);
+
 	if (in->has_jail) {
 		void *r = blobmsg_open_table(b, "jail");
 		if (in->jail.name)
