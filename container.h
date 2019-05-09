@@ -13,7 +13,9 @@
 
 #ifndef __CONTAINER_H
 #define __CONTAINER_H
+
 #include <stdlib.h>
+#include <stdbool.h>
 
 static inline bool is_container() {
 	return !!getenv("container");
