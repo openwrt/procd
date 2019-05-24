@@ -25,6 +25,7 @@
 #include <libubox/uloop.h>
 #include <json-c/json.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -119,6 +120,30 @@ static void mkdir_p(char *dir)
 	}
 }
 
+static void chgrp_error(const char *group, const char *target, const char *failed)
+{
+	ERROR("cannot set group %s for %s (%s: %d)\n",
+	       group, target, failed, errno);
+}
+
+static void chgrp_target(struct blob_attr *bgroup, struct blob_attr *btarget)
+{
+	int ret = 0;
+	struct group *g = NULL;
+	const char *group = blobmsg_get_string(bgroup);
+	const char *target = blobmsg_get_string(btarget);
+
+	errno = 0;
+
+	g = getgrnam(group);
+	if (!g)
+		return chgrp_error(group, target, "getgrnam");
+
+	ret = chown(target, 0, g->gr_gid);
+	if (ret < 0)
+		return chgrp_error(group, target, "chown");
+}
+
 static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 {
 	unsigned int oldumask = umask(0);
@@ -131,7 +156,6 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 	char *minor = hotplug_msg_find_var(msg, "MINOR");
 	char *major = hotplug_msg_find_var(msg, "MAJOR");
 	char *subsystem = hotplug_msg_find_var(msg, "SUBSYSTEM");
-	int ret = 0;
 
 	blobmsg_parse_array(mkdev_policy, 3, tb, blobmsg_data(data), blobmsg_data_len(data));
 	if (tb[0] && tb[1] && minor && major && subsystem) {
@@ -147,17 +171,8 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 		mknod(blobmsg_get_string(tb[0]),
 				m | strtoul(blobmsg_data(tb[1]), NULL, 8),
 				makedev(atoi(major), atoi(minor)));
-		if (tb[2]) {
-			struct group *g = getgrnam(blobmsg_get_string(tb[2]));
-
-			if (g)
-				ret = chown(blobmsg_get_string(tb[0]), 0, g->gr_gid);
-
-			if (!g || ret < 0)
-				ERROR("cannot set group %s for %s\n",
-					blobmsg_get_string(tb[2]),
-					blobmsg_get_string(tb[0]));
-		}
+		if (tb[2])
+			chgrp_target(tb[2], tb[0]);
 	}
 	umask(oldumask);
 }
