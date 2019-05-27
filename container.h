@@ -16,9 +16,11 @@
 
 #include <stdlib.h>
 #include <stdbool.h>
+#include <sys/stat.h>
 
 static inline bool is_container() {
-	return !!getenv("container");
+	struct stat s;
+	return !!getenv("container") || !!stat("/.dockerenv", &s);
 }
 
 #endif
