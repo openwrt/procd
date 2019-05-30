@@ -20,7 +20,8 @@
 
 static inline bool is_container() {
 	struct stat s;
-	return !!getenv("container") || !!stat("/.dockerenv", &s);
+	int r = stat("/.dockerenv", &s);
+	return !!getenv("container") || r == 0;
 }
 
 #endif
