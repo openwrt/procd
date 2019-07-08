@@ -150,8 +150,11 @@ char* get_cmdline_val(const char* name, char* out, int len)
 	for (c = strtok_r(line, " \t\n", &sptr); c;
 			c = strtok_r(NULL, " \t\n", &sptr)) {
 		char *sep = strchr(c, '=');
+		if (sep == NULL)
+			continue;
+
 		ssize_t klen = sep - c;
-		if (klen < 0 || strncmp(name, c, klen) || name[klen] != 0)
+		if (strncmp(name, c, klen) || name[klen] != 0)
 			continue;
 
 		strncpy(out, &sep[1], len);
