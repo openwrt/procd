@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <signal.h>
 
+#include "container.h"
 #include "procd.h"
 #include "syslog.h"
 #include "plug/hotplug.h"
@@ -157,18 +158,22 @@ static void state_enter(void)
 		else
 			LOG("- reboot -\n");
 
-		/* Allow time for last message to reach serial console, etc */
-		sleep(1);
-
-		/* We have to fork here, since the kernel calls do_exit(EXIT_SUCCESS)
-		 * in linux/kernel/sys.c, which can cause the machine to panic when
-		 * the init process exits... */
-		if (!vfork( )) { /* child */
-			reboot(reboot_event);
-			_exit(EXIT_SUCCESS);
-		}
-		while (1)
+		if (!is_container()) {
+			/* Allow time for last message to reach serial console, etc */
 			sleep(1);
+
+			/* We have to fork here, since the kernel calls do_exit(EXIT_SUCCESS)
+			 * in linux/kernel/sys.c, which can cause the machine to panic when
+			 * the init process exits... */
+			if (!vfork( )) { /* child */
+				reboot(reboot_event);
+				_exit(EXIT_SUCCESS);
+			}
+
+			while (1)
+				sleep(1);
+		} else
+			exit(0);
 #else
 		exit(0);
 #endif
