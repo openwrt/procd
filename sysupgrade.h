@@ -14,8 +14,10 @@
 #ifndef __PROCD_SYSUPGRADE_H
 #define __PROCD_SYSUPGRADE_H
 
+struct blob_attr;
 
-void sysupgrade_exec_upgraded(const char *prefix, char *path, char *command);
+void sysupgrade_exec_upgraded(const char *prefix, char *path, char *command,
+			      struct blob_attr *options);
 
 
 #endif

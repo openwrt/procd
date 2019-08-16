@@ -380,6 +380,7 @@ enum {
 	SYSUPGRADE_PATH,
 	SYSUPGRADE_PREFIX,
 	SYSUPGRADE_COMMAND,
+	SYSUPGRADE_OPTIONS,
 	__SYSUPGRADE_MAX
 };
 
@@ -387,6 +388,7 @@ static const struct blobmsg_policy sysupgrade_policy[__SYSUPGRADE_MAX] = {
 	[SYSUPGRADE_PATH] = { .name = "path", .type = BLOBMSG_TYPE_STRING },
 	[SYSUPGRADE_PREFIX] = { .name = "prefix", .type = BLOBMSG_TYPE_STRING },
 	[SYSUPGRADE_COMMAND] = { .name = "command", .type = BLOBMSG_TYPE_STRING },
+	[SYSUPGRADE_OPTIONS] = { .name = "options", .type = BLOBMSG_TYPE_TABLE },
 };
 
 static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
@@ -404,7 +406,8 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 
 	sysupgrade_exec_upgraded(blobmsg_get_string(tb[SYSUPGRADE_PREFIX]),
 				 blobmsg_get_string(tb[SYSUPGRADE_PATH]),
-				 tb[SYSUPGRADE_COMMAND] ? blobmsg_get_string(tb[SYSUPGRADE_COMMAND]) : NULL);
+				 tb[SYSUPGRADE_COMMAND] ? blobmsg_get_string(tb[SYSUPGRADE_COMMAND]) : NULL,
+				 tb[SYSUPGRADE_OPTIONS]);
 
 	/* sysupgrade_exec_upgraded() will never return unless something has gone wrong */
 	return UBUS_STATUS_UNKNOWN_ERROR;
