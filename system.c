@@ -25,6 +25,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 
+#include <json-c/json_tokener.h>
+#include <libubox/blobmsg_json.h>
 #include <libubox/uloop.h>
 
 #include "procd.h"
@@ -376,6 +378,116 @@ static int proc_signal(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+/**
+ * validate_firmware_image_call - perform validation & store result in global b
+ *
+ * @file: firmware image path
+ */
+static int validate_firmware_image_call(const char *file)
+{
+	const char *path = "/usr/libexec/validate_firmware_image";
+	json_tokener *tok;
+	json_object *jsobj;
+	char buf[64];
+	ssize_t len;
+	int fds[2];
+	int err;
+	int fd;
+
+	if (pipe(fds))
+		return -errno;
+
+	switch (fork()) {
+	case -1:
+		return -errno;
+	case 0:
+		/* Set stdin & stderr to /dev/null */
+		if (fd >= 0) {
+			dup2(fd, 0);
+			dup2(fd, 2);
+			close(fd);
+		}
+
+		/* Set stdout to the shared pipe */
+		dup2(fds[1], 1);
+		close(fds[0]);
+		close(fds[1]);
+
+		execl(path, path, file, NULL);
+		exit(errno);
+	}
+
+	/* Parent process */
+
+	tok = json_tokener_new();
+	if (!tok) {
+		close(fds[0]);
+		close(fds[1]);
+		return -ENOMEM;
+	}
+
+	blob_buf_init(&b, 0);
+	while ((len = read(fds[0], buf, sizeof(buf)))) {
+		jsobj = json_tokener_parse_ex(tok, buf, len);
+
+		if (json_tokener_get_error(tok) == json_tokener_success)
+			break;
+		else if (json_tokener_get_error(tok) == json_tokener_continue)
+			continue;
+		else
+			fprintf(stderr, "Failed to parse JSON: %d\n",
+				json_tokener_get_error(tok));
+	}
+
+	close(fds[0]);
+	close(fds[1]);
+
+	err = -ENOENT;
+	if (jsobj) {
+		if (json_object_get_type(jsobj) == json_type_object) {
+			blobmsg_add_object(&b, jsobj);
+			err = 0;
+		}
+
+		json_object_put(jsobj);
+	}
+
+	json_tokener_free(tok);
+
+	return err;
+}
+
+enum {
+	VALIDATE_FIRMWARE_IMAGE_PATH,
+	__VALIDATE_FIRMWARE_IMAGE_MAX,
+};
+
+static const struct blobmsg_policy validate_firmware_image_policy[__VALIDATE_FIRMWARE_IMAGE_MAX] = {
+	[VALIDATE_FIRMWARE_IMAGE_PATH] = { .name = "path", .type = BLOBMSG_TYPE_STRING },
+};
+
+static int validate_firmware_image(struct ubus_context *ctx,
+				   struct ubus_object *obj,
+				   struct ubus_request_data *req,
+				   const char *method, struct blob_attr *msg)
+{
+	struct blob_attr *tb[__VALIDATE_FIRMWARE_IMAGE_MAX];
+
+	if (!msg)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	blobmsg_parse(validate_firmware_image_policy, __VALIDATE_FIRMWARE_IMAGE_MAX, tb, blob_data(msg), blob_len(msg));
+	if (!tb[VALIDATE_FIRMWARE_IMAGE_PATH])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (validate_firmware_image_call(blobmsg_get_string(tb[VALIDATE_FIRMWARE_IMAGE_PATH])))
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	ubus_send_reply(ctx, req, b.head);
+
+	return UBUS_STATUS_OK;
+}
+
 enum {
 	SYSUPGRADE_PATH,
 	SYSUPGRADE_PREFIX,
@@ -426,6 +538,7 @@ static const struct ubus_method system_methods[] = {
 	UBUS_METHOD_NOARG("reboot", system_reboot),
 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
 	UBUS_METHOD("signal", proc_signal, signal_policy),
+	UBUS_METHOD("validate_firmware_image", validate_firmware_image, validate_firmware_image_policy),
 	UBUS_METHOD("sysupgrade", sysupgrade, sysupgrade_policy),
 };
 
