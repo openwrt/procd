@@ -507,7 +507,18 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 		      struct ubus_request_data *req, const char *method,
 		      struct blob_attr *msg)
 {
+	enum {
+		VALIDATION_VALID,
+		VALIDATION_FORCEABLE,
+		__VALIDATION_MAX
+	};
+	static const struct blobmsg_policy validation_policy[__VALIDATION_MAX] = {
+		[VALIDATION_VALID] = { .name = "valid", .type = BLOBMSG_TYPE_BOOL },
+		[VALIDATION_FORCEABLE] = { .name = "forceable", .type = BLOBMSG_TYPE_BOOL },
+	};
+	struct blob_attr *validation[__VALIDATION_MAX];
 	struct blob_attr *tb[__SYSUPGRADE_MAX];
+	bool valid, forceable;
 
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -515,6 +526,21 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_parse(sysupgrade_policy, __SYSUPGRADE_MAX, tb, blob_data(msg), blob_len(msg));
 	if (!tb[SYSUPGRADE_PATH] || !tb[SYSUPGRADE_PREFIX])
 		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (validate_firmware_image_call(blobmsg_get_string(tb[SYSUPGRADE_PATH])))
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	blobmsg_parse(validation_policy, __VALIDATION_MAX, validation, blob_data(b.head), blob_len(b.head));
+
+	valid = validation[VALIDATION_VALID] && blobmsg_get_bool(validation[VALIDATION_VALID]);
+	forceable = validation[VALIDATION_FORCEABLE] && blobmsg_get_bool(validation[VALIDATION_FORCEABLE]);
+
+	if (!valid) {
+		if (!forceable) {
+			fprintf(stderr, "Firmware image is broken and cannot be installed\n");
+			return UBUS_STATUS_NOT_SUPPORTED;
+		}
+	}
 
 	sysupgrade_exec_upgraded(blobmsg_get_string(tb[SYSUPGRADE_PREFIX]),
 				 blobmsg_get_string(tb[SYSUPGRADE_PATH]),
