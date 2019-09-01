@@ -97,12 +97,13 @@ main(int argc, char **argv)
 	if (pid <= 0) {
 		ERROR("Failed to start kmodloader instance: %m\n");
 	} else {
+		const struct timespec req = {0, 10 * 1000 * 1000};
 		int i;
 
 		for (i = 0; i < 1200; i++) {
 			if (waitpid(pid, NULL, WNOHANG) > 0)
 				break;
-			usleep(10 * 1000);
+			nanosleep(&req, NULL);
 			watchdog_ping();
 		}
 	}
