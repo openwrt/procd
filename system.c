@@ -490,6 +490,7 @@ static int validate_firmware_image(struct ubus_context *ctx,
 
 enum {
 	SYSUPGRADE_PATH,
+	SYSUPGRADE_FORCE,
 	SYSUPGRADE_PREFIX,
 	SYSUPGRADE_COMMAND,
 	SYSUPGRADE_OPTIONS,
@@ -498,6 +499,7 @@ enum {
 
 static const struct blobmsg_policy sysupgrade_policy[__SYSUPGRADE_MAX] = {
 	[SYSUPGRADE_PATH] = { .name = "path", .type = BLOBMSG_TYPE_STRING },
+	[SYSUPGRADE_FORCE] = { .name = "force", .type = BLOBMSG_TYPE_BOOL },
 	[SYSUPGRADE_PREFIX] = { .name = "prefix", .type = BLOBMSG_TYPE_STRING },
 	[SYSUPGRADE_COMMAND] = { .name = "command", .type = BLOBMSG_TYPE_STRING },
 	[SYSUPGRADE_OPTIONS] = { .name = "options", .type = BLOBMSG_TYPE_TABLE },
@@ -538,6 +540,9 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!valid) {
 		if (!forceable) {
 			fprintf(stderr, "Firmware image is broken and cannot be installed\n");
+			return UBUS_STATUS_NOT_SUPPORTED;
+		} else if (!tb[SYSUPGRADE_FORCE] || !blobmsg_get_bool(tb[SYSUPGRADE_FORCE])) {
+			fprintf(stderr, "Firmware image is invalid\n");
 			return UBUS_STATUS_NOT_SUPPORTED;
 		}
 	}
