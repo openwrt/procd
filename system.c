@@ -386,8 +386,8 @@ static int proc_signal(struct ubus_context *ctx, struct ubus_object *obj,
 static int validate_firmware_image_call(const char *file)
 {
 	const char *path = "/usr/libexec/validate_firmware_image";
+	json_object *jsobj = NULL;
 	json_tokener *tok;
-	json_object *jsobj;
 	char buf[64];
 	ssize_t len;
 	int fds[2];
@@ -402,6 +402,7 @@ static int validate_firmware_image_call(const char *file)
 		return -errno;
 	case 0:
 		/* Set stdin & stderr to /dev/null */
+		fd = open("/dev/null", O_RDWR);
 		if (fd >= 0) {
 			dup2(fd, 0);
 			dup2(fd, 2);
