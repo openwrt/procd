@@ -48,6 +48,8 @@ void sysupgrade_exec_upgraded(const char *prefix, char *path, char *command,
 		setenv("WDTFD", wdt_fd, 1);
 	}
 
+	setenv("UPGRADE_BACKUP", "/tmp/sysupgrade.tgz", 1);
+
 	blobmsg_for_each_attr(option, options, rem) {
 		const char *prefix = "UPGRADE_OPT_";
 		char value[11];
