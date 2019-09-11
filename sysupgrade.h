@@ -16,7 +16,8 @@
 
 struct blob_attr;
 
-void sysupgrade_exec_upgraded(const char *prefix, char *path, char *command,
+void sysupgrade_exec_upgraded(const char *prefix, char *path,
+			      const char *backup, char *command,
 			      struct blob_attr *options);
 
 

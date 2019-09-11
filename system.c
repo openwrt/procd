@@ -492,6 +492,7 @@ static int validate_firmware_image(struct ubus_context *ctx,
 enum {
 	SYSUPGRADE_PATH,
 	SYSUPGRADE_FORCE,
+	SYSUPGRADE_BACKUP,
 	SYSUPGRADE_PREFIX,
 	SYSUPGRADE_COMMAND,
 	SYSUPGRADE_OPTIONS,
@@ -501,6 +502,7 @@ enum {
 static const struct blobmsg_policy sysupgrade_policy[__SYSUPGRADE_MAX] = {
 	[SYSUPGRADE_PATH] = { .name = "path", .type = BLOBMSG_TYPE_STRING },
 	[SYSUPGRADE_FORCE] = { .name = "force", .type = BLOBMSG_TYPE_BOOL },
+	[SYSUPGRADE_BACKUP] = { .name = "backup", .type = BLOBMSG_TYPE_STRING },
 	[SYSUPGRADE_PREFIX] = { .name = "prefix", .type = BLOBMSG_TYPE_STRING },
 	[SYSUPGRADE_COMMAND] = { .name = "command", .type = BLOBMSG_TYPE_STRING },
 	[SYSUPGRADE_OPTIONS] = { .name = "options", .type = BLOBMSG_TYPE_TABLE },
@@ -550,6 +552,7 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 
 	sysupgrade_exec_upgraded(blobmsg_get_string(tb[SYSUPGRADE_PREFIX]),
 				 blobmsg_get_string(tb[SYSUPGRADE_PATH]),
+				 tb[SYSUPGRADE_BACKUP] ? blobmsg_get_string(tb[SYSUPGRADE_BACKUP]) : NULL,
 				 tb[SYSUPGRADE_COMMAND] ? blobmsg_get_string(tb[SYSUPGRADE_COMMAND]) : NULL,
 				 tb[SYSUPGRADE_OPTIONS]);
 

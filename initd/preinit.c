@@ -75,7 +75,7 @@ check_sysupgrade(void)
 
 	fclose(sysupgrade);
 
-	sysupgrade_exec_upgraded(prefix, path, command, NULL);
+	sysupgrade_exec_upgraded(prefix, path, NULL, command, NULL);
 
 	while (true)
 		sleep(1);
