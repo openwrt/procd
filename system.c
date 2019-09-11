@@ -508,6 +508,21 @@ static const struct blobmsg_policy sysupgrade_policy[__SYSUPGRADE_MAX] = {
 	[SYSUPGRADE_OPTIONS] = { .name = "options", .type = BLOBMSG_TYPE_TABLE },
 };
 
+static void sysupgrade_error(struct ubus_context *ctx,
+			     struct ubus_request_data *req,
+			     const char *message)
+{
+	void *c;
+
+	blob_buf_init(&b, 0);
+
+	c = blobmsg_open_table(&b, "error");
+	blobmsg_add_string(&b, "message", message);
+	blobmsg_close_table(&b, c);
+
+	ubus_send_reply(ctx, req, b.head);
+}
+
 static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 		      struct ubus_request_data *req, const char *method,
 		      struct blob_attr *msg)
@@ -534,8 +549,10 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!tb[SYSUPGRADE_PATH] || !tb[SYSUPGRADE_PREFIX])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	if (validate_firmware_image_call(blobmsg_get_string(tb[SYSUPGRADE_PATH])))
+	if (validate_firmware_image_call(blobmsg_get_string(tb[SYSUPGRADE_PATH]))) {
+		sysupgrade_error(ctx, req, "Firmware image couldn't be validated");
 		return UBUS_STATUS_UNKNOWN_ERROR;
+	}
 
 	blobmsg_parse(validation_policy, __VALIDATION_MAX, validation, blob_data(b.head), blob_len(b.head));
 
@@ -545,14 +562,14 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 
 	if (!valid) {
 		if (!forceable) {
-			fprintf(stderr, "Firmware image is broken and cannot be installed\n");
+			sysupgrade_error(ctx, req, "Firmware image is broken and cannot be installed");
 			return UBUS_STATUS_NOT_SUPPORTED;
 		} else if (!tb[SYSUPGRADE_FORCE] || !blobmsg_get_bool(tb[SYSUPGRADE_FORCE])) {
-			fprintf(stderr, "Firmware image is invalid\n");
+			sysupgrade_error(ctx, req, "Firmware image is invalid");
 			return UBUS_STATUS_NOT_SUPPORTED;
 		}
 	} else if (!allow_backup && tb[SYSUPGRADE_BACKUP]) {
-		fprintf(stderr, "Firmware image doesn't allow preserving a backup\n");
+		sysupgrade_error(ctx, req, "Firmware image doesn't allow preserving a backup");
 		return UBUS_STATUS_NOT_SUPPORTED;
 	}
 
