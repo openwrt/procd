@@ -515,15 +515,17 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	enum {
 		VALIDATION_VALID,
 		VALIDATION_FORCEABLE,
+		VALIDATION_ALLOW_BACKUP,
 		__VALIDATION_MAX
 	};
 	static const struct blobmsg_policy validation_policy[__VALIDATION_MAX] = {
 		[VALIDATION_VALID] = { .name = "valid", .type = BLOBMSG_TYPE_BOOL },
 		[VALIDATION_FORCEABLE] = { .name = "forceable", .type = BLOBMSG_TYPE_BOOL },
+		[VALIDATION_ALLOW_BACKUP] = { .name = "allow_backup", .type = BLOBMSG_TYPE_BOOL },
 	};
 	struct blob_attr *validation[__VALIDATION_MAX];
 	struct blob_attr *tb[__SYSUPGRADE_MAX];
-	bool valid, forceable;
+	bool valid, forceable, allow_backup;
 
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -539,6 +541,7 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 
 	valid = validation[VALIDATION_VALID] && blobmsg_get_bool(validation[VALIDATION_VALID]);
 	forceable = validation[VALIDATION_FORCEABLE] && blobmsg_get_bool(validation[VALIDATION_FORCEABLE]);
+	allow_backup = validation[VALIDATION_ALLOW_BACKUP] && blobmsg_get_bool(validation[VALIDATION_ALLOW_BACKUP]);
 
 	if (!valid) {
 		if (!forceable) {
@@ -548,6 +551,9 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 			fprintf(stderr, "Firmware image is invalid\n");
 			return UBUS_STATUS_NOT_SUPPORTED;
 		}
+	} else if (!allow_backup && tb[SYSUPGRADE_BACKUP]) {
+		fprintf(stderr, "Firmware image doesn't allow preserving a backup\n");
+		return UBUS_STATUS_NOT_SUPPORTED;
 	}
 
 	sysupgrade_exec_upgraded(blobmsg_get_string(tb[SYSUPGRADE_PREFIX]),
