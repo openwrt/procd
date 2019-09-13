@@ -254,15 +254,21 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_close_array(&b, c);
 
 	c = blobmsg_open_table(&b, "memory");
-	blobmsg_add_u64(&b, "total",    info.mem_unit * info.totalram);
-	blobmsg_add_u64(&b, "free",     info.mem_unit * info.freeram);
-	blobmsg_add_u64(&b, "shared",   info.mem_unit * info.sharedram);
-	blobmsg_add_u64(&b, "buffered", info.mem_unit * info.bufferram);
+	blobmsg_add_u64(&b, "total",
+			(uint64_t)info.mem_unit * (uint64_t)info.totalram);
+	blobmsg_add_u64(&b, "free",
+			(uint64_t)info.mem_unit * (uint64_t)info.freeram);
+	blobmsg_add_u64(&b, "shared",
+			(uint64_t)info.mem_unit * (uint64_t)info.sharedram);
+	blobmsg_add_u64(&b, "buffered",
+			(uint64_t)info.mem_unit * (uint64_t)info.bufferram);
 	blobmsg_close_table(&b, c);
 
 	c = blobmsg_open_table(&b, "swap");
-	blobmsg_add_u64(&b, "total",    info.mem_unit * info.totalswap);
-	blobmsg_add_u64(&b, "free",     info.mem_unit * info.freeswap);
+	blobmsg_add_u64(&b, "total",
+			(uint64_t)info.mem_unit * (uint64_t)info.totalswap);
+	blobmsg_add_u64(&b, "free",
+			(uint64_t)info.mem_unit * (uint64_t)info.freeswap);
 	blobmsg_close_table(&b, c);
 #endif
 
