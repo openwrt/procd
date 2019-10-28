@@ -434,6 +434,8 @@ static int validate_firmware_image_call(const char *file)
 
 	switch (fork()) {
 	case -1:
+		close(fds[0]);
+		close(fds[1]);
 		return -errno;
 	case 0:
 		/* Set stdin & stderr to /dev/null */
@@ -454,11 +456,11 @@ static int validate_firmware_image_call(const char *file)
 	}
 
 	/* Parent process */
+	close(fds[1]);
 
 	tok = json_tokener_new();
 	if (!tok) {
 		close(fds[0]);
-		close(fds[1]);
 		return -ENOMEM;
 	}
 
@@ -476,7 +478,6 @@ static int validate_firmware_image_call(const char *file)
 	}
 
 	close(fds[0]);
-	close(fds[1]);
 
 	err = -ENOENT;
 	if (jsobj) {
