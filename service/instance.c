@@ -829,6 +829,9 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	if (in->seccomp)
 		jail->argc += 2;
 
+	if (in->no_new_privs)
+		jail->argc++;
+
 	return 1;
 }
 
