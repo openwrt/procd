@@ -337,8 +337,12 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 		ULOG_WARN("Seccomp support for %s::%s not available\n", in->srv->name, in->name);
 #endif
 
-	if (in->has_jail)
+	if (in->has_jail) {
 		argc = jail_run(in, argv);
+		if (argc != in->jail.argc)
+			ULOG_WARN("expected %i jail params, used %i for %s::%s\n",
+				in->jail.argc, argc, in->srv->name, in->name);
+	}
 
 	blobmsg_for_each_attr(cur, in->command, rem)
 		argv[argc++] = blobmsg_data(cur);
