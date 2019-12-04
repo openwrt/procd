@@ -37,9 +37,18 @@
 #include "log.h"
 
 #include <libubox/uloop.h>
+#include <libubus.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:N"
+
+#define NAMESPACE_MOUNT		(1U << 0)
+#define NAMESPACE_IPC		(1U << 1)
+#define NAMESPACE_NET		(1U << 2)
+#define NAMESPACE_PID		(1U << 3)
+#define NAMESPACE_USER		(1U << 4)
+#define NAMESPACE_UTS		(1U << 5)
+#define NAMESPACE_CGROUP	(1U << 6)
 
 static struct {
 	char *name;
@@ -224,6 +233,7 @@ static void usage(void)
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "namespace jail options:\n");
 	fprintf(stderr, "  -h <hostname>\tchange the hostname of the jail\n");
+	fprintf(stderr, "  -N\t\tjail has network namespace\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
 	fprintf(stderr, "  -w <file>\twriteable files that should be staged\n");
 	fprintf(stderr, "  -p\t\tjail has /proc\n");
@@ -348,6 +358,29 @@ static void jail_handle_signal(int signo)
 	kill(jail_process.pid, signo);
 }
 
+static void netns_updown(bool start)
+{
+	struct ubus_context *ctx = ubus_connect(NULL);
+	static struct blob_buf req;
+	uint32_t id;
+	pid_t pid = getpid();
+
+	if (!ctx)
+		return;
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "jail", opts.name);
+	blobmsg_add_u32(&req, "pid", pid);
+	blobmsg_add_u8(&req, "start", start);
+
+	if (ubus_lookup_id(ctx, "network", &id) ||
+	    ubus_invoke(ctx, id, "netns_updown", req.head, NULL, NULL, 3000))
+		INFO("ubus request failed\n");
+
+	blob_buf_free(&req);
+	ubus_free(ctx);
+}
+
 int main(int argc, char **argv)
 {
 	sigset_t sigmask;
@@ -371,15 +404,15 @@ int main(int argc, char **argv)
 			debug = atoi(optarg);
 			break;
 		case 'p':
-			opts.namespace = 1;
+			opts.namespace |= NAMESPACE_MOUNT;
 			opts.procfs = 1;
 			break;
 		case 'o':
-			opts.namespace = 1;
+			opts.namespace |= NAMESPACE_MOUNT;
 			opts.ronly = 1;
 			break;
 		case 's':
-			opts.namespace = 1;
+			opts.namespace |= NAMESPACE_MOUNT;
 			opts.sysfs = 1;
 			break;
 		case 'S':
@@ -395,23 +428,26 @@ int main(int argc, char **argv)
 		case 'n':
 			opts.name = optarg;
 			break;
+		case 'N':
+			opts.namespace |= NAMESPACE_NET;
+			break;
 		case 'h':
 			opts.hostname = optarg;
 			break;
 		case 'r':
-			opts.namespace = 1;
+			opts.namespace |= NAMESPACE_MOUNT;
 			add_path_and_deps(optarg, 1, 0, 0);
 			break;
 		case 'w':
-			opts.namespace = 1;
+			opts.namespace |= NAMESPACE_MOUNT;
 			add_path_and_deps(optarg, 0, 0, 0);
 			break;
 		case 'u':
-			opts.namespace = 1;
+			opts.namespace |= NAMESPACE_MOUNT;
 			add_mount(ubus, 0, -1);
 			break;
 		case 'l':
-			opts.namespace = 1;
+			opts.namespace |= NAMESPACE_MOUNT;
 			add_mount(log, 0, -1);
 			break;
 		case 'U':
@@ -469,19 +505,29 @@ int main(int argc, char **argv)
 	}
 
 	if (opts.namespace) {
-		add_mount("/dev/full", 0, -1);
-		add_mount("/dev/null", 0, -1);
-		add_mount("/dev/urandom", 0, -1);
-		add_mount("/dev/zero", 0, -1);
+		int flags = SIGCHLD | CLONE_NEWPID | CLONE_NEWIPC;
 
-		if (opts.user || opts.group) {
-			add_mount("/etc/passwd", 0, -1);
-			add_mount("/etc/group", 0, -1);
+		if (opts.namespace & NAMESPACE_MOUNT) {
+			flags |= CLONE_NEWNS;
+			add_mount("/dev/full", 0, -1);
+			add_mount("/dev/null", 0, -1);
+			add_mount("/dev/urandom", 0, -1);
+			add_mount("/dev/zero", 0, -1);
+
+			if (opts.user || opts.group) {
+				add_mount("/etc/passwd", 0, -1);
+				add_mount("/etc/group", 0, -1);
+			}
 		}
 
-		int flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD;
 		if (opts.hostname)
 			flags |= CLONE_NEWUTS;
+
+		if (opts.namespace & NAMESPACE_NET) {
+			unshare(CLONE_NEWNET);
+			netns_updown(true);
+		};
+
 		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, flags, NULL);
 	} else {
 		jail_process.pid = fork();
@@ -498,6 +544,9 @@ int main(int argc, char **argv)
 			uloop_run();
 		}
 		uloop_done();
+		if (opts.namespace & NAMESPACE_NET)
+			netns_updown(false);
+
 		return jail_return_code;
 	} else if (jail_process.pid == 0) {
 		/* fork child process */

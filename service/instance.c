@@ -99,6 +99,7 @@ enum {
 	JAIL_ATTR_LOG,
 	JAIL_ATTR_RONLY,
 	JAIL_ATTR_MOUNT,
+	JAIL_ATTR_NETNS,
 	__JAIL_ATTR_MAX,
 };
 
@@ -111,6 +112,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_LOG] = { "log", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_RONLY] = { "ronly", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_MOUNT] = { "mount", BLOBMSG_TYPE_TABLE },
+	[JAIL_ATTR_NETNS] = { "netns", BLOBMSG_TYPE_BOOL },
 };
 
 struct instance_netdev {
@@ -249,6 +251,9 @@ jail_run(struct service_instance *in, char **argv)
 
 	if (jail->ronly)
 		argv[argc++] = "-o";
+
+	if (jail->netns)
+		argv[argc++] = "-N";
 
 	blobmsg_list_for_each(&jail->mount, var) {
 		const char *type = blobmsg_data(var->data);
@@ -832,6 +837,10 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->ronly = blobmsg_get_bool(tb[JAIL_ATTR_RONLY]);
 		jail->argc++;
 	}
+	if (tb[JAIL_ATTR_NETNS]) {
+		jail->netns = blobmsg_get_bool(tb[JAIL_ATTR_NETNS]);
+		jail->argc++;
+	}
 	if (tb[JAIL_ATTR_MOUNT]) {
 		struct blob_attr *cur;
 		int rem;
@@ -1218,6 +1227,7 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_add_u8(b, "ubus", in->jail.ubus);
 		blobmsg_add_u8(b, "log", in->jail.log);
 		blobmsg_add_u8(b, "ronly", in->jail.ronly);
+		blobmsg_add_u8(b, "netns", in->jail.netns);
 		blobmsg_close_table(b, r);
 		if (!avl_is_empty(&in->jail.mount.avl)) {
 			struct blobmsg_list_node *var;

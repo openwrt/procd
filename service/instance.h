@@ -28,6 +28,7 @@ struct jail {
 	bool ubus;
 	bool log;
 	bool ronly;
+	bool netns;
 	char *name;
 	char *hostname;
 	struct blobmsg_list mount;

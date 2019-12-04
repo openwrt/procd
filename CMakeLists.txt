@@ -105,7 +105,7 @@ endif()
 
 IF(JAIL_SUPPORT)
 ADD_EXECUTABLE(ujail jail/jail.c jail/elf.c jail/fs.c jail/capabilities.c)
-TARGET_LINK_LIBRARIES(ujail ${ubox} ${blobmsg_json})
+TARGET_LINK_LIBRARIES(ujail ${ubox} ${ubus} ${blobmsg_json})
 INSTALL(TARGETS ujail
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
