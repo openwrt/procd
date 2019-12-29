@@ -466,6 +466,9 @@ static int validate_firmware_image_call(const char *file)
 
 	blob_buf_init(&b, 0);
 	while ((len = read(fds[0], buf, sizeof(buf)))) {
+		if (len < 0 && errno == EINTR)
+			continue;
+
 		jsobj = json_tokener_parse_ex(tok, buf, len);
 
 		if (json_tokener_get_error(tok) == json_tokener_success)
