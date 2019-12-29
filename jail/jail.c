@@ -15,10 +15,13 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
+#include <sys/types.h>
 
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pwd.h>
+#include <grp.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -36,7 +39,7 @@
 #include <libubox/uloop.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psuloc"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:"
 
 static struct {
 	char *name;
@@ -44,6 +47,8 @@ static struct {
 	char **jail_argv;
 	char *seccomp;
 	char *capabilities;
+	char *user;
+	char *group;
 	int no_new_privs;
 	int namespace;
 	int procfs;
@@ -225,6 +230,8 @@ static void usage(void)
 	fprintf(stderr, "  -s\t\tjail has /sys\n");
 	fprintf(stderr, "  -l\t\tjail has /dev/log\n");
 	fprintf(stderr, "  -u\t\tjail has a ubus socket\n");
+	fprintf(stderr, "  -U <name>\tuser to run jailed process\n");
+	fprintf(stderr, "  -G <name>\tgroup to run jailed process\n");
 	fprintf(stderr, "  -o\t\tremont jail root (/) read only\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
@@ -237,6 +244,9 @@ and will only drop capabilities/apply seccomp filter.\n\n");
 
 static int exec_jail(void *_notused)
 {
+	struct passwd *p = NULL;
+	struct group *g = NULL;
+
 	if (opts.capabilities && drop_capabilities(opts.capabilities))
 		exit(EXIT_FAILURE);
 
@@ -255,6 +265,39 @@ static int exec_jail(void *_notused)
 		ERROR("failed to build jail fs\n");
 		exit(EXIT_FAILURE);
 	}
+
+	if (opts.user) {
+		p = getpwnam(opts.user);
+		if (!p) {
+			ERROR("failed to get uid/gid for user %s: %d (%s)\n",
+			      opts.user, errno, strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	if (opts.group) {
+		g = getgrnam(opts.group);
+		if (!g) {
+			ERROR("failed to get gid for group %s: %m\n", opts.group);
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	if (p && p->pw_gid && initgroups(opts.user, p->pw_gid)) {
+		ERROR("failed to initgroups() for user %s: %m\n", opts.user);
+		exit(EXIT_FAILURE);
+	}
+
+	if (g && g->gr_gid && setgid(g->gr_gid)) {
+		ERROR("failed to set group id %d: %m\n", g?g->gr_gid:p->pw_gid);
+		exit(EXIT_FAILURE);
+	}
+
+	if (p && p->pw_uid && setuid(p->pw_uid)) {
+		ERROR("failed to set user id %d: %m\n", p->pw_uid);
+		exit(EXIT_FAILURE);
+	}
+
 
 	char **envp = build_envp(opts.seccomp);
 	if (!envp)
@@ -371,6 +414,12 @@ int main(int argc, char **argv)
 			opts.namespace = 1;
 			add_mount(log, 0, -1);
 			break;
+		case 'U':
+			opts.user = optarg;
+			break;
+		case 'G':
+			opts.group = optarg;
+			break;
 		}
 	}
 
@@ -424,6 +473,14 @@ int main(int argc, char **argv)
 		add_mount("/dev/null", 0, -1);
 		add_mount("/dev/urandom", 0, -1);
 		add_mount("/dev/zero", 0, -1);
+
+		if (opts.user || opts.group) {
+			add_mount("/etc/passwd", 0, -1);
+			add_mount("/etc/group", 0, -1);
+		}
+
+		if (opts.namespace & NAMESPACE_IPC)
+			flags |= CLONE_NEWIPC;
 
 		int flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD;
 		if (opts.hostname)

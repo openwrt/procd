@@ -222,6 +222,16 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = in->seccomp;
 	}
 
+	if (in->user) {
+		argv[argc++] = "-U";
+		argv[argc++] = in->user;
+	}
+
+	if (in->group) {
+		argv[argc++] = "-G";
+		argv[argc++] = in->group;
+	}
+
 	if (in->no_new_privs)
 		argv[argc++] = "-c";
 
@@ -370,15 +380,15 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 		closefd(_stderr);
 	}
 
-	if (in->user && in->pw_gid && initgroups(in->user, in->pw_gid)) {
+	if (!in->has_jail && in->user && in->pw_gid && initgroups(in->user, in->pw_gid)) {
 		ERROR("failed to initgroups() for user %s: %m\n", in->user);
 		exit(127);
 	}
-	if (in->gr_gid && setgid(in->gr_gid)) {
+	if (!in->has_jail && in->gr_gid && setgid(in->gr_gid)) {
 		ERROR("failed to set group id %d: %m\n", in->gr_gid);
 		exit(127);
 	}
-	if (in->uid && setuid(in->uid)) {
+	if (!in->has_jail && in->uid && setuid(in->uid)) {
 		ERROR("failed to set user id %d: %m\n", in->uid);
 		exit(127);
 	}
@@ -831,6 +841,12 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		instance_fill_array(&jail->mount, tb[JAIL_ATTR_MOUNT], NULL, false);
 	}
 	if (in->seccomp)
+		jail->argc += 2;
+
+	if (in->user)
+		jail->argc += 2;
+
+	if (in->group)
 		jail->argc += 2;
 
 	if (in->no_new_privs)
