@@ -37,6 +37,12 @@ static struct blob_buf b;
 static int notify;
 static struct ubus_context *_ctx;
 
+enum vjson_state {
+	VJSON_ERROR,
+	VJSON_CONTINUE,
+	VJSON_SUCCESS,
+};
+
 static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
                  struct ubus_request_data *req, const char *method,
                  struct blob_attr *msg)
@@ -413,30 +419,128 @@ static int proc_signal(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+__attribute__((format (printf, 2, 3)))
+static enum vjson_state vjson_error(char **b, const char *fmt, ...)
+{
+	static char buf[256] = { 0 };
+	const char *pfx = "Firmware image couldn't be validated: ";
+	va_list va;
+	int r;
+
+	r = snprintf(buf, sizeof(buf), "%s", pfx);
+	if (r < 0) {
+		*b = "vjson_error() snprintf failed";
+		return VJSON_ERROR;
+	}
+
+	va_start(va, fmt);
+	r = vsnprintf(buf+r, sizeof(buf)-r, fmt, va);
+	if (r < 0) {
+		*b = "vjson_error() vsnprintf failed";
+		return VJSON_ERROR;
+	}
+	va_end(va);
+
+	*b = buf;
+	return VJSON_ERROR;
+}
+
+static enum vjson_state vjson_parse_token(json_tokener *tok, char *buf, ssize_t len, char **err)
+{
+	json_object *jsobj = NULL;
+
+	jsobj = json_tokener_parse_ex(tok, buf, len);
+	if (json_tokener_get_error(tok) == json_tokener_continue)
+		return VJSON_CONTINUE;
+
+	if (json_tokener_get_error(tok) == json_tokener_success) {
+		if (json_object_get_type(jsobj) != json_type_object) {
+			json_object_put(jsobj);
+			return vjson_error(err, "result is not an JSON object");
+		}
+
+		blobmsg_add_object(&b, jsobj);
+		json_object_put(jsobj);
+		return VJSON_SUCCESS;
+	}
+
+	return vjson_error(err, "failed to parse JSON: %s (%d)",
+			   json_tokener_error_desc(json_tokener_get_error(tok)),
+			   json_tokener_get_error(tok));
+}
+
+static enum vjson_state vjson_parse(int fd, char **err)
+{
+	enum vjson_state r = VJSON_ERROR;
+	size_t read_count = 0;
+	char buf[64] = { 0 };
+	json_tokener *tok;
+	ssize_t len;
+	int _errno;
+
+	tok = json_tokener_new();
+	if (!tok)
+		return vjson_error(err, "json_tokener_new() failed");
+
+	vjson_error(err, "incomplete JSON input");
+
+	while ((len = read(fd, buf, sizeof(buf)))) {
+		if (len < 0 && errno == EINTR)
+			continue;
+
+		if (len < 0) {
+			_errno = errno;
+			json_tokener_free(tok);
+			return vjson_error(err, "read() failed: %s (%d)",
+					   strerror(_errno), _errno);
+		}
+
+		read_count += len;
+		r = vjson_parse_token(tok, buf, len, err);
+		if (r != VJSON_CONTINUE)
+			break;
+
+		memset(buf, 0, sizeof(buf));
+	}
+
+	if (read_count == 0)
+		vjson_error(err, "no JSON input");
+
+	json_tokener_free(tok);
+	return r;
+}
+
 /**
  * validate_firmware_image_call - perform validation & store result in global b
  *
  * @file: firmware image path
  */
-static int validate_firmware_image_call(const char *file)
+static enum vjson_state validate_firmware_image_call(const char *file, char **err)
 {
 	const char *path = "/usr/libexec/validate_firmware_image";
-	json_object *jsobj = NULL;
-	json_tokener *tok;
-	char buf[64];
-	ssize_t len;
+	enum vjson_state ret = VJSON_ERROR;
+	int _errno;
 	int fds[2];
-	int err;
 	int fd;
 
-	if (pipe(fds))
-		return -errno;
+	blob_buf_init(&b, 0);
+	vjson_error(err, "unhandled error");
+
+	if (pipe(fds)) {
+		_errno = errno;
+		return vjson_error(err, "pipe() failed: %s (%d)",
+				   strerror(_errno), _errno);
+	}
 
 	switch (fork()) {
 	case -1:
+		_errno = errno;
+
 		close(fds[0]);
 		close(fds[1]);
-		return -errno;
+
+		return vjson_error(err, "fork() failed: %s (%d)",
+				   strerror(_errno), _errno);
 	case 0:
 		/* Set stdin & stderr to /dev/null */
 		fd = open("/dev/null", O_RDWR);
@@ -458,43 +562,10 @@ static int validate_firmware_image_call(const char *file)
 	/* Parent process */
 	close(fds[1]);
 
-	tok = json_tokener_new();
-	if (!tok) {
-		close(fds[0]);
-		return -ENOMEM;
-	}
-
-	blob_buf_init(&b, 0);
-	while ((len = read(fds[0], buf, sizeof(buf)))) {
-		if (len < 0 && errno == EINTR)
-			continue;
-
-		jsobj = json_tokener_parse_ex(tok, buf, len);
-
-		if (json_tokener_get_error(tok) == json_tokener_success)
-			break;
-		else if (json_tokener_get_error(tok) == json_tokener_continue)
-			continue;
-		else
-			fprintf(stderr, "Failed to parse JSON: %d\n",
-				json_tokener_get_error(tok));
-	}
-
+	ret = vjson_parse(fds[0], err);
 	close(fds[0]);
 
-	err = -ENOENT;
-	if (jsobj) {
-		if (json_object_get_type(jsobj) == json_type_object) {
-			blobmsg_add_object(&b, jsobj);
-			err = 0;
-		}
-
-		json_object_put(jsobj);
-	}
-
-	json_tokener_free(tok);
-
-	return err;
+	return ret;
 }
 
 enum {
@@ -512,6 +583,8 @@ static int validate_firmware_image(struct ubus_context *ctx,
 				   const char *method, struct blob_attr *msg)
 {
 	struct blob_attr *tb[__VALIDATE_FIRMWARE_IMAGE_MAX];
+	enum vjson_state ret = VJSON_ERROR;
+	char *err;
 
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -520,7 +593,8 @@ static int validate_firmware_image(struct ubus_context *ctx,
 	if (!tb[VALIDATE_FIRMWARE_IMAGE_PATH])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	if (validate_firmware_image_call(blobmsg_get_string(tb[VALIDATE_FIRMWARE_IMAGE_PATH])))
+	ret = validate_firmware_image_call(blobmsg_get_string(tb[VALIDATE_FIRMWARE_IMAGE_PATH]), &err);
+	if (ret != VJSON_SUCCESS)
 		return UBUS_STATUS_UNKNOWN_ERROR;
 
 	ubus_send_reply(ctx, req, b.head);
@@ -580,6 +654,8 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *validation[__VALIDATION_MAX];
 	struct blob_attr *tb[__SYSUPGRADE_MAX];
 	bool valid, forceable, allow_backup;
+	enum vjson_state ret = VJSON_ERROR;
+	char *err;
 
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -588,8 +664,9 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!tb[SYSUPGRADE_PATH] || !tb[SYSUPGRADE_PREFIX])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	if (validate_firmware_image_call(blobmsg_get_string(tb[SYSUPGRADE_PATH]))) {
-		sysupgrade_error(ctx, req, "Firmware image couldn't be validated");
+	ret = validate_firmware_image_call(blobmsg_get_string(tb[SYSUPGRADE_PATH]), &err);
+	if (ret != VJSON_SUCCESS) {
+		sysupgrade_error(ctx, req, err);
 		return UBUS_STATUS_UNKNOWN_ERROR;
 	}
 
