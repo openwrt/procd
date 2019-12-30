@@ -479,9 +479,6 @@ int main(int argc, char **argv)
 			add_mount("/etc/group", 0, -1);
 		}
 
-		if (opts.namespace & NAMESPACE_IPC)
-			flags |= CLONE_NEWIPC;
-
 		int flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD;
 		if (opts.hostname)
 			flags |= CLONE_NEWUTS;
