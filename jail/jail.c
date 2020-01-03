@@ -96,7 +96,7 @@ static int mkdir_p(char *dir, mode_t mask)
 	return ret;
 }
 
-int mount_bind(const char *root, const char *path, int readonly, int error)
+static int _mount_bind(const char *root, const char *path, const char *target, int readonly, int error)
 {
 	struct stat s;
 	char new[PATH_MAX];
@@ -107,12 +107,13 @@ int mount_bind(const char *root, const char *path, int readonly, int error)
 		return error;
 	}
 
-	snprintf(new, sizeof(new), "%s%s", root, path);
+	snprintf(new, sizeof(new), "%s%s", root, target?target:path);
+
 	if (S_ISDIR(s.st_mode)) {
 		mkdir_p(new, 0755);
 	} else {
 		mkdir_p(dirname(new), 0755);
-		snprintf(new, sizeof(new), "%s%s", root, path);
+		snprintf(new, sizeof(new), "%s%s", root, target?target:path);
 		fd = creat(new, 0644);
 		if (fd == -1) {
 			ERROR("creat(%s) failed: %m\n", new);
@@ -134,6 +135,10 @@ int mount_bind(const char *root, const char *path, int readonly, int error)
 	DEBUG("mount -B %s %s (%s)\n", path, new, readonly?"ro":"rw");
 
 	return 0;
+}
+
+int mount_bind(const char *root, const char *path, int readonly, int error) {
+	return _mount_bind(root, path, NULL, readonly, error);
 }
 
 static int build_jail_fs(void)
@@ -163,6 +168,18 @@ static int build_jail_fs(void)
 	if (mount_all(jail_root)) {
 		ERROR("mount_all() failed\n");
 		return -1;
+	}
+
+	if (opts.namespace & NAMESPACE_NET) {
+		char hostdir[PATH_MAX], jailetc[PATH_MAX], jaillink[PATH_MAX];
+
+		snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
+		mkdir_p(hostdir, 0755);
+		_mount_bind(jail_root, hostdir, "/tmp/resolv.conf.d", 1, -1);
+		snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
+		mkdir_p(jailetc, 0755);
+		snprintf(jaillink, PATH_MAX, "%s/etc/resolv.conf", jail_root);
+		symlink("../tmp/resolv.conf.d/resolv.conf.auto", jaillink);
 	}
 
 	char dirbuf[sizeof(jail_root) + 4];
