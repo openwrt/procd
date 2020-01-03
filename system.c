@@ -672,6 +672,12 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 
 	blobmsg_parse(validation_policy, __VALIDATION_MAX, validation, blob_data(b.head), blob_len(b.head));
 
+	if (!validation[VALIDATION_VALID] || !validation[VALIDATION_FORCEABLE] ||
+	    !validation[VALIDATION_ALLOW_BACKUP]) {
+		sysupgrade_error(ctx, req, "Validation script provided invalid input");
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	}
+
 	valid = validation[VALIDATION_VALID] && blobmsg_get_bool(validation[VALIDATION_VALID]);
 	forceable = validation[VALIDATION_FORCEABLE] && blobmsg_get_bool(validation[VALIDATION_FORCEABLE]);
 	allow_backup = validation[VALIDATION_ALLOW_BACKUP] && blobmsg_get_bool(validation[VALIDATION_ALLOW_BACKUP]);
