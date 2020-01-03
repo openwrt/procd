@@ -96,11 +96,12 @@ static int mkdir_p(char *dir, mode_t mask)
 	return ret;
 }
 
-static int _mount_bind(const char *root, const char *path, const char *target, int readonly, int error)
+static int _mount_bind(const char *root, const char *path, const char *target, int readonly, int strict, int error)
 {
 	struct stat s;
 	char new[PATH_MAX];
 	int fd;
+	int remount_flags = MS_BIND | MS_REMOUNT;
 
 	if (stat(path, &s)) {
 		ERROR("stat(%s) failed: %m\n", path);
@@ -127,18 +128,26 @@ static int _mount_bind(const char *root, const char *path, const char *target, i
 		return -1;
 	}
 
-	if (readonly && mount(NULL, new, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL)) {
-		ERROR("failed to remount ro %s: %m\n", new);
+	if (readonly)
+		remount_flags |= MS_RDONLY;
+
+	if (strict)
+		remount_flags |= MS_NOEXEC | MS_NOSUID | MS_NODEV;
+
+	if ((strict || readonly) && mount(NULL, new, NULL, remount_flags, NULL)) {
+		ERROR("failed to remount (%s%s%s) %s: %m\n", readonly?"ro":"rw",
+		      (readonly && strict)?", ":"", strict?"strict":"", new);
 		return -1;
 	}
 
-	DEBUG("mount -B %s %s (%s)\n", path, new, readonly?"ro":"rw");
+	DEBUG("mount -B %s %s (%s%s%s)\n", path, new,
+	      readonly?"ro":"rw", (readonly && strict)?", ":"", strict?"strict":"");
 
 	return 0;
 }
 
 int mount_bind(const char *root, const char *path, int readonly, int error) {
-	return _mount_bind(root, path, NULL, readonly, error);
+	return _mount_bind(root, path, NULL, readonly, 0, error);
 }
 
 static int build_jail_fs(void)
@@ -175,7 +184,7 @@ static int build_jail_fs(void)
 
 		snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
 		mkdir_p(hostdir, 0755);
-		_mount_bind(jail_root, hostdir, "/tmp/resolv.conf.d", 1, -1);
+		_mount_bind(jail_root, hostdir, "/tmp/resolv.conf.d", 1, 1, -1);
 		snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
 		mkdir_p(jailetc, 0755);
 		snprintf(jaillink, PATH_MAX, "%s/etc/resolv.conf", jail_root);
