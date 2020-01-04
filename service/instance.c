@@ -805,11 +805,11 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	jail->argc = 2;
 
 	if (tb[JAIL_ATTR_NAME]) {
-		jail->name = blobmsg_get_string(tb[JAIL_ATTR_NAME]);
+		jail->name = strdup(blobmsg_get_string(tb[JAIL_ATTR_NAME]));
 		jail->argc += 2;
 	}
 	if (tb[JAIL_ATTR_HOSTNAME]) {
-		jail->hostname = blobmsg_get_string(tb[JAIL_ATTR_HOSTNAME]);
+		jail->hostname = strdup(blobmsg_get_string(tb[JAIL_ATTR_HOSTNAME]));
 		jail->argc += 2;
 	}
 	if (tb[JAIL_ATTR_PROCFS]) {
@@ -957,12 +957,12 @@ instance_config_parse(struct service_instance *in)
 		in->no_new_privs = blobmsg_get_bool(tb[INSTANCE_ATTR_NO_NEW_PRIVS]);
 
 	if (!in->trace && tb[INSTANCE_ATTR_SECCOMP])
-		in->seccomp = blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]);
+		in->seccomp = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]));
 
 	if (tb[INSTANCE_ATTR_PIDFILE]) {
 		char *pidfile = blobmsg_get_string(tb[INSTANCE_ATTR_PIDFILE]);
 		if (pidfile)
-			in->pidfile = pidfile;
+			in->pidfile = strdup(pidfile);
 	}
 
 	if (tb[INSTANCE_ATTR_RELOADSIG])
@@ -1077,6 +1077,10 @@ instance_free(struct service_instance *in)
 	free(in->config);
 	free(in->user);
 	free(in->group);
+	free(in->jail.name);
+	free(in->jail.hostname);
+	free(in->seccomp);
+	free(in->pidfile);
 	free(in);
 }
 
