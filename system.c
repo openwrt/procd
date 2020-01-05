@@ -364,7 +364,7 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 		if (timeout <= frequency)
 			timeout = frequency * 2;
-		 watchdog_timeout(timeout);
+		watchdog_timeout(timeout);
 	}
 
 	if (tb[WDT_MAGICCLOSE])
