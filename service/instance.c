@@ -270,7 +270,7 @@ instance_removepid(struct service_instance *in) {
 	if (!in->pidfile)
 		return 0;
 	if (unlink(in->pidfile)) {
-		ERROR("Failed to removed pidfile: %s: %m\n", in->pidfile);
+		ERROR("Failed to remove pidfile: %s: %m\n", in->pidfile);
 		return 1;
 	}
 	return 0;
