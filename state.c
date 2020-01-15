@@ -94,6 +94,34 @@ static void set_console(void)
 		set_stdio(tty);
 }
 
+static void perform_halt()
+{
+	if (reboot_event == RB_POWER_OFF)
+		LOG("- power down -\n");
+	else
+		LOG("- reboot -\n");
+
+	/* Allow time for last message to reach serial console, etc */
+	sleep(1);
+
+	if (is_container()) {
+		reboot(reboot_event);
+		exit(EXIT_SUCCESS);
+		return;
+	}
+
+	/* We have to fork here, since the kernel calls do_exit(EXIT_SUCCESS)
+	 * in linux/kernel/sys.c, which can cause the machine to panic when
+	 * the init process exits... */
+	if (!vfork()) { /* child */
+		reboot(reboot_event);
+		_exit(EXIT_SUCCESS);
+	}
+
+	while (1)
+		sleep(1);
+}
+
 static void state_enter(void)
 {
 	char ubus_cmd[] = "/sbin/ubusd";
@@ -153,29 +181,9 @@ static void state_enter(void)
 		sync();
 		sleep(1);
 #ifndef DISABLE_INIT
-		if (reboot_event == RB_POWER_OFF)
-			LOG("- power down -\n");
-		else
-			LOG("- reboot -\n");
-
-		if (!is_container()) {
-			/* Allow time for last message to reach serial console, etc */
-			sleep(1);
-
-			/* We have to fork here, since the kernel calls do_exit(EXIT_SUCCESS)
-			 * in linux/kernel/sys.c, which can cause the machine to panic when
-			 * the init process exits... */
-			if (!vfork( )) { /* child */
-				reboot(reboot_event);
-				_exit(EXIT_SUCCESS);
-			}
-
-			while (1)
-				sleep(1);
-		} else
-			exit(0);
+		perform_halt();
 #else
-		exit(0);
+		exit(EXIT_SUCCESS);
 #endif
 		break;
 
