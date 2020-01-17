@@ -1019,6 +1019,21 @@ instance_config_cleanup(struct service_instance *in)
 }
 
 static void
+instance_config_move_strdup(char **dst, char *src)
+{
+	if (!*dst)
+		return;
+
+	free(*dst);
+	*dst = NULL;
+
+	if (!src)
+		return;
+
+	*dst = strdup(src);
+}
+
+static void
 instance_config_move(struct service_instance *in, struct service_instance *in_src)
 {
 	instance_config_cleanup(in);
@@ -1031,16 +1046,19 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	blobmsg_list_move(&in->jail.mount, &in_src->jail.mount);
 	in->trigger = in_src->trigger;
 	in->command = in_src->command;
-	in->pidfile = in_src->pidfile;
 	in->respawn = in_src->respawn;
 	in->respawn_retry = in_src->respawn_retry;
 	in->respawn_threshold = in_src->respawn_threshold;
 	in->respawn_timeout = in_src->respawn_timeout;
 	in->name = in_src->name;
 	in->trace = in_src->trace;
-	in->seccomp = in_src->seccomp;
 	in->node.avl.key = in_src->node.avl.key;
 	in->syslog_facility = in_src->syslog_facility;
+
+	instance_config_move_strdup(&in->pidfile, in_src->pidfile);
+	instance_config_move_strdup(&in->seccomp, in_src->seccomp);
+	instance_config_move_strdup(&in->jail.name, in_src->jail.name);
+	instance_config_move_strdup(&in->jail.hostname, in_src->jail.hostname);
 
 	free(in->config);
 	in->config = in_src->config;
