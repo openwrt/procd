@@ -36,6 +36,7 @@
 #include "service.h"
 #include "instance.h"
 
+#define UJAIL_BIN_PATH "/sbin/ujail"
 
 enum {
 	INSTANCE_ATTR_COMMAND,
@@ -205,7 +206,7 @@ jail_run(struct service_instance *in, char **argv)
 	struct jail *jail = &in->jail;
 	int argc = 0;
 
-	argv[argc++] = "/sbin/ujail";
+	argv[argc++] = UJAIL_BIN_PATH;
 
 	if (jail->name) {
 		argv[argc++] = "-n";
@@ -795,9 +796,13 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	struct blob_attr *tb[__JAIL_ATTR_MAX];
 	struct jail *jail = &in->jail;
 	struct stat s;
+	int r;
 
-	if (stat("/sbin/ujail", &s))
+	r = stat(UJAIL_BIN_PATH, &s);
+	if (r < 0) {
+		ERROR("unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
 		return 0;
+	}
 
 	blobmsg_parse(jail_attr, __JAIL_ATTR_MAX, tb,
 		blobmsg_data(attr), blobmsg_data_len(attr));
