@@ -1021,11 +1021,10 @@ instance_config_cleanup(struct service_instance *in)
 static void
 instance_config_move_strdup(char **dst, char *src)
 {
-	if (!*dst)
-		return;
-
-	free(*dst);
-	*dst = NULL;
+	if (*dst) {
+		free(*dst);
+		*dst = NULL;
+	}
 
 	if (!src)
 		return;
