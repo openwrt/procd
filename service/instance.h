@@ -21,6 +21,7 @@
 #include "../utils/utils.h"
 
 #define RESPAWN_ERROR	(5 * 60)
+#define SIGNALLED_OFFSET 128
 
 struct jail {
 	bool procfs;
@@ -63,6 +64,7 @@ struct service_instance {
 	char *seccomp;
 	char *pidfile;
 	int syslog_facility;
+	int exit_code;
 
 	uint32_t term_timeout;
 	uint32_t respawn_timeout;
