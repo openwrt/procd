@@ -101,6 +101,7 @@ enum {
 	JAIL_ATTR_RONLY,
 	JAIL_ATTR_MOUNT,
 	JAIL_ATTR_NETNS,
+	JAIL_ATTR_REQUIREJAIL,
 	__JAIL_ATTR_MAX,
 };
 
@@ -114,6 +115,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_RONLY] = { "ronly", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_MOUNT] = { "mount", BLOBMSG_TYPE_TABLE },
 	[JAIL_ATTR_NETNS] = { "netns", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_REQUIREJAIL] = { "requirejail", BLOBMSG_TYPE_BOOL },
 };
 
 struct instance_netdev {
@@ -819,20 +821,16 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 {
 	struct blob_attr *tb[__JAIL_ATTR_MAX];
 	struct jail *jail = &in->jail;
-	struct stat s;
-	int r;
-
-	r = stat(UJAIL_BIN_PATH, &s);
-	if (r < 0) {
-		ERROR("unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
-		return 0;
-	}
 
 	blobmsg_parse(jail_attr, __JAIL_ATTR_MAX, tb,
 		blobmsg_data(attr), blobmsg_data_len(attr));
 
 	jail->argc = 2;
 
+	if (tb[JAIL_ATTR_REQUIREJAIL]) {
+		in->require_jail = true;
+		jail->argc++;
+	}
 	if (tb[JAIL_ATTR_NAME]) {
 		jail->name = strdup(blobmsg_get_string(tb[JAIL_ATTR_NAME]));
 		jail->argc += 2;
@@ -885,7 +883,7 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	if (in->no_new_privs)
 		jail->argc++;
 
-	return 1;
+	return true;
 }
 
 static bool
@@ -918,7 +916,8 @@ instance_config_parse(struct service_instance *in)
 {
 	struct blob_attr *tb[__INSTANCE_ATTR_MAX];
 	struct blob_attr *cur, *cur2;
-	int rem;
+	struct stat s;
+	int rem, r;
 
 	blobmsg_parse(instance_attr, __INSTANCE_ATTR_MAX, tb,
 		blobmsg_data(in->config), blobmsg_data_len(in->config));
@@ -1003,6 +1002,19 @@ instance_config_parse(struct service_instance *in)
 
 	if (!in->trace && tb[INSTANCE_ATTR_JAIL])
 		in->has_jail = instance_jail_parse(in, tb[INSTANCE_ATTR_JAIL]);
+
+	if (in->has_jail) {
+		r = stat(UJAIL_BIN_PATH, &s);
+		if (r < 0) {
+			if (in->require_jail) {
+				ERROR("Cannot jail service %s::%s. %s: %m (%d)\n",
+						in->srv->name, in->name, UJAIL_BIN_PATH, r);
+				return false;
+			}
+			DEBUG(2, "unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
+			in->has_jail = false;
+		}
+	}
 
 	if (tb[INSTANCE_ATTR_STDOUT] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDOUT]))
 		in->_stdout.fd.fd = -1;
@@ -1146,6 +1158,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->term_timeout = 5;
 	in->syslog_facility = LOG_DAEMON;
 	in->exit_code = 0;
+	in->require_jail = false;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;
