@@ -800,7 +800,7 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 
 	r = stat(UJAIL_BIN_PATH, &s);
 	if (r < 0) {
-		ERROR("unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
+		DEBUG(2, "unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
 		return 0;
 	}
 
