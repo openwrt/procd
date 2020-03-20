@@ -62,6 +62,7 @@ enum {
 	INSTANCE_ATTR_RELOADSIG,
 	INSTANCE_ATTR_TERMTIMEOUT,
 	INSTANCE_ATTR_FACILITY,
+	INSTANCE_ATTR_EXTROOT,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -89,6 +90,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
 	[INSTANCE_ATTR_TERMTIMEOUT] = { "term_timeout", BLOBMSG_TYPE_INT32 },
 	[INSTANCE_ATTR_FACILITY] = { "facility", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_EXTROOT] = { "extroot", BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -101,8 +103,9 @@ enum {
 	JAIL_ATTR_RONLY,
 	JAIL_ATTR_MOUNT,
 	JAIL_ATTR_NETNS,
+	JAIL_ATTR_USERNS,
+	JAIL_ATTR_CGROUPSNS,
 	JAIL_ATTR_REQUIREJAIL,
-	JAIL_ATTR_EXTROOT,
 	__JAIL_ATTR_MAX,
 };
 
@@ -116,8 +119,9 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_RONLY] = { "ronly", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_MOUNT] = { "mount", BLOBMSG_TYPE_TABLE },
 	[JAIL_ATTR_NETNS] = { "netns", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_USERNS] = { "userns", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_CGROUPSNS] = { "cgroupsns", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_REQUIREJAIL] = { "requirejail", BLOBMSG_TYPE_BOOL },
-	[JAIL_ATTR_EXTROOT] = { "extroot", BLOBMSG_TYPE_STRING },
 };
 
 struct instance_netdev {
@@ -260,9 +264,15 @@ jail_run(struct service_instance *in, char **argv)
 	if (jail->netns)
 		argv[argc++] = "-N";
 
-	if (jail->extroot) {
+	if (jail->userns)
+		argv[argc++] = "-f";
+
+	if (jail->cgroupsns)
+		argv[argc++] = "-F";
+
+	if (in->extroot) {
 		argv[argc++] = "-R";
-		argv[argc++] = jail->extroot;
+		argv[argc++] = in->extroot;
 	}
 
 	blobmsg_list_for_each(&jail->mount, var) {
@@ -870,9 +880,13 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->netns = blobmsg_get_bool(tb[JAIL_ATTR_NETNS]);
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_EXTROOT]) {
-		jail->extroot = strdup(blobmsg_get_string(tb[JAIL_ATTR_EXTROOT]));
-		jail->argc += 2;
+	if (tb[JAIL_ATTR_USERNS]) {
+		jail->userns = blobmsg_get_bool(tb[JAIL_ATTR_USERNS]);
+		jail->argc++;
+	}
+	if (tb[JAIL_ATTR_CGROUPSNS]) {
+		jail->cgroupsns = blobmsg_get_bool(tb[JAIL_ATTR_CGROUPSNS]);
+		jail->argc++;
 	}
 
 	if (tb[JAIL_ATTR_MOUNT]) {
@@ -891,6 +905,10 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 
 	if (in->group)
 		jail->argc += 2;
+
+	if (in->extroot) {
+		jail->argc += 2;
+	}
 
 	if (in->no_new_privs)
 		jail->argc++;
@@ -1002,6 +1020,9 @@ instance_config_parse(struct service_instance *in)
 
 	if (!in->trace && tb[INSTANCE_ATTR_SECCOMP])
 		in->seccomp = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]));
+
+	if (tb[INSTANCE_ATTR_EXTROOT])
+		in->extroot = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_EXTROOT]));
 
 	if (tb[INSTANCE_ATTR_PIDFILE]) {
 		char *pidfile = blobmsg_get_string(tb[INSTANCE_ATTR_PIDFILE]);
@@ -1151,7 +1172,7 @@ instance_free(struct service_instance *in)
 	free(in->config);
 	free(in->user);
 	free(in->group);
-	free(in->jail.extroot);
+	free(in->extroot);
 	free(in->jail.name);
 	free(in->jail.hostname);
 	free(in->seccomp);
@@ -1275,14 +1296,16 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 			blobmsg_add_string(b, "name", in->jail.name);
 		if (in->jail.hostname)
 			blobmsg_add_string(b, "hostname", in->jail.hostname);
-		if (in->jail.extroot)
-			blobmsg_add_string(b, "extroot", in->jail.extroot);
+		if (in->extroot)
+			blobmsg_add_string(b, "extroot", in->extroot);
 		blobmsg_add_u8(b, "procfs", in->jail.procfs);
 		blobmsg_add_u8(b, "sysfs", in->jail.sysfs);
 		blobmsg_add_u8(b, "ubus", in->jail.ubus);
 		blobmsg_add_u8(b, "log", in->jail.log);
 		blobmsg_add_u8(b, "ronly", in->jail.ronly);
 		blobmsg_add_u8(b, "netns", in->jail.netns);
+		blobmsg_add_u8(b, "userns", in->jail.userns);
+		blobmsg_add_u8(b, "cgroupsns", in->jail.cgroupsns);
 		blobmsg_close_table(b, r);
 		if (!avl_is_empty(&in->jail.mount.avl)) {
 			struct blobmsg_list_node *var;

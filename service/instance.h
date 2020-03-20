@@ -30,9 +30,10 @@ struct jail {
 	bool log;
 	bool ronly;
 	bool netns;
+	bool userns;
+	bool cgroupsns;
 	char *name;
 	char *hostname;
-	char *extroot;
 	struct blobmsg_list mount;
 	int argc;
 };
@@ -65,6 +66,7 @@ struct service_instance {
 	struct jail jail;
 	char *seccomp;
 	char *pidfile;
+	char *extroot;
 	int syslog_facility;
 	int exit_code;
 
