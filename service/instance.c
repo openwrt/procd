@@ -102,6 +102,7 @@ enum {
 	JAIL_ATTR_MOUNT,
 	JAIL_ATTR_NETNS,
 	JAIL_ATTR_REQUIREJAIL,
+	JAIL_ATTR_EXTROOT,
 	__JAIL_ATTR_MAX,
 };
 
@@ -116,6 +117,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_MOUNT] = { "mount", BLOBMSG_TYPE_TABLE },
 	[JAIL_ATTR_NETNS] = { "netns", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_REQUIREJAIL] = { "requirejail", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_EXTROOT] = { "extroot", BLOBMSG_TYPE_STRING },
 };
 
 struct instance_netdev {
@@ -257,6 +259,11 @@ jail_run(struct service_instance *in, char **argv)
 
 	if (jail->netns)
 		argv[argc++] = "-N";
+
+	if (jail->extroot) {
+		argv[argc++] = "-R";
+		argv[argc++] = jail->extroot;
+	}
 
 	blobmsg_list_for_each(&jail->mount, var) {
 		const char *type = blobmsg_data(var->data);
@@ -863,6 +870,11 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->netns = blobmsg_get_bool(tb[JAIL_ATTR_NETNS]);
 		jail->argc++;
 	}
+	if (tb[JAIL_ATTR_EXTROOT]) {
+		jail->extroot = strdup(blobmsg_get_string(tb[JAIL_ATTR_EXTROOT]));
+		jail->argc += 2;
+	}
+
 	if (tb[JAIL_ATTR_MOUNT]) {
 		struct blob_attr *cur;
 		int rem;
@@ -1139,6 +1151,7 @@ instance_free(struct service_instance *in)
 	free(in->config);
 	free(in->user);
 	free(in->group);
+	free(in->jail.extroot);
 	free(in->jail.name);
 	free(in->jail.hostname);
 	free(in->seccomp);
@@ -1262,6 +1275,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 			blobmsg_add_string(b, "name", in->jail.name);
 		if (in->jail.hostname)
 			blobmsg_add_string(b, "hostname", in->jail.hostname);
+		if (in->jail.extroot)
+			blobmsg_add_string(b, "extroot", in->jail.extroot);
 		blobmsg_add_u8(b, "procfs", in->jail.procfs);
 		blobmsg_add_u8(b, "sysfs", in->jail.sysfs);
 		blobmsg_add_u8(b, "ubus", in->jail.ubus);

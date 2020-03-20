@@ -32,6 +32,7 @@ struct jail {
 	bool netns;
 	char *name;
 	char *hostname;
+	char *extroot;
 	struct blobmsg_list mount;
 	int argc;
 };

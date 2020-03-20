@@ -40,7 +40,7 @@
 #include <libubus.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:N"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:"
 
 #define NAMESPACE_MOUNT		(1U << 0)
 #define NAMESPACE_IPC		(1U << 1)
@@ -58,6 +58,7 @@ static struct {
 	char *capabilities;
 	char *user;
 	char *group;
+	char *extroot;
 	int no_new_privs;
 	int namespace;
 	int procfs;
@@ -164,9 +165,16 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	if (mount("tmpfs", jail_root, "tmpfs", MS_NOATIME, "mode=0755")) {
-		ERROR("tmpfs mount failed %m\n");
-		return -1;
+	if (opts.extroot) {
+		if (mount(opts.extroot, jail_root, NULL, MS_BIND | MS_REC, NULL)) {
+			ERROR("extroot mount failed %m\n");
+			return -1;
+		}
+	} else {
+		if (mount("tmpfs", jail_root, "tmpfs", MS_NOATIME, "mode=0755")) {
+			ERROR("tmpfs mount failed %m\n");
+			return -1;
+		}
 	}
 
 	if (chdir(jail_root)) {
@@ -230,6 +238,7 @@ static char** build_envp(const char *seccomp)
 	static char preload_var[PATH_MAX];
 	static char seccomp_var[PATH_MAX];
 	static char debug_var[] = "LD_DEBUG=all";
+	static char container_var[] = "container=ujail";
 	const char *preload_lib = find_lib("libpreload-seccomp.so");
 	int count = 0;
 
@@ -243,6 +252,10 @@ static char** build_envp(const char *seccomp)
 		snprintf(preload_var, sizeof(preload_var), "LD_PRELOAD=%s", preload_lib);
 		envp[count++] = preload_var;
 	}
+
+	if (is_extroot)
+		envp[count++] = container_var;
+
 	if (debug > 1)
 		envp[count++] = debug_var;
 
@@ -269,6 +282,7 @@ static void usage(void)
 	fprintf(stderr, "  -U <name>\tuser to run jailed process\n");
 	fprintf(stderr, "  -G <name>\tgroup to run jailed process\n");
 	fprintf(stderr, "  -o\t\tremont jail root (/) read only\n");
+	fprintf(stderr, "  -R <dir>\texternal jail rootfs (system container)\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -437,6 +451,10 @@ int main(int argc, char **argv)
 			opts.namespace |= NAMESPACE_MOUNT;
 			opts.ronly = 1;
 			break;
+		case 'R':
+			opts.namespace |= NAMESPACE_MOUNT | NAMESPACE_UTS;
+			opts.extroot = optarg;
+			break;
 		case 's':
 			opts.namespace |= NAMESPACE_MOUNT;
 			opts.sysfs = 1;
@@ -502,14 +520,16 @@ int main(int argc, char **argv)
 
 	opts.jail_argv = &argv[optind];
 
-	if (opts.namespace && add_path_and_deps(*opts.jail_argv, 1, -1, 0)) {
-		ERROR("failed to load dependencies\n");
-		return -1;
-	}
+	if (!opts.extroot) {
+		if (opts.namespace && add_path_and_deps(*opts.jail_argv, 1, -1, 0)) {
+			ERROR("failed to load dependencies\n");
+			return -1;
+		}
 
-	if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
-		ERROR("failed to load libpreload-seccomp.so\n");
-		return -1;
+		if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
+			ERROR("failed to load libpreload-seccomp.so\n");
+			return -1;
+		}
 	}
 
 	if (opts.name)
@@ -537,8 +557,11 @@ int main(int argc, char **argv)
 			flags |= CLONE_NEWNS;
 			add_mount("/dev/full", 0, -1);
 			add_mount("/dev/null", 0, -1);
+			add_mount("/dev/random", 0, -1);
 			add_mount("/dev/urandom", 0, -1);
+			add_mount("/dev/tty", 0, -1);
 			add_mount("/dev/zero", 0, -1);
+			add_mount("/dev/console", 0, -1);
 
 			if (opts.user || opts.group) {
 				add_mount("/etc/passwd", 0, -1);
