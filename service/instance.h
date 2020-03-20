@@ -67,6 +67,8 @@ struct service_instance {
 	char *seccomp;
 	char *pidfile;
 	char *extroot;
+	char *overlaydir;
+	char *tmpoverlaysize;
 	int syslog_facility;
 	int exit_code;
 

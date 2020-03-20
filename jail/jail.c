@@ -40,7 +40,7 @@
 #include <libubus.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fF"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:"
 
 static struct {
 	char *name;
@@ -51,6 +51,8 @@ static struct {
 	char *user;
 	char *group;
 	char *extroot;
+	char *overlaydir;
+	char *tmpoverlaysize;
 	int no_new_privs;
 	int namespace;
 	int procfs;
@@ -147,9 +149,46 @@ int mount_bind(const char *root, const char *path, int readonly, int error) {
 	return _mount_bind(root, path, NULL, readonly, 0, error);
 }
 
+static int mount_overlay(char *jail_root, char *overlaydir) {
+	char *upperdir, *workdir, *optsstr;
+	const char mountoptsformat[] = "lowerdir=%s,upperdir=%s,workdir=%s";
+	int ret = -1;
+
+	if (asprintf(&upperdir, "%s%s", overlaydir, "/upper") < 0)
+		goto out;
+
+	if (asprintf(&workdir, "%s%s", overlaydir, "/work") < 0)
+		goto upper_printf;
+
+	if (asprintf(&optsstr, mountoptsformat, jail_root, upperdir, workdir) < 0)
+		goto work_printf;
+
+	if (mkdir_p(upperdir, 0755) || mkdir_p(workdir, 0755))
+		goto opts_printf;
+
+	DEBUG("mount -t overlay %s %s (%s)\n", jail_root, jail_root, optsstr);
+
+	if (mount(jail_root, jail_root, "overlay", MS_NOATIME, optsstr))
+		goto opts_printf;
+
+	ret = 0;
+
+opts_printf:
+	free(optsstr);
+work_printf:
+	free(workdir);
+upper_printf:
+	free(upperdir);
+out:
+	return ret;
+}
+
 static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
+	char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
+	char *overlaydir = NULL;
+
 	if (mkdtemp(jail_root) == NULL) {
 		ERROR("mkdtemp(%s) failed: %m\n", jail_root);
 		return -1;
@@ -172,6 +211,29 @@ static int build_jail_fs(void)
 			return -1;
 		}
 	}
+
+	if (opts.tmpoverlaysize) {
+		char mountoptsstr[] = "mode=0755,size=XXXXXXXX";
+
+		snprintf(mountoptsstr, sizeof(mountoptsstr),
+			 "mode=0755,size=%s", opts.tmpoverlaysize);
+		if (mkdtemp(tmpovdir) == NULL) {
+			ERROR("mkdtemp(%s) failed: %m\n", jail_root);
+			return -1;
+		}
+		if (mount("tmpfs", tmpovdir, "tmpfs", MS_NOATIME,
+			  mountoptsstr)) {
+			ERROR("failed to mount tmpfs for overlay (size=%s)\n", opts.tmpoverlaysize);
+			return -1;
+		}
+		overlaydir = tmpovdir;
+	}
+
+	if (opts.overlaydir)
+		overlaydir = opts.overlaydir;
+
+	if (overlaydir)
+		mount_overlay(jail_root, overlaydir);
 
 	if (chdir(jail_root)) {
 		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
@@ -209,7 +271,15 @@ static int build_jail_fs(void)
 	}
 
 	snprintf(dirbuf, sizeof(dirbuf), "/old%s", jail_root);
+	umount2(dirbuf, MNT_DETACH);
 	rmdir(dirbuf);
+	if (opts.tmpoverlaysize) {
+		char tmpdirbuf[sizeof(tmpovdir) + 4];
+		snprintf(tmpdirbuf, sizeof(tmpdirbuf), "/old%s", tmpovdir);
+		umount2(tmpdirbuf, MNT_DETACH);
+		rmdir(tmpdirbuf);
+	}
+
 	umount2("/old", MNT_DETACH);
 	rmdir("/old");
 
@@ -361,6 +431,8 @@ static void usage(void)
 	fprintf(stderr, "namespace jail options:\n");
 	fprintf(stderr, "  -h <hostname>\tchange the hostname of the jail\n");
 	fprintf(stderr, "  -N\t\tjail has network namespace\n");
+	fprintf(stderr, "  -f\t\tjail has user namespace\n");
+	fprintf(stderr, "  -F\t\tjail has cgroups namespace\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
 	fprintf(stderr, "  -w <file>\twriteable files that should be staged\n");
 	fprintf(stderr, "  -p\t\tjail has /proc\n");
@@ -371,6 +443,8 @@ static void usage(void)
 	fprintf(stderr, "  -G <name>\tgroup to run jailed process\n");
 	fprintf(stderr, "  -o\t\tremont jail root (/) read only\n");
 	fprintf(stderr, "  -R <dir>\texternal jail rootfs (system container)\n");
+	fprintf(stderr, "  -O <dir>\tdirectory for r/w overlayfs\n");
+	fprintf(stderr, "  -T <size>\tuse tmpfs r/w overlayfs with <size>\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -614,11 +688,22 @@ int main(int argc, char **argv)
 		case 'G':
 			opts.group = optarg;
 			break;
+		case 'O':
+			opts.overlaydir = optarg;
+			break;
+		case 'T':
+			opts.tmpoverlaysize = optarg;
+			break;
 		}
 	}
 
 	if (opts.namespace)
 		opts.namespace |= CLONE_NEWIPC | CLONE_NEWPID;
+
+	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
+		ERROR("size parameter too long: \"%s\"\n", opts.tmpoverlaysize);
+		return -1;
+	}
 
 	/* no <binary> param found */
 	if (argc - optind < 1) {
@@ -644,11 +729,11 @@ int main(int argc, char **argv)
 			ERROR("failed to load dependencies\n");
 			return -1;
 		}
+	}
 
-		if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
-			ERROR("failed to load libpreload-seccomp.so\n");
-			return -1;
-		}
+	if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
+		ERROR("failed to load libpreload-seccomp.so\n");
+		return -1;
 	}
 
 	if (opts.name)

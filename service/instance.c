@@ -63,6 +63,8 @@ enum {
 	INSTANCE_ATTR_TERMTIMEOUT,
 	INSTANCE_ATTR_FACILITY,
 	INSTANCE_ATTR_EXTROOT,
+	INSTANCE_ATTR_OVERLAYDIR,
+	INSTANCE_ATTR_TMPOVERLAYSIZE,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -91,6 +93,8 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_TERMTIMEOUT] = { "term_timeout", BLOBMSG_TYPE_INT32 },
 	[INSTANCE_ATTR_FACILITY] = { "facility", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_EXTROOT] = { "extroot", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_OVERLAYDIR] = { "overlaydir", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_TMPOVERLAYSIZE] = { "tmpoverlaysize", BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -273,6 +277,16 @@ jail_run(struct service_instance *in, char **argv)
 	if (in->extroot) {
 		argv[argc++] = "-R";
 		argv[argc++] = in->extroot;
+	}
+
+	if (in->overlaydir) {
+		argv[argc++] = "-O";
+		argv[argc++] = in->overlaydir;
+	}
+
+	if (in->tmpoverlaysize) {
+		argv[argc++] = "-T";
+		argv[argc++] = in->tmpoverlaysize;
 	}
 
 	blobmsg_list_for_each(&jail->mount, var) {
@@ -906,9 +920,14 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	if (in->group)
 		jail->argc += 2;
 
-	if (in->extroot) {
+	if (in->extroot)
 		jail->argc += 2;
-	}
+
+	if (in->overlaydir)
+		jail->argc += 2;
+
+	if (in->tmpoverlaysize)
+		jail->argc += 2;
 
 	if (in->no_new_privs)
 		jail->argc++;
@@ -1023,6 +1042,12 @@ instance_config_parse(struct service_instance *in)
 
 	if (tb[INSTANCE_ATTR_EXTROOT])
 		in->extroot = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_EXTROOT]));
+
+	if (tb[INSTANCE_ATTR_OVERLAYDIR])
+		in->overlaydir = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_OVERLAYDIR]));
+
+	if (tb[INSTANCE_ATTR_TMPOVERLAYSIZE])
+		in->tmpoverlaysize = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_TMPOVERLAYSIZE]));
 
 	if (tb[INSTANCE_ATTR_PIDFILE]) {
 		char *pidfile = blobmsg_get_string(tb[INSTANCE_ATTR_PIDFILE]);
@@ -1173,6 +1198,8 @@ instance_free(struct service_instance *in)
 	free(in->user);
 	free(in->group);
 	free(in->extroot);
+	free(in->overlaydir);
+	free(in->tmpoverlaysize);
 	free(in->jail.name);
 	free(in->jail.hostname);
 	free(in->seccomp);
@@ -1298,6 +1325,11 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 			blobmsg_add_string(b, "hostname", in->jail.hostname);
 		if (in->extroot)
 			blobmsg_add_string(b, "extroot", in->extroot);
+		if (in->overlaydir)
+			blobmsg_add_string(b, "overlaydir", in->overlaydir);
+		if (in->tmpoverlaysize)
+			blobmsg_add_string(b, "tmpoverlaysize", in->tmpoverlaysize);
+
 		blobmsg_add_u8(b, "procfs", in->jail.procfs);
 		blobmsg_add_u8(b, "sysfs", in->jail.sysfs);
 		blobmsg_add_u8(b, "ubus", in->jail.ubus);
