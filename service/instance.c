@@ -1323,12 +1323,6 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 			blobmsg_add_string(b, "name", in->jail.name);
 		if (in->jail.hostname)
 			blobmsg_add_string(b, "hostname", in->jail.hostname);
-		if (in->extroot)
-			blobmsg_add_string(b, "extroot", in->extroot);
-		if (in->overlaydir)
-			blobmsg_add_string(b, "overlaydir", in->overlaydir);
-		if (in->tmpoverlaysize)
-			blobmsg_add_string(b, "tmpoverlaysize", in->tmpoverlaysize);
 
 		blobmsg_add_u8(b, "procfs", in->jail.procfs);
 		blobmsg_add_u8(b, "sysfs", in->jail.sysfs);
@@ -1347,6 +1341,13 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 			blobmsg_close_table(b, e);
 		}
 	}
+
+	if (in->extroot)
+		blobmsg_add_string(b, "extroot", in->extroot);
+	if (in->overlaydir)
+		blobmsg_add_string(b, "overlaydir", in->overlaydir);
+	if (in->tmpoverlaysize)
+		blobmsg_add_string(b, "tmpoverlaysize", in->tmpoverlaysize);
 
 	if (verbose && in->trigger)
 		blobmsg_add_blob(b, in->trigger);
