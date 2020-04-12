@@ -109,6 +109,7 @@ enum {
 	JAIL_ATTR_NETNS,
 	JAIL_ATTR_USERNS,
 	JAIL_ATTR_CGROUPSNS,
+	JAIL_ATTR_CONSOLE,
 	JAIL_ATTR_REQUIREJAIL,
 	__JAIL_ATTR_MAX,
 };
@@ -125,6 +126,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_NETNS] = { "netns", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_USERNS] = { "userns", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_CGROUPSNS] = { "cgroupsns", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_CONSOLE] = { "console", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_REQUIREJAIL] = { "requirejail", BLOBMSG_TYPE_BOOL },
 };
 
@@ -273,6 +275,9 @@ jail_run(struct service_instance *in, char **argv)
 
 	if (jail->cgroupsns)
 		argv[argc++] = "-F";
+
+	if (jail->console)
+		argv[argc++] = "-y";
 
 	if (in->extroot) {
 		argv[argc++] = "-R";
@@ -453,6 +458,18 @@ instance_free_stdio(struct service_instance *in)
 		close(in->_stderr.fd.fd);
 		in->_stderr.fd.fd = -1;
 	}
+
+	if (in->console.fd.fd > -1) {
+		ustream_free(&in->console.stream);
+		close(in->console.fd.fd);
+		in->console.fd.fd = -1;
+	}
+
+	if (in->console_client.fd.fd > -1) {
+		ustream_free(&in->console_client.stream);
+		close(in->console_client.fd.fd);
+		in->console_client.fd.fd = -1;
+	}
 }
 
 void
@@ -568,6 +585,46 @@ instance_stdout(struct ustream *s, int bytes)
 {
 	instance_stdio(s, LOG_INFO,
 	               container_of(s, struct service_instance, _stdout.stream));
+}
+
+static void
+instance_console(struct ustream *s, int bytes)
+{
+	struct service_instance *in = container_of(s, struct service_instance, console.stream);
+	char *buf;
+	int len;
+
+	do {
+		buf = ustream_get_read_buf(s, &len);
+		if (!buf)
+			break;
+
+		ulog(LOG_INFO, "out: %s\n", buf);
+
+		/* test if console client is attached */
+		if (in->console_client.fd.fd > -1)
+			ustream_write(&in->console_client.stream, buf, len, false);
+
+		ustream_consume(s, len);
+	} while (1);
+}
+
+static void
+instance_console_client(struct ustream *s, int bytes)
+{
+	struct service_instance *in = container_of(s, struct service_instance, console_client.stream);
+	char *buf;
+	int len;
+
+	do {
+		buf = ustream_get_read_buf(s, &len);
+		if (!buf)
+			break;
+
+		ulog(LOG_INFO, "in: %s\n", buf);
+		ustream_write(&in->console.stream, buf, len, false);
+		ustream_consume(s, len);
+	} while (1);
 }
 
 static void
@@ -905,6 +962,10 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->cgroupsns = blobmsg_get_bool(tb[JAIL_ATTR_CGROUPSNS]);
 		jail->argc++;
 	}
+	if (tb[JAIL_ATTR_CONSOLE]) {
+		jail->console = blobmsg_get_bool(tb[JAIL_ATTR_CONSOLE]);
+		jail->argc++;
+	}
 
 	if (tb[JAIL_ATTR_MOUNT]) {
 		struct blob_attr *cur;
@@ -1232,6 +1293,14 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->_stderr.stream.string_data = true;
 	in->_stderr.stream.notify_read = instance_stderr;
 
+	in->console.fd.fd = -2;
+	in->console.stream.string_data = true;
+	in->console.stream.notify_read = instance_console;
+
+	in->console_client.fd.fd = -2;
+	in->console_client.stream.string_data = true;
+	in->console_client.stream.notify_read = instance_console_client;
+
 	blobmsg_list_init(&in->netdev, struct instance_netdev, node, instance_netdev_cmp);
 	blobmsg_list_init(&in->file, struct instance_file, node, instance_file_cmp);
 	blobmsg_list_simple_init(&in->env);
@@ -1335,6 +1404,7 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_add_u8(b, "netns", in->jail.netns);
 		blobmsg_add_u8(b, "userns", in->jail.userns);
 		blobmsg_add_u8(b, "cgroupsns", in->jail.cgroupsns);
+		blobmsg_add_u8(b, "console", (in->console.fd.fd > -1));
 		blobmsg_close_table(b, r);
 		if (!avl_is_empty(&in->jail.mount.avl)) {
 			struct blobmsg_list_node *var;

@@ -32,6 +32,7 @@ struct jail {
 	bool netns;
 	bool userns;
 	bool cgroupsns;
+	bool console;
 	char *name;
 	char *hostname;
 	struct blobmsg_list mount;
@@ -82,6 +83,8 @@ struct service_instance {
 	struct uloop_timeout timeout;
 	struct ustream_fd _stdout;
 	struct ustream_fd _stderr;
+	struct ustream_fd console;
+	struct ustream_fd console_client;
 
 	struct blob_attr *command;
 	struct blob_attr *trigger;

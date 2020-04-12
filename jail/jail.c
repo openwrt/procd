@@ -40,7 +40,7 @@
 #include <libubus.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:E"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:Ey"
 
 static struct {
 	char *name;
@@ -58,6 +58,7 @@ static struct {
 	int procfs;
 	int ronly;
 	int sysfs;
+	int console;
 	int pw_uid;
 	int pw_gid;
 	int gr_gid;
@@ -70,6 +71,8 @@ extern int pivot_root(const char *new_root, const char *put_old);
 int debug = 0;
 
 static char child_stack[STACK_SIZE];
+
+int console_fd;
 
 static int mkdir_p(char *dir, mode_t mask)
 {
@@ -184,11 +187,79 @@ out:
 	return ret;
 }
 
+static void pass_console(int console_fd)
+{
+	struct ubus_context *ctx = ubus_connect(NULL);
+	static struct blob_buf req;
+	uint32_t id;
+
+	if (!ctx)
+		return;
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "name", opts.name);
+
+	if (ubus_lookup_id(ctx, "service", &id) ||
+	    ubus_invoke_fd(ctx, id, "console_set", req.head, NULL, NULL, 3000, console_fd))
+		INFO("ubus request failed\n");
+	else
+		close(console_fd);
+
+	blob_buf_free(&req);
+	ubus_free(ctx);
+}
+
+static int create_dev_console(const char *jail_root)
+{
+	char *console_fname;
+	char dev_console_path[PATH_MAX];
+	int slave_console_fd;
+
+	/* Open UNIX/98 virtual console */
+	console_fd = posix_openpt(O_RDWR | O_NOCTTY);
+	if (console_fd == -1)
+		return -1;
+
+	console_fname = ptsname(console_fd);
+	DEBUG("got console fd %d and PTS client name %s\n", console_fd, console_fname);
+	if (!console_fname)
+		goto no_console;
+
+	grantpt(console_fd);
+	unlockpt(console_fd);
+
+	/* pass PTY master to procd */
+	pass_console(console_fd);
+
+	/* mount-bind PTY slave to /dev/console in jail */
+	snprintf(dev_console_path, sizeof(dev_console_path), "%s/dev/console", jail_root);
+	close(creat(dev_console_path, 0620));
+
+	if (mount(console_fname, dev_console_path, NULL, MS_BIND, NULL))
+		goto no_console;
+
+	/* use PTY slave for stdio */
+	slave_console_fd = open(console_fname, O_RDWR); /* | O_NOCTTY */
+	dup2(slave_console_fd, 0);
+	dup2(slave_console_fd, 1);
+	dup2(slave_console_fd, 2);
+	close(slave_console_fd);
+
+	INFO("using guest console %s\n", console_fname);
+
+	return 0;
+
+no_console:
+	close(console_fd);
+	return 1;
+}
+
 static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
 	char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
 	char tmpdevdir[] = "/tmp/ujail-XXXXXX/dev";
+	char tmpdevptsdir[] = "/tmp/ujail-XXXXXX/dev/pts";
 	char *overlaydir = NULL;
 
 	if (mkdtemp(jail_root) == NULL) {
@@ -246,6 +317,14 @@ static int build_jail_fs(void)
 	mkdir_p(tmpdevdir, 0755);
 	if (mount(NULL, tmpdevdir, "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "size=1M"))
 		return -1;
+
+	snprintf(tmpdevptsdir, sizeof(tmpdevptsdir), "%s/dev/pts", jail_root);
+	mkdir_p(tmpdevptsdir, 0755);
+	if (mount(NULL, tmpdevptsdir, "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, NULL))
+		return -1;
+
+	if (opts.console)
+		create_dev_console(jail_root);
 
 	if (mount_all(jail_root)) {
 		ERROR("mount_all() failed\n");
@@ -468,6 +547,7 @@ static void usage(void)
 	fprintf(stderr, "  -O <dir>\tdirectory for r/w overlayfs\n");
 	fprintf(stderr, "  -T <size>\tuse tmpfs r/w overlayfs with <size>\n");
 	fprintf(stderr, "  -E\t\tfail if jail cannot be setup\n");
+	fprintf(stderr, "  -y\t\tprovide jail console\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -485,7 +565,6 @@ static int exec_jail(void *pipes_ptr)
 
 	close(pipes[0]);
 	close(pipes[3]);
-
 
 	buf[0] = 'i';
 	if (write(pipes[1], buf, 1) < 1) {
@@ -720,6 +799,9 @@ int main(int argc, char **argv)
 		case 'E':
 			opts.require_jail = 1;
 			break;
+		case 'y':
+			opts.console = 1;
+			break;
 		}
 	}
 
@@ -788,9 +870,9 @@ int main(int argc, char **argv)
 			add_mount("/dev/null", 0, -1);
 			add_mount("/dev/random", 0, -1);
 			add_mount("/dev/urandom", 0, -1);
-			add_mount("/dev/tty", 0, -1);
 			add_mount("/dev/zero", 0, -1);
-			add_mount("/dev/console", 0, -1);
+			add_mount("/dev/ptmx", 0, -1);
+			add_mount("/dev/tty", 0, -1);
 
 			if (!opts.extroot && (opts.user || opts.group)) {
 				add_mount("/etc/passwd", 0, -1);

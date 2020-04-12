@@ -274,6 +274,17 @@ static const struct blobmsg_policy get_data_policy[] = {
 	[DATA_TYPE] = { "type", BLOBMSG_TYPE_STRING },
 };
 
+enum {
+	SERVICE_CONSOLE_NAME,
+	SERVICE_CONSOLE_INSTANCE,
+	__SERVICE_CONSOLE_MAX,
+};
+
+static const struct blobmsg_policy service_console_policy[__SERVICE_CONSOLE_MAX] = {
+	[SERVICE_CONSOLE_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[SERVICE_CONSOLE_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+};
+
 static int
 service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		   struct ubus_request_data *req, const char *method,
@@ -672,6 +683,64 @@ service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+static int
+service_handle_console(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	bool attach = !strcmp(method, "console_attach");
+	struct blob_attr *tb[__SERVICE_CONSOLE_MAX];
+	struct service *s;
+	struct service_instance *in;
+	int console_fd = -1;
+
+	console_fd = ubus_request_get_caller_fd(req);
+	if (console_fd < 0)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (!msg)
+		goto err_console_fd;
+
+	blobmsg_parse(service_console_policy, __SERVICE_CONSOLE_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
+	if (!tb[SERVICE_CONSOLE_NAME])
+		goto err_console_fd;
+
+	s = avl_find_element(&services, blobmsg_data(tb[SERVICE_CONSOLE_NAME]), s, avl);
+	if (!s)
+		goto err_console_fd;
+
+	if (tb[SERVICE_CONSOLE_INSTANCE]) {
+		in = vlist_find(&s->instances, blobmsg_data(tb[SERVICE_CONSOLE_INSTANCE]), in, node);
+	} else {
+		/* use first element in instances list */
+		vlist_for_each_element(&s->instances, in, node)
+			break;
+	}
+	if (!in)
+		goto err_console_fd;
+
+	if (attach) {
+		if (in->console.fd.fd < 0) {
+			close(console_fd);
+			return UBUS_STATUS_NOT_SUPPORTED;
+		}
+
+		/* close and replace existing attached console */
+		if (in->console_client.fd.fd > -1)
+			close(in->console_client.fd.fd);
+
+		ustream_fd_init(&in->console_client, console_fd);
+	} else {
+		ustream_fd_init(&in->console, console_fd);
+	}
+
+	return UBUS_STATUS_OK;
+err_console_fd:
+	close(console_fd);
+	return UBUS_STATUS_INVALID_ARGUMENT;
+}
+
+
 static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
@@ -684,6 +753,8 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("validate", service_handle_validate, validate_policy),
 	UBUS_METHOD("get_data", service_get_data, get_data_policy),
 	UBUS_METHOD("state", service_handle_state, service_state_attrs),
+	UBUS_METHOD("console_set", service_handle_console, service_console_policy),
+	UBUS_METHOD("console_attach", service_handle_console, service_console_policy),
 };
 
 static struct ubus_object_type main_object_type =
