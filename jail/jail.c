@@ -286,6 +286,19 @@ static int build_jail_fs(void)
 	if (opts.procfs) {
 		mkdir("/proc", 0755);
 		mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
+		/*
+		 * make /proc/sys read-only while keeping read-write to
+		 * /proc/sys/net if CLONE_NEWNET is set.
+		 */
+		if (opts.namespace & CLONE_NEWNET)
+			mount("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, 0);
+
+		mount("/proc/sys", "/proc/sys", NULL, MS_BIND, 0);
+		mount(NULL, "/proc/sys", NULL, MS_REMOUNT | MS_RDONLY, 0);
+		mount(NULL, "/proc", NULL, MS_REMOUNT, 0);
+
+		if (opts.namespace & CLONE_NEWNET)
+			mount("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, 0);
 	}
 	if (opts.sysfs) {
 		mkdir("/sys", 0755);
