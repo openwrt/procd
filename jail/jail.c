@@ -502,7 +502,7 @@ static int exec_jail(void *pipes_ptr)
 		exit(EXIT_FAILURE);
 	}
 
-	if (opts.namespace && build_jail_fs()) {
+	if ((opts.namespace & CLONE_NEWNS) && build_jail_fs()) {
 		ERROR("failed to build jail fs\n");
 		exit(EXIT_FAILURE);
 	}
