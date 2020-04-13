@@ -254,6 +254,8 @@ static int build_jail_fs(void)
 		snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
 		mkdir_p(jailetc, 0755);
 		snprintf(jaillink, PATH_MAX, "%s/etc/resolv.conf", jail_root);
+		if (overlaydir)
+			unlink(jaillink);
 		symlink("../tmp/resolv.conf.d/resolv.conf.auto", jaillink);
 	}
 
