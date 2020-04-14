@@ -187,6 +187,7 @@ static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
 	char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
+	char tmpdevdir[] = "/tmp/ujail-XXXXXX/dev";
 	char *overlaydir = NULL;
 
 	if (mkdtemp(jail_root) == NULL) {
@@ -239,6 +240,11 @@ static int build_jail_fs(void)
 		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
 		return -1;
 	}
+
+	snprintf(tmpdevdir, sizeof(tmpdevdir), "%s/dev", jail_root);
+	mkdir_p(tmpdevdir, 0755);
+	if (mount(NULL, tmpdevdir, "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "size=1M"))
+		return -1;
 
 	if (mount_all(jail_root)) {
 		ERROR("mount_all() failed\n");
