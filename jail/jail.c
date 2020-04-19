@@ -790,6 +790,11 @@ int main(int argc, char **argv)
 				add_mount("/etc/group", 0, -1);
 			}
 
+#if defined(__GLIBC__)
+			if (!opts.extroot)
+				add_mount("/etc/nsswitch.conf", 0, -1);
+#endif
+
 			if (!(opts.namespace & CLONE_NEWNET)) {
 				add_mount("/etc/resolv.conf", 0, -1);
 			}
