@@ -289,6 +289,9 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = in->tmpoverlaysize;
 	}
 
+	if (in->require_jail)
+		argv[argc++] = "-E";
+
 	blobmsg_list_for_each(&jail->mount, var) {
 		const char *type = blobmsg_data(var->data);
 

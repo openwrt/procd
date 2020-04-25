@@ -40,7 +40,7 @@
 #include <libubus.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:E"
 
 static struct {
 	char *name;
@@ -61,6 +61,7 @@ static struct {
 	int pw_uid;
 	int pw_gid;
 	int gr_gid;
+	int require_jail;
 } opts;
 
 
@@ -466,6 +467,7 @@ static void usage(void)
 	fprintf(stderr, "  -R <dir>\texternal jail rootfs (system container)\n");
 	fprintf(stderr, "  -O <dir>\tdirectory for r/w overlayfs\n");
 	fprintf(stderr, "  -T <size>\tuse tmpfs r/w overlayfs with <size>\n");
+	fprintf(stderr, "  -E\t\tfail if jail cannot be setup\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -715,6 +717,9 @@ int main(int argc, char **argv)
 		case 'T':
 			opts.tmpoverlaysize = optarg;
 			break;
+		case 'E':
+			opts.require_jail = 1;
+			break;
 		}
 	}
 
@@ -754,7 +759,8 @@ int main(int argc, char **argv)
 
 	if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
 		ERROR("failed to load libpreload-seccomp.so\n");
-		return -1;
+		if (opts.require_jail)
+			return -1;
 	}
 
 	if (opts.name)
