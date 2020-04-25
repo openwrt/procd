@@ -759,6 +759,7 @@ int main(int argc, char **argv)
 
 	if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
 		ERROR("failed to load libpreload-seccomp.so\n");
+		opts.seccomp = 0;
 		if (opts.require_jail)
 			return -1;
 	}
