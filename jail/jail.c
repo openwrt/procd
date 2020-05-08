@@ -841,6 +841,10 @@ int main(int argc, char **argv)
 		}
 
 		if (opts.namespace & CLONE_NEWNET) {
+			if (!opts.name) {
+				ERROR("netns needs a named jail\n");
+				return -1;
+			}
 			netns_fd = netns_open_pid(jail_process.pid);
 			netns_updown(jail_process.pid, true);
 		}
