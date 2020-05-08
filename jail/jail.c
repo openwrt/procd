@@ -775,7 +775,7 @@ int main(int argc, char **argv)
 
 		if (!sigismember(&sigmask, i))
 			continue;
-		if ((i == SIGCHLD) || (i == SIGPIPE))
+		if ((i == SIGCHLD) || (i == SIGPIPE) || (i == SIGSEGV))
 			continue;
 
 		s.sa_handler = jail_handle_signal;
