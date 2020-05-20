@@ -21,6 +21,7 @@
 #include "../utils/utils.h"
 
 extern struct avl_tree services;
+extern struct avl_tree containers;
 
 struct vrule {
 	struct avl_node avl;

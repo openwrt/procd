@@ -199,7 +199,7 @@ static void pass_console(int console_fd)
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", opts.name);
 
-	if (ubus_lookup_id(ctx, "service", &id) ||
+	if (ubus_lookup_id(ctx, "container", &id) ||
 	    ubus_invoke_fd(ctx, id, "console_set", req.head, NULL, NULL, 3000, console_fd))
 		INFO("ubus request failed\n");
 	else

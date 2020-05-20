@@ -56,14 +56,14 @@ static inline int setup_tios(int fd, struct termios *oldtios)
 
 
 
-#define OPT_ARGS	"i:s:"
+#define OPT_ARGS	"i:c:"
 
 static struct ustream_fd cufd;
 static struct ustream_fd lufd;
 
 static void usage()
 {
-	fprintf(stderr, "ujail-console -s <service> [-i <instance>]\n");
+	fprintf(stderr, "ujail-console -c <container> [-i <instance>]\n");
 	exit(1);
 }
 
@@ -115,7 +115,7 @@ int main(int argc, char **argv)
 	struct ubus_context *ctx;
 	uint32_t id;
 	static struct blob_buf req;
-	char *service_name = NULL, *instance_name = NULL;
+	char *container_name = NULL, *instance_name = NULL;
 	int client_fd, server_fd, tty_fd;
 	struct termios oldtermios;
 	int ch;
@@ -125,15 +125,15 @@ int main(int argc, char **argv)
 		case 'i':
 			instance_name = optarg;
 			break;
-		case 's':
-			service_name = optarg;
+		case 'c':
+			container_name = optarg;
 			break;
 		default:
 			usage();
 		}
 	}
 
-	if (!service_name)
+	if (!container_name)
 		usage();
 
 	ctx = ubus_connect(NULL);
@@ -166,11 +166,11 @@ int main(int argc, char **argv)
 
 	/* register server-side with procd */
 	blob_buf_init(&req, 0);
-	blobmsg_add_string(&req, "name", service_name);
+	blobmsg_add_string(&req, "name", container_name);
 	if (instance_name)
 		blobmsg_add_string(&req, "instance", instance_name);
 
-	if (ubus_lookup_id(ctx, "service", &id) ||
+	if (ubus_lookup_id(ctx, "container", &id) ||
 	    ubus_invoke_fd(ctx, id, "console_attach", req.head, NULL, NULL, 3000, server_fd)) {
 		fprintf(stderr, "ubus request failed\n");
 		close(server_fd);

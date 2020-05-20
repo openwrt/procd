@@ -12,6 +12,10 @@
  * GNU General Public License for more details.
  */
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <libubox/blobmsg_json.h>
 #include <libubox/avl-cmp.h>
 
@@ -23,6 +27,7 @@
 #include "../rcS.h"
 
 AVL_TREE(services, avl_strcmp, false, NULL);
+AVL_TREE(containers, avl_strcmp, false, NULL);
 static struct blob_buf b;
 static struct ubus_context *ctx;
 static struct ubus_object main_object;
@@ -172,14 +177,16 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 	return 0;
 }
 
+static void _service_stopped(struct service *s, bool container);
+
 static void
-service_delete(struct service *s)
+service_delete(struct service *s, bool container)
 {
 	blobmsg_list_free(&s->data_blob);
 	free(s->data);
 	vlist_flush_all(&s->instances);
 	s->deleted = true;
-	service_stopped(s);
+	_service_stopped(s, container);
 }
 
 enum {
@@ -275,15 +282,20 @@ static const struct blobmsg_policy get_data_policy[] = {
 };
 
 enum {
-	SERVICE_CONSOLE_NAME,
-	SERVICE_CONSOLE_INSTANCE,
-	__SERVICE_CONSOLE_MAX,
+	CONTAINER_CONSOLE_NAME,
+	CONTAINER_CONSOLE_INSTANCE,
+	__CONTAINER_CONSOLE_MAX,
 };
 
-static const struct blobmsg_policy service_console_policy[__SERVICE_CONSOLE_MAX] = {
-	[SERVICE_CONSOLE_NAME] = { "name", BLOBMSG_TYPE_STRING },
-	[SERVICE_CONSOLE_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+static const struct blobmsg_policy container_console_policy[__CONTAINER_CONSOLE_MAX] = {
+	[CONTAINER_CONSOLE_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[CONTAINER_CONSOLE_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
 };
+
+static inline bool is_container_obj(struct ubus_object *obj)
+{
+	return (obj && (strcmp(obj->name, "container") == 0));
+}
 
 static int
 service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
@@ -293,6 +305,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *tb[__SERVICE_SET_MAX], *cur;
 	struct service *s = NULL;
 	const char *name;
+	bool container = is_container_obj(obj);
 	bool add = !strcmp(method, "add");
 	int ret;
 
@@ -303,7 +316,11 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	name = blobmsg_data(cur);
 
-	s = avl_find_element(&services, name, s, avl);
+	if (container)
+		s = avl_find_element(&containers, name, s, avl);
+	else
+		s = avl_find_element(&services, name, s, avl);
+
 	if (s) {
 		DEBUG(2, "Update service %s\n", name);
 		return service_update(s, tb, add);
@@ -318,10 +335,15 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	if (ret)
 		return ret;
 
-	avl_insert(&services, &s->avl);
+	if (container) {
+		avl_insert(&containers, &s->avl);
 
-	service_event("service.start", s->name, NULL);
+		service_event("container.start", s->name, NULL);
+	} else {
+		avl_insert(&services, &s->avl);
 
+		service_event("service.start", s->name, NULL);
+	}
 	return 0;
 }
 
@@ -366,6 +388,8 @@ service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 	struct service *s;
 	const char *name = NULL;
 	bool verbose = false;
+	bool container = is_container_obj(obj);
+	const struct avl_tree *tree = container?&containers:&services;
 
 	blobmsg_parse(service_list_attrs, __SERVICE_LIST_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
@@ -375,7 +399,7 @@ service_handle_list(struct ubus_context *ctx, struct ubus_object *obj,
 		name = blobmsg_get_string(tb[SERVICE_LIST_ATTR_NAME]);
 
 	blob_buf_init(&b, 0);
-	avl_for_each_element(&services, s, avl) {
+	avl_for_each_element(tree, s, avl) {
 		if (name && strcmp(s->name, name) != 0)
 			continue;
 
@@ -395,6 +419,7 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *tb[__SERVICE_DEL_ATTR_MAX], *cur;
 	struct service *s;
 	struct service_instance *in;
+	bool container = is_container_obj(obj);
 
 	blobmsg_parse(service_del_attrs, __SERVICE_DEL_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
@@ -402,13 +427,17 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!cur)
 		return UBUS_STATUS_NOT_FOUND;
 
-	s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+	if (container)
+		s = avl_find_element(&containers, blobmsg_data(cur), s, avl);
+	else
+		s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+
 	if (!s)
 		return UBUS_STATUS_NOT_FOUND;
 
 	cur = tb[SERVICE_DEL_ATTR_INSTANCE];
 	if (!cur) {
-		service_delete(s);
+		service_delete(s, container);
 		return 0;
 	}
 
@@ -446,6 +475,7 @@ service_handle_signal(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *tb[__SERVICE_SIGNAL_ATTR_MAX], *cur;
 	struct service *s;
 	struct service_instance *in;
+	bool container = is_container_obj(obj);
 	int sig = SIGHUP;
 	int rv = 0;
 
@@ -459,7 +489,11 @@ service_handle_signal(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!cur)
 		return UBUS_STATUS_NOT_FOUND;
 
-	s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+	if (container)
+		s = avl_find_element(&containers, blobmsg_data(cur), s, avl);
+	else
+		s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+
 	if (!s)
 		return UBUS_STATUS_NOT_FOUND;
 
@@ -488,6 +522,7 @@ service_handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *tb[__SERVICE_STATE_ATTR_MAX];
 	struct service *s;
 	struct service_instance *in;
+	bool container = is_container_obj(obj);
 	int spawn;
 
 	blobmsg_parse(service_state_attrs, __SERVICE_STATE_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
@@ -498,7 +533,11 @@ service_handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!tb[SERVICE_STATE_ATTR_NAME])
 		return UBUS_STATUS_NOT_FOUND;
 
-	s = avl_find_element(&services, blobmsg_data(tb[SERVICE_STATE_ATTR_NAME]), s, avl);
+	if (container)
+		s = avl_find_element(&containers, blobmsg_data(tb[SERVICE_STATE_ATTR_NAME]), s, avl);
+	else
+		s = avl_find_element(&services, blobmsg_data(tb[SERVICE_STATE_ATTR_NAME]), s, avl);
+
 	if (!s)
 		return UBUS_STATUS_NOT_FOUND;
 
@@ -522,6 +561,7 @@ service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	struct blob_attr *tb[__SERVICE_ATTR_MAX], *cur;
 	struct service *s;
+	bool container = is_container_obj(obj);
 
 	blobmsg_parse(service_attrs, __SERVICE_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
@@ -529,7 +569,11 @@ service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!cur)
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+	if (container)
+		s = avl_find_element(&containers, blobmsg_data(cur), s, avl);
+	else
+		s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+
 	if (!s)
 		return UBUS_STATUS_NOT_FOUND;
 
@@ -684,12 +728,12 @@ service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
 }
 
 static int
-service_handle_console(struct ubus_context *ctx, struct ubus_object *obj,
-			struct ubus_request_data *req, const char *method,
-			struct blob_attr *msg)
+container_handle_console(struct ubus_context *ctx, struct ubus_object *obj,
+			 struct ubus_request_data *req, const char *method,
+			 struct blob_attr *msg)
 {
 	bool attach = !strcmp(method, "console_attach");
-	struct blob_attr *tb[__SERVICE_CONSOLE_MAX];
+	struct blob_attr *tb[__CONTAINER_CONSOLE_MAX];
 	struct service *s;
 	struct service_instance *in;
 	int console_fd = -1;
@@ -701,16 +745,16 @@ service_handle_console(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!msg)
 		goto err_console_fd;
 
-	blobmsg_parse(service_console_policy, __SERVICE_CONSOLE_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
-	if (!tb[SERVICE_CONSOLE_NAME])
+	blobmsg_parse(container_console_policy, __CONTAINER_CONSOLE_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
+	if (!tb[CONTAINER_CONSOLE_NAME])
 		goto err_console_fd;
 
-	s = avl_find_element(&services, blobmsg_data(tb[SERVICE_CONSOLE_NAME]), s, avl);
+	s = avl_find_element(&containers, blobmsg_data(tb[CONTAINER_CONSOLE_NAME]), s, avl);
 	if (!s)
 		goto err_console_fd;
 
-	if (tb[SERVICE_CONSOLE_INSTANCE]) {
-		in = vlist_find(&s->instances, blobmsg_data(tb[SERVICE_CONSOLE_INSTANCE]), in, node);
+	if (tb[CONTAINER_CONSOLE_INSTANCE]) {
+		in = vlist_find(&s->instances, blobmsg_data(tb[CONTAINER_CONSOLE_INSTANCE]), in, node);
 	} else {
 		/* use first element in instances list */
 		vlist_for_each_element(&s->instances, in, node)
@@ -753,8 +797,6 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("validate", service_handle_validate, validate_policy),
 	UBUS_METHOD("get_data", service_get_data, get_data_policy),
 	UBUS_METHOD("state", service_handle_state, service_state_attrs),
-	UBUS_METHOD("console_set", service_handle_console, service_console_policy),
-	UBUS_METHOD("console_attach", service_handle_console, service_console_policy),
 };
 
 static struct ubus_object_type main_object_type =
@@ -797,9 +839,19 @@ service_start_early(char *name, char *cmdline)
 
 void service_stopped(struct service *s)
 {
+	_service_stopped(s, false);
+}
+
+static void _service_stopped(struct service *s, bool container)
+{
 	if (s->deleted && avl_is_empty(&s->instances.avl)) {
-		service_event("service.stop", s->name, NULL);
-		avl_delete(&services, &s->avl);
+		if (container) {
+			service_event("container.stop", s->name, NULL);
+			avl_delete(&containers, &s->avl);
+		} else {
+			service_event("service.stop", s->name, NULL);
+			avl_delete(&services, &s->avl);
+		}
 		trigger_del(s);
 		service_validate_del(s);
 		free(s->trigger);
@@ -812,8 +864,34 @@ void service_event(const char *type, const char *service, const char *instance)
 	ubus_event_bcast(type, "service", service, "instance", instance);
 }
 
+static struct ubus_method container_object_methods[] = {
+	UBUS_METHOD("set", service_handle_set, service_set_attrs),
+	UBUS_METHOD("add", service_handle_set, service_set_attrs),
+	UBUS_METHOD("list", service_handle_list, service_list_attrs),
+	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
+	UBUS_METHOD("signal", service_handle_signal, service_signal_attrs),
+	UBUS_METHOD("state", service_handle_state, service_state_attrs),
+	UBUS_METHOD("console_set", container_handle_console, container_console_policy),
+	UBUS_METHOD("console_attach", container_handle_console, container_console_policy),
+};
+
+static struct ubus_object_type container_object_type =
+	UBUS_OBJECT_TYPE("container", container_object_methods);
+
+static struct ubus_object container_object = {
+	.name = "container",
+	.type = &container_object_type,
+	.methods = container_object_methods,
+	.n_methods = ARRAY_SIZE(container_object_methods),
+};
+
 void ubus_init_service(struct ubus_context *_ctx)
 {
+	struct stat statbuf;
+
 	ctx = _ctx;
 	ubus_add_object(ctx, &main_object);
+
+	if (!stat("/sbin/ujail", &statbuf))
+		ubus_add_object(ctx, &container_object);
 }
