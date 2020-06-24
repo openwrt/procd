@@ -46,6 +46,10 @@
 #include <libubox/uloop.h>
 #include <libubus.h>
 
+#ifndef CLONE_NEWCGROUP
+#define CLONE_NEWCGROUP 0x02000000
+#endif
+
 #define STACK_SIZE	(1024 * 1024)
 #define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:EyJ:"
 

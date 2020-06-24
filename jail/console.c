@@ -11,6 +11,10 @@
  * GNU General Public License for more details.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdlib.h>
 #include <fcntl.h>
 #include <libubox/ustream.h>

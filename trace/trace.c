@@ -33,6 +33,11 @@
 #define PTRACE_EVENT_STOP 128
 #endif
 
+#ifndef PTRACE_EVENT_SECCOMP
+/* undefined with uClibc-ng */
+#define PTRACE_EVENT_SECCOMP 7
+#endif
+
 #include <libubox/ulog.h>
 #include <libubox/uloop.h>
 #include <libubox/blobmsg.h>
