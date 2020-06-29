@@ -70,14 +70,10 @@ early_mounts(void)
 	}
 
 	early_console("/dev/console");
-	if (mount_zram_on_tmp()) {
-		mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, "mode=01777");
-		mkdir("/tmp/shm", 01777);
-	} else {
-		mkdir("/tmp/shm", 01777);
-		mount("tmpfs", "/tmp/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME,
-				"mode=01777");
-	}
+
+	mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, "mode=01777");
+	mkdir("/tmp/shm", 01777);
+
 	mkdir("/tmp/run", 0755);
 	mkdir("/tmp/lock", 0755);
 	mkdir("/tmp/state", 0755);

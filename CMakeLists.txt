@@ -42,11 +42,6 @@ IF(EARLY_PATH)
   ADD_DEFINITIONS(-DEARLY_PATH="${EARLY_PATH}")
 ENDIF()
 
-IF(ZRAM_TMPFS)
-  ADD_DEFINITIONS(-DZRAM_TMPFS)
-  SET(SOURCES_ZRAM initd/zram.c)
-ENDIF()
-
 IF(SELINUX)
   include(FindPkgConfig)
   pkg_search_module(SELINUX REQUIRED libselinux)
@@ -68,7 +63,7 @@ IF(DISABLE_INIT)
 ADD_DEFINITIONS(-DDISABLE_INIT)
 ELSE()
 ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c sysupgrade.c watchdog.c
-	utils/utils.c ${SOURCES_ZRAM})
+	utils/utils.c)
 TARGET_INCLUDE_DIRECTORIES(init PUBLIC ${SELINUX_INCLUDE_DIRS})
 TARGET_LINK_LIBRARIES(init ${LIBS} ${SELINUX_LIBRARIES})
 INSTALL(TARGETS init

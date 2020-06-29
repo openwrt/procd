@@ -26,11 +26,4 @@ void preinit(void);
 void early(void);
 int mkdev(const char *progname, int progmode);
 
-#ifdef ZRAM_TMPFS
-int mount_zram_on_tmp(void);
-#else
-static inline int mount_zram_on_tmp(void) {
-	return -ENOSYS;
-}
-#endif
 #endif
