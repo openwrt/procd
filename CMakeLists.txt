@@ -120,6 +120,12 @@ TARGET_LINK_LIBRARIES(ujail-console ${ubox} ${ubus} ${blobmsg_json})
 INSTALL(TARGETS ujail-console
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
+
+ADD_EXECUTABLE(uxc uxc.c)
+TARGET_LINK_LIBRARIES(uxc ${ubox} ${ubus} ${blobmsg_json})
+INSTALL(TARGETS uxc
+	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
 endif()
 
 IF(UTRACE_SUPPORT)
