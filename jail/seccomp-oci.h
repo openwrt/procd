@@ -15,12 +15,10 @@
 
 #include <linux/filter.h>
 
-#ifdef SECCOMP_SUPPORT
 struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg);
 int applyOCIlinuxseccomp(struct sock_fprog *prog);
-#else
 
-
+#ifndef SECCOMP_SUPPORT
 struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg) {
 	return NULL;
 }
