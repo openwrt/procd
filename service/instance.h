@@ -70,6 +70,7 @@ struct service_instance {
 	char *extroot;
 	char *overlaydir;
 	char *tmpoverlaysize;
+	char *bundle;
 	int syslog_facility;
 	int exit_code;
 

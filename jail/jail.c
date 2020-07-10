@@ -28,6 +28,7 @@
 #include <libgen.h>
 #include <sched.h>
 #include <linux/limits.h>
+#include <linux/filter.h>
 #include <signal.h>
 
 #include "capabilities.h"
@@ -35,24 +36,36 @@
 #include "fs.h"
 #include "jail.h"
 #include "log.h"
+#include "seccomp-oci.h"
 
+#include <libubox/utils.h>
+#include <libubox/blobmsg.h>
+#include <libubox/blobmsg_json.h>
+#include <libubox/list.h>
+#include <libubox/vlist.h>
 #include <libubox/uloop.h>
 #include <libubus.h>
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:Ey"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:EyJ:"
 
 static struct {
 	char *name;
 	char *hostname;
 	char **jail_argv;
+	char *cwd;
 	char *seccomp;
+	struct sock_fprog *ociseccomp;
 	char *capabilities;
+	struct jail_capset capset;
 	char *user;
 	char *group;
 	char *extroot;
 	char *overlaydir;
 	char *tmpoverlaysize;
+	char **envp;
+	char *uidmap;
+	char *gidmap;
 	int no_new_privs;
 	int namespace;
 	int procfs;
@@ -65,6 +78,7 @@ static struct {
 	int require_jail;
 } opts;
 
+static struct blob_buf ocibuf;
 
 extern int pivot_root(const char *new_root, const char *put_old);
 
@@ -154,9 +168,9 @@ int mount_bind(const char *root, const char *path, int readonly, int error) {
 }
 
 static int mount_overlay(char *jail_root, char *overlaydir) {
-	char *upperdir, *workdir, *optsstr;
+	char *upperdir, *workdir, *optsstr, *upperetc, *upperresolvconf;
 	const char mountoptsformat[] = "lowerdir=%s,upperdir=%s,workdir=%s";
-	int ret = -1;
+	int ret = -1, fd;
 
 	if (asprintf(&upperdir, "%s%s", overlaydir, "/upper") < 0)
 		goto out;
@@ -170,6 +184,31 @@ static int mount_overlay(char *jail_root, char *overlaydir) {
 	if (mkdir_p(upperdir, 0755) || mkdir_p(workdir, 0755))
 		goto opts_printf;
 
+/*
+ * make sure /etc/resolv.conf exists in overlay and is owned by jail userns root
+ * this is to work-around a bug in overlayfs described in the overlayfs-userns
+ * patch:
+ * 3. modification of a file 'hithere' which is in l but not yet
+ * in u, and which is not owned by T, is not allowed, even if
+ * writes to u are allowed.  This may be a bug in overlayfs,
+ * but it is safe behavior.
+ */
+	if (asprintf(&upperetc, "%s/etc", upperdir) < 0)
+		goto opts_printf;
+
+	if (mkdir_p(upperetc, 0755))
+		goto upper_etc_printf;
+
+	if (asprintf(&upperresolvconf, "%s/resolv.conf", upperetc) < 0)
+		goto upper_etc_printf;
+
+	fd = creat(upperresolvconf, 0644);
+	if (fd == -1) {
+		ERROR("creat(%s) failed: %m\n", upperresolvconf);
+		goto upper_resolvconf_printf;
+	}
+	close(fd);
+
 	DEBUG("mount -t overlay %s %s (%s)\n", jail_root, jail_root, optsstr);
 
 	if (mount(jail_root, jail_root, "overlay", MS_NOATIME, optsstr))
@@ -177,6 +216,10 @@ static int mount_overlay(char *jail_root, char *overlaydir) {
 
 	ret = 0;
 
+upper_resolvconf_printf:
+	free(upperresolvconf);
+upper_etc_printf:
+	free(upperetc);
 opts_printf:
 	free(optsstr);
 work_printf:
@@ -398,7 +441,29 @@ static int build_jail_fs(void)
 	return 0;
 }
 
-static int write_uid_gid_map(pid_t child_pid, bool gidmap, int id)
+static int write_uid_gid_map(pid_t child_pid, bool gidmap, char *mapstr)
+{
+	int map_file;
+	char map_path[64];
+
+	if (snprintf(map_path, sizeof(map_path), "/proc/%d/%s",
+		child_pid, gidmap?"gid_map":"uid_map") < 0)
+		return -1;
+
+	if ((map_file = open(map_path, O_WRONLY)) == -1)
+		return -1;
+
+	if (dprintf(map_file, "%s", mapstr)) {
+		close(map_file);
+		return -1;
+	}
+
+	close(map_file);
+	free(mapstr);
+	return 0;
+}
+
+static int write_single_uid_gid_map(pid_t child_pid, bool gidmap, int id)
 {
 	int map_file;
 	char map_path[64];
@@ -433,7 +498,7 @@ static int write_setgroups(pid_t child_pid, bool allow)
 		return -1;
 	}
 
-	if (dprintf(setgroups_file, allow?"allow":"deny") == -1) {
+	if (dprintf(setgroups_file, "%s", allow?"allow":"deny") == -1) {
 		close(setgroups_file);
 		return -1;
 	}
@@ -475,7 +540,7 @@ static void get_jail_user(int *user, int *user_gid, int *gr_gid)
 
 static void set_jail_user(int pw_uid, int user_gid, int gr_gid)
 {
-	if ((user_gid != -1) && initgroups(opts.user, user_gid)) {
+	if (opts.user && (user_gid != -1) && initgroups(opts.user, user_gid)) {
 		ERROR("failed to initgroups() for user %s: %m\n", opts.user);
 		exit(EXIT_FAILURE);
 	}
@@ -492,7 +557,7 @@ static void set_jail_user(int pw_uid, int user_gid, int gr_gid)
 }
 
 #define MAX_ENVP	8
-static char** build_envp(const char *seccomp)
+static char** build_envp(const char *seccomp, char **ocienvp)
 {
 	static char *envp[MAX_ENVP];
 	static char preload_var[PATH_MAX];
@@ -500,6 +565,8 @@ static char** build_envp(const char *seccomp)
 	static char debug_var[] = "LD_DEBUG=all";
 	static char container_var[] = "container=ujail";
 	const char *preload_lib = find_lib("libpreload-seccomp.so");
+	char **addenv;
+
 	int count = 0;
 
 	if (seccomp && !preload_lib) {
@@ -518,6 +585,14 @@ static char** build_envp(const char *seccomp)
 	if (debug > 1)
 		envp[count++] = debug_var;
 
+	addenv = ocienvp;
+	while (addenv && *addenv) {
+		envp[count++] = *(addenv++);
+		if (count >= MAX_ENVP) {
+			ERROR("environment limited to %d extra records, truncating\n", MAX_ENVP);
+			break;
+		}
+	}
 	return envp;
 }
 
@@ -548,6 +623,7 @@ static void usage(void)
 	fprintf(stderr, "  -T <size>\tuse tmpfs r/w overlayfs with <size>\n");
 	fprintf(stderr, "  -E\t\tfail if jail cannot be setup\n");
 	fprintf(stderr, "  -y\t\tprovide jail console\n");
+	fprintf(stderr, "  -J <dir>\tstart OCI bundle\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -584,18 +660,18 @@ static int exec_jail(void *pipes_ptr)
 	close(pipes[2]);
 
 	if (opts.namespace & CLONE_NEWUSER) {
-		if (setgid(0) < 0) {
+		if (setregid(0, 0) < 0) {
 			ERROR("setgid\n");
 			exit(EXIT_FAILURE);
 		}
-		if (setuid(0) < 0) {
+		if (setreuid(0, 0) < 0) {
 			ERROR("setuid\n");
 			exit(EXIT_FAILURE);
 		}
-//		if (setgroups(0, NULL) < 0) {
-//			ERROR("setgroups\n");
-//			exit(EXIT_FAILURE);
-//		}
+		if (setgroups(0, NULL) < 0) {
+			ERROR("setgroups\n");
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	if (opts.namespace && opts.hostname && strlen(opts.hostname) > 0
@@ -609,6 +685,9 @@ static int exec_jail(void *pipes_ptr)
 		exit(EXIT_FAILURE);
 	}
 
+	if (applyOCIcapabilities(opts.capset))
+		exit(EXIT_FAILURE);
+
 	if (opts.capabilities && drop_capabilities(opts.capabilities))
 		exit(EXIT_FAILURE);
 
@@ -619,11 +698,15 @@ static int exec_jail(void *pipes_ptr)
 
 	if (!(opts.namespace & CLONE_NEWUSER)) {
 		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
-		set_jail_user(pw_uid, pw_gid, gr_gid);
+
+		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
 	}
 
-	char **envp = build_envp(opts.seccomp);
+	char **envp = build_envp(opts.seccomp, opts.envp);
 	if (!envp)
+		exit(EXIT_FAILURE);
+
+	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp))
 		exit(EXIT_FAILURE);
 
 	INFO("exec-ing %s\n", *opts.jail_argv);
@@ -702,12 +785,482 @@ static void netns_updown(pid_t pid, bool start)
 	ubus_free(ctx);
 }
 
+
+enum {
+	OCI_ROOT_PATH,
+	OCI_ROOT_READONLY,
+	__OCI_ROOT_MAX,
+};
+
+static const struct blobmsg_policy oci_root_policy[] = {
+	[OCI_ROOT_PATH] = { "path", BLOBMSG_TYPE_STRING },
+	[OCI_ROOT_READONLY] = { "readonly", BLOBMSG_TYPE_BOOL },
+};
+
+static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
+{
+	static char rootpath[PATH_MAX] = { 0 };
+	struct blob_attr *tb[__OCI_ROOT_MAX];
+	char *cur;
+
+	blobmsg_parse(oci_root_policy, __OCI_ROOT_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (!tb[OCI_ROOT_PATH])
+		return ENODATA;
+
+	strncpy(rootpath, jsonfile, PATH_MAX);
+	cur = strrchr(rootpath, '/');
+
+	if (!cur)
+		return ENOTDIR;
+
+	*(++cur) = '\0';
+	strncat(rootpath, blobmsg_get_string(tb[OCI_ROOT_PATH]), PATH_MAX - (strlen(rootpath) + 1));
+
+	opts.extroot = rootpath;
+
+	opts.ronly = blobmsg_get_bool(tb[OCI_ROOT_READONLY]);
+
+	return 0;
+}
+
+
+enum {
+	OCI_MOUNT_SOURCE,
+	OCI_MOUNT_DESTINATION,
+	OCI_MOUNT_TYPE,
+	OCI_MOUNT_OPTIONS,
+	__OCI_MOUNT_MAX,
+};
+
+static const struct blobmsg_policy oci_mount_policy[] = {
+	[OCI_MOUNT_SOURCE] = { "source", BLOBMSG_TYPE_STRING },
+	[OCI_MOUNT_DESTINATION] = { "destination", BLOBMSG_TYPE_STRING },
+	[OCI_MOUNT_TYPE] = { "type", BLOBMSG_TYPE_STRING },
+	[OCI_MOUNT_OPTIONS] = { "options", BLOBMSG_TYPE_ARRAY },
+};
+
+static int parseOCImount(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_MOUNT_MAX];
+
+	blobmsg_parse(oci_mount_policy, __OCI_MOUNT_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (!tb[OCI_MOUNT_DESTINATION])
+		return EINVAL;
+
+	if (!strcmp("proc", blobmsg_get_string(tb[OCI_MOUNT_TYPE])) &&
+	    !strcmp("/proc", blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]))) {
+		opts.procfs = true;
+		return 0;
+	}
+
+	if (!strcmp("sysfs", blobmsg_get_string(tb[OCI_MOUNT_TYPE])) &&
+	    !strcmp("/sys", blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]))) {
+		opts.sysfs = true;
+		return 0;
+	}
+
+	if (!strcmp("tmpfs", blobmsg_get_string(tb[OCI_MOUNT_TYPE])) &&
+	    !strcmp("/dev", blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]))) {
+		/* we always mount a small tmpfs on /dev */
+		return 0;
+	}
+
+	INFO("ignoring unsupported mount %s %s -t %s -o %s\n",
+		blobmsg_get_string(tb[OCI_MOUNT_SOURCE]),
+		blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]),
+		blobmsg_get_string(tb[OCI_MOUNT_TYPE]),
+		blobmsg_format_json(tb[OCI_MOUNT_OPTIONS], true));
+
+	return 0;
+};
+
+
+enum {
+	OCI_PROCESS_USER_UID,
+	OCI_PROCESS_USER_GID,
+	OCI_PROCESS_USER_UMASK,
+	OCI_PROCESS_USER_ADDITIONALGIDS,
+	__OCI_PROCESS_USER_MAX,
+};
+
+static const struct blobmsg_policy oci_process_user_policy[] = {
+	[OCI_PROCESS_USER_UID] = { "uid", BLOBMSG_TYPE_INT32 },
+	[OCI_PROCESS_USER_GID] = { "gid", BLOBMSG_TYPE_INT32 },
+	[OCI_PROCESS_USER_UMASK] = { "umask", BLOBMSG_TYPE_INT32 },
+	[OCI_PROCESS_USER_ADDITIONALGIDS] = { "additionalGids", BLOBMSG_TYPE_ARRAY },
+};
+
+static int parseOCIprocessuser(struct blob_attr *msg) {
+	struct blob_attr *tb[__OCI_PROCESS_USER_MAX];
+
+	blobmsg_parse(oci_process_user_policy, __OCI_PROCESS_USER_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (tb[OCI_PROCESS_USER_UID])
+		opts.pw_uid = blobmsg_get_u32(tb[OCI_PROCESS_USER_UID]);
+
+	if (tb[OCI_PROCESS_USER_GID]) {
+		opts.pw_gid = blobmsg_get_u32(tb[OCI_PROCESS_USER_GID]);
+		opts.gr_gid = blobmsg_get_u32(tb[OCI_PROCESS_USER_GID]);
+	}
+
+	/* ToDo: umask, additional GIDs */
+
+	return 0;
+}
+
+enum {
+	OCI_PROCESS_ARGS,
+	OCI_PROCESS_CAPABILITIES,
+	OCI_PROCESS_CWD,
+	OCI_PROCESS_ENV,
+	OCI_PROCESS_NONEWPRIVILEGES,
+	OCI_PROCESS_RLIMITS,
+	OCI_PROCESS_TERMINAL,
+	OCI_PROCESS_USER,
+	__OCI_PROCESS_MAX,
+};
+
+static const struct blobmsg_policy oci_process_policy[] = {
+	[OCI_PROCESS_ARGS] = { "args", BLOBMSG_TYPE_ARRAY },
+	[OCI_PROCESS_CAPABILITIES] = { "capabilities", BLOBMSG_TYPE_TABLE },
+	[OCI_PROCESS_CWD] = { "cwd", BLOBMSG_TYPE_STRING },
+	[OCI_PROCESS_ENV] = { "env", BLOBMSG_TYPE_ARRAY },
+	[OCI_PROCESS_NONEWPRIVILEGES] = { "noNewPrivileges", BLOBMSG_TYPE_BOOL },
+	[OCI_PROCESS_RLIMITS] = { "rlimits", BLOBMSG_TYPE_ARRAY },
+	[OCI_PROCESS_TERMINAL] = { "terminal", BLOBMSG_TYPE_BOOL },
+	[OCI_PROCESS_USER] = { "user", BLOBMSG_TYPE_TABLE },
+};
+
+static int parseOCIprocess(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_PROCESS_MAX];
+	struct blob_attr *cur;
+	unsigned int sz = 0;
+	int rem;
+	int res;
+
+	blobmsg_parse(oci_process_policy, __OCI_PROCESS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (!tb[OCI_PROCESS_ARGS])
+		return ENOENT;
+
+	blobmsg_for_each_attr(cur, tb[OCI_PROCESS_ARGS], rem)
+		++sz;
+
+	if (!sz)
+		return ENODATA;
+
+	opts.jail_argv = calloc(1 + sz, sizeof(char*));
+	if (!opts.jail_argv)
+		return ENOMEM;
+
+	sz = 0;
+	blobmsg_for_each_attr(cur, tb[OCI_PROCESS_ARGS], rem)
+		opts.jail_argv[sz++] = blobmsg_get_string(cur);
+
+	opts.console = blobmsg_get_bool(tb[OCI_PROCESS_TERMINAL]);
+	opts.no_new_privs = blobmsg_get_bool(tb[OCI_PROCESS_NONEWPRIVILEGES]);
+
+	if (tb[OCI_PROCESS_CWD])
+		opts.cwd = blobmsg_get_string(tb[OCI_PROCESS_CWD]);
+
+	sz = 0;
+	blobmsg_for_each_attr(cur, tb[OCI_PROCESS_ENV], rem)
+		++sz;
+
+	if (sz > 0) {
+		opts.envp = calloc(1 + sz, sizeof(char*));
+		if (!opts.envp)
+			return ENOMEM;
+	}
+
+	sz = 0;
+	blobmsg_for_each_attr(cur, tb[OCI_PROCESS_ENV], rem)
+		opts.envp[sz++] = strdup(blobmsg_get_string(cur));
+
+	if (tb[OCI_PROCESS_USER] && (res = parseOCIprocessuser(tb[OCI_PROCESS_USER])))
+		return res;
+
+	if (tb[OCI_PROCESS_CAPABILITIES] &&
+	    (res = parseOCIcapabilities(&opts.capset, tb[OCI_PROCESS_CAPABILITIES])))
+		return res;
+
+	/* ToDo: rlimits, capabilities */
+
+	return 0;
+}
+
+enum {
+	OCI_LINUX_NAMESPACE_TYPE,
+	OCI_LINUX_NAMESPACE_PATH,
+	__OCI_LINUX_NAMESPACE_MAX,
+};
+
+static const struct blobmsg_policy oci_linux_namespace_policy[] = {
+	[OCI_LINUX_NAMESPACE_TYPE] = { "type", BLOBMSG_TYPE_STRING },
+	[OCI_LINUX_NAMESPACE_PATH] = { "path", BLOBMSG_TYPE_STRING },
+};
+
+static unsigned int resolve_nstype(char *type) {
+	if (!strcmp("pid", type))
+		return CLONE_NEWPID;
+	else if (!strcmp("network", type))
+		return CLONE_NEWNET;
+	else if (!strcmp("mount", type))
+		return CLONE_NEWNS;
+	else if (!strcmp("ipc", type))
+		return CLONE_NEWIPC;
+	else if (!strcmp("uts", type))
+		return CLONE_NEWUTS;
+	else if (!strcmp("user", type))
+		return CLONE_NEWUSER;
+	else if (!strcmp("cgroup", type))
+		return CLONE_NEWCGROUP;
+	else
+		return 0;
+}
+
+static int parseOCIlinuxns(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_LINUX_NAMESPACE_MAX];
+
+
+	blobmsg_parse(oci_linux_namespace_policy, __OCI_LINUX_NAMESPACE_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (!tb[OCI_LINUX_NAMESPACE_TYPE])
+		return EINVAL;
+
+	if (tb[OCI_LINUX_NAMESPACE_PATH])
+		return ENOTSUP; /* ToDo */
+
+	opts.namespace |= resolve_nstype(blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_TYPE]));
+
+	return 0;
+};
+
+
+enum {
+	OCI_LINUX_UIDGIDMAP_CONTAINERID,
+	OCI_LINUX_UIDGIDMAP_HOSTID,
+	OCI_LINUX_UIDGIDMAP_SIZE,
+	__OCI_LINUX_UIDGIDMAP_MAX,
+};
+
+static const struct blobmsg_policy oci_linux_uidgidmap_policy[] = {
+	[OCI_LINUX_UIDGIDMAP_CONTAINERID] = { "containerID", BLOBMSG_TYPE_INT32 },
+	[OCI_LINUX_UIDGIDMAP_HOSTID] = { "hostID", BLOBMSG_TYPE_INT32 },
+	[OCI_LINUX_UIDGIDMAP_SIZE] = { "size", BLOBMSG_TYPE_INT32 },
+};
+
+static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
+{
+	const char *map_format = "%d %d %d\n";
+	struct blob_attr *tb[__OCI_LINUX_UIDGIDMAP_MAX];
+	struct blob_attr *cur;
+	int rem, len;
+	char **mappings;
+	char *map, *curstr;
+	unsigned int cnt = 0;
+	size_t totallen = 0;
+
+	/* count number of mappings */
+	blobmsg_for_each_attr(cur, msg, rem)
+		cnt++;
+
+	if (!cnt)
+		return 0;
+
+	/* allocate array for mappings */
+	mappings = calloc(1 + cnt, sizeof(char*));
+	if (!mappings)
+		return ENOMEM;
+
+	mappings[cnt] = NULL;
+
+	cnt = 0;
+	blobmsg_for_each_attr(cur, msg, rem) {
+		blobmsg_parse(oci_linux_uidgidmap_policy, __OCI_LINUX_UIDGIDMAP_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+
+		if (!tb[OCI_LINUX_UIDGIDMAP_CONTAINERID] ||
+		    !tb[OCI_LINUX_UIDGIDMAP_HOSTID] ||
+		    !tb[OCI_LINUX_UIDGIDMAP_SIZE])
+			return EINVAL;
+
+		/* write mapping line into allocated string */
+		len = asprintf(&mappings[cnt++], map_format,
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_CONTAINERID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_SIZE]));
+
+		if (len < 0)
+			return ENOMEM;
+
+		totallen += len;
+	}
+
+	/* allocate combined mapping string */
+	map = calloc(1 + len, sizeof(char));
+	if (!map)
+		return ENOMEM;
+
+	map[0] = '\0';
+
+	/* concatenate mapping strings into combined string */
+	curstr = mappings[0];
+	while (curstr) {
+		strcat(map, curstr);
+		free(curstr++);
+	}
+	free(mappings);
+
+	if (is_gidmap)
+		opts.gidmap = map;
+	else
+		opts.uidmap = map;
+
+	return 0;
+}
+
+enum {
+	OCI_LINUX_RESOURCES,
+	OCI_LINUX_SECCOMP,
+	OCI_LINUX_SYSCTL,
+	OCI_LINUX_NAMESPACES,
+	OCI_LINUX_UIDMAPPINGS,
+	OCI_LINUX_GIDMAPPINGS,
+	OCI_LINUX_MASKEDPATHS,
+	OCI_LINUX_READONLYPATHS,
+	OCI_LINUX_ROOTFSPROPAGATION,
+	__OCI_LINUX_MAX,
+};
+
+static const struct blobmsg_policy oci_linux_policy[] = {
+	[OCI_LINUX_RESOURCES] = { "resources", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_SECCOMP] = { "seccomp", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_SYSCTL] = { "sysctl", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_NAMESPACES] = { "namespaces", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_UIDMAPPINGS] = { "uidMappings", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_GIDMAPPINGS] = { "gidMappings", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_MASKEDPATHS] = { "maskedPaths", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_READONLYPATHS] = { "readonlyPaths", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_ROOTFSPROPAGATION] = { "rootfsPropagation", BLOBMSG_TYPE_STRING },
+};
+
+static int parseOCIlinux(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_LINUX_MAX];
+	struct blob_attr *cur;
+	int rem;
+	int res = 0;
+
+	blobmsg_parse(oci_linux_policy, __OCI_LINUX_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (tb[OCI_LINUX_NAMESPACES]) {
+		blobmsg_for_each_attr(cur, tb[OCI_LINUX_NAMESPACES], rem) {
+			res = parseOCIlinuxns(cur);
+			if (res)
+				return res;
+		}
+	}
+
+	if (tb[OCI_LINUX_UIDMAPPINGS]) {
+		res = parseOCIuidgidmappings(tb[OCI_LINUX_GIDMAPPINGS], 0);
+		if (res)
+			return res;
+	}
+
+	if (tb[OCI_LINUX_GIDMAPPINGS]) {
+		res = parseOCIuidgidmappings(tb[OCI_LINUX_GIDMAPPINGS], 1);
+		if (res)
+			return res;
+	}
+
+	if (tb[OCI_LINUX_SECCOMP]) {
+		opts.ociseccomp = parseOCIlinuxseccomp(tb[OCI_LINUX_SECCOMP]);
+		if (!opts.ociseccomp)
+			return EINVAL;
+	}
+
+	return 0;
+}
+
+enum {
+	OCI_VERSION,
+	OCI_HOSTNAME,
+	OCI_PROCESS,
+	OCI_ROOT,
+	OCI_MOUNTS,
+	OCI_LINUX,
+	__OCI_MAX,
+};
+
+static const struct blobmsg_policy oci_policy[] = {
+	[OCI_VERSION] = { "ociVersion", BLOBMSG_TYPE_STRING },
+	[OCI_HOSTNAME] = { "hostname", BLOBMSG_TYPE_STRING },
+	[OCI_PROCESS] = { "process", BLOBMSG_TYPE_TABLE },
+	[OCI_ROOT] = { "root", BLOBMSG_TYPE_TABLE },
+	[OCI_MOUNTS] = { "mounts", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX] = { "linux", BLOBMSG_TYPE_TABLE },
+};
+
+static int parseOCI(const char *jsonfile)
+{
+	struct blob_attr *tb[__OCI_MAX];
+	struct blob_attr *cur;
+	int rem;
+	int res;
+
+	blob_buf_init(&ocibuf, 0);
+	if (!blobmsg_add_json_from_file(&ocibuf, jsonfile))
+		return ENOENT;
+
+	blobmsg_parse(oci_policy, __OCI_MAX, tb, blob_data(ocibuf.head), blob_len(ocibuf.head));
+
+	if (!tb[OCI_VERSION])
+		return ENOMSG;
+
+	if (strncmp("1.0", blobmsg_get_string(tb[OCI_VERSION]), 3)) {
+		ERROR("unsupported ociVersion %s\n", blobmsg_get_string(tb[OCI_VERSION]));
+		return ENOTSUP;
+	}
+
+	if (tb[OCI_HOSTNAME])
+		opts.hostname = blobmsg_get_string(tb[OCI_HOSTNAME]);
+
+	if (!tb[OCI_PROCESS])
+		return ENODATA;
+
+	if ((res = parseOCIprocess(tb[OCI_PROCESS])))
+		return res;
+
+	if (!tb[OCI_ROOT])
+		return ENODATA;
+
+	if ((res = parseOCIroot(jsonfile, tb[OCI_ROOT])))
+		return res;
+
+	if (!tb[OCI_MOUNTS])
+		return ENODATA;
+
+	blobmsg_for_each_attr(cur, tb[OCI_MOUNTS], rem)
+		if ((res = parseOCImount(cur)))
+			return res;
+
+	if (tb[OCI_LINUX] && (res = parseOCIlinux(tb[OCI_LINUX])))
+		return res;
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	sigset_t sigmask;
 	uid_t uid = getuid();
-	char log[] = "/dev/log";
-	char ubus[] = "/var/run/ubus.sock";
+	const char log[] = "/dev/log";
+	const char ubus[] = "/var/run/ubus.sock";
+	char *jsonfile = NULL;
 	int ch, i;
 	int pipes[4];
 	char sig_buf[1];
@@ -802,11 +1355,24 @@ int main(int argc, char **argv)
 		case 'y':
 			opts.console = 1;
 			break;
+		case 'J':
+			asprintf(&jsonfile, "%s/config.json", optarg);
+			break;
 		}
 	}
 
 	if (opts.namespace)
 		opts.namespace |= CLONE_NEWIPC | CLONE_NEWPID;
+
+	if (jsonfile) {
+		int ocires;
+		ocires = parseOCI(jsonfile);
+		free(jsonfile);
+		if (ocires) {
+			ERROR("parsing of OCI JSON spec has failed: %s (%d)\n", strerror(ocires), ocires);
+			return ocires;
+		}
+	}
 
 	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
 		ERROR("size parameter too long: \"%s\"\n", opts.tmpoverlaysize);
@@ -814,7 +1380,7 @@ int main(int argc, char **argv)
 	}
 
 	/* no <binary> param found */
-	if (argc - optind < 1) {
+	if (!jsonfile && (argc - optind < 1)) {
 		usage();
 		return EXIT_FAILURE;
 	}
@@ -825,12 +1391,14 @@ int main(int argc, char **argv)
 	}
 	DEBUG("Using namespaces(0x%08x), capabilities(%d), seccomp(%d)\n",
 		opts.namespace,
-		opts.capabilities != 0,
-		opts.seccomp != 0);
+		opts.capabilities != 0 || opts.capset.apply,
+		opts.seccomp != 0 || opts.ociseccomp != 0);
 
-	opts.jail_argv = &argv[optind];
-
-	get_jail_user(&opts.pw_uid, &opts.pw_gid, &opts.gr_gid);
+	if (!jsonfile) {
+		opts.jail_argv = &argv[optind];
+		if (opts.namespace & CLONE_NEWUSER)
+			get_jail_user(&opts.pw_uid, &opts.pw_gid, &opts.gr_gid);
+	}
 
 	if (!opts.extroot) {
 		if (opts.namespace && add_path_and_deps(*opts.jail_argv, 1, -1, 0)) {
@@ -908,17 +1476,23 @@ int main(int argc, char **argv)
 		}
 		close(pipes[0]);
 		if (opts.namespace & CLONE_NEWUSER) {
-			bool has_gr = (opts.gr_gid != -1);
-			if (write_setgroups(jail_process.pid, false)) {
+			if (write_setgroups(jail_process.pid, true)) {
 				ERROR("can't write setgroups\n");
 				return -1;
 			}
-			if (opts.pw_uid != -1) {
-				write_uid_gid_map(jail_process.pid, 0, opts.pw_uid);
-				write_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:opts.pw_gid);
+			if (!opts.uidmap) {
+				bool has_gr = (opts.gr_gid != -1);
+				if (opts.pw_uid != -1) {
+					write_single_uid_gid_map(jail_process.pid, 0, opts.pw_uid);
+					write_single_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:opts.pw_gid);
+				} else {
+					write_single_uid_gid_map(jail_process.pid, 0, 65534);
+					write_single_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:65534);
+				}
 			} else {
-				write_uid_gid_map(jail_process.pid, 0, 65534);
-				write_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:65534);
+				write_uid_gid_map(jail_process.pid, 0, opts.uidmap);
+				if (opts.gidmap)
+					write_uid_gid_map(jail_process.pid, 1, opts.gidmap);
 			}
 		}
 

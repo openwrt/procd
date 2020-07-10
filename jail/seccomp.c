@@ -21,27 +21,7 @@
 #include "seccomp-bpf.h"
 #include "seccomp.h"
 #include "../syscall-names.h"
-
-static int find_syscall(const char *name)
-{
-	int i;
-
-	for (i = 0; i < SYSCALL_COUNT; i++) {
-		int sc = syscall_index_to_number(i);
-		if (syscall_name(sc) && !strcmp(syscall_name(sc), name))
-			return sc;
-	}
-
-	return -1;
-}
-
-static void set_filter(struct sock_filter *filter, __u16 code, __u8 jt, __u8 jf, __u32 k)
-{
-	filter->code = code;
-	filter->jt = jt;
-	filter->jf = jf;
-	filter->k = k;
-}
+#include "seccomp-syscalls-helpers.h"
 
 int install_syscall_filter(const char *argv, const char *file)
 {

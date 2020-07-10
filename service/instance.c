@@ -65,6 +65,7 @@ enum {
 	INSTANCE_ATTR_EXTROOT,
 	INSTANCE_ATTR_OVERLAYDIR,
 	INSTANCE_ATTR_TMPOVERLAYSIZE,
+	INSTANCE_ATTR_BUNDLE,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -95,6 +96,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_EXTROOT] = { "extroot", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_OVERLAYDIR] = { "overlaydir", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_TMPOVERLAYSIZE] = { "tmpoverlaysize", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_BUNDLE] = { "bundle", BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -294,6 +296,11 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = in->tmpoverlaysize;
 	}
 
+	if (in->bundle) {
+		argv[argc++] = "-J";
+		argv[argc++] = in->bundle;
+	}
+
 	if (in->require_jail)
 		argv[argc++] = "-E";
 
@@ -484,7 +491,7 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
-	if (!in->command) {
+	if (!in->bundle && !in->command) {
 		LOG("Not starting instance %s::%s, command not set\n", in->srv->name, in->name);
 		return;
 	}
@@ -802,7 +809,8 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 	if (in->respawn_timeout != in_new->respawn_timeout)
 		return true;
-
+	if (in->bundle && in_new->bundle && strcmp(in->bundle, in_new->bundle))
+		return true;
 	if ((!in->seccomp && in_new->seccomp) ||
 	    (in->seccomp && !in_new->seccomp) ||
 	    (in->seccomp && in_new->seccomp && strcmp(in->seccomp, in_new->seccomp)))
@@ -996,6 +1004,9 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	if (in->no_new_privs)
 		jail->argc++;
 
+	if (in->bundle)
+		jail->argc += 2;
+
 	return true;
 }
 
@@ -1035,8 +1046,8 @@ instance_config_parse(struct service_instance *in)
 	blobmsg_parse(instance_attr, __INSTANCE_ATTR_MAX, tb,
 		blobmsg_data(in->config), blobmsg_data_len(in->config));
 
-	if (!instance_config_parse_command(in, tb))
-		return false;
+	if (!tb[INSTANCE_ATTR_BUNDLE] && !instance_config_parse_command(in, tb))
+			return false;
 
 	if (tb[INSTANCE_ATTR_TERMTIMEOUT])
 		in->term_timeout = blobmsg_get_u32(tb[INSTANCE_ATTR_TERMTIMEOUT]);
@@ -1112,6 +1123,9 @@ instance_config_parse(struct service_instance *in)
 
 	if (tb[INSTANCE_ATTR_TMPOVERLAYSIZE])
 		in->tmpoverlaysize = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_TMPOVERLAYSIZE]));
+
+	if (tb[INSTANCE_ATTR_BUNDLE])
+		in->bundle = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_BUNDLE]));
 
 	if (tb[INSTANCE_ATTR_PIDFILE]) {
 		char *pidfile = blobmsg_get_string(tb[INSTANCE_ATTR_PIDFILE]);
@@ -1264,6 +1278,7 @@ instance_free(struct service_instance *in)
 	free(in->extroot);
 	free(in->overlaydir);
 	free(in->tmpoverlaysize);
+	free(in->bundle);
 	free(in->jail.name);
 	free(in->jail.hostname);
 	free(in->seccomp);
@@ -1324,6 +1339,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_add_u32(b, "pid", in->proc.pid);
 	if (in->command)
 		blobmsg_add_blob(b, in->command);
+	if (in->bundle)
+		blobmsg_add_string(b, "bundle", in->bundle);
 	blobmsg_add_u32(b, "term_timeout", in->term_timeout);
 	if (!in->proc.pending)
 		blobmsg_add_u32(b, "exit_code", in->exit_code);
@@ -1393,17 +1410,19 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		void *r = blobmsg_open_table(b, "jail");
 		if (in->jail.name)
 			blobmsg_add_string(b, "name", in->jail.name);
-		if (in->jail.hostname)
-			blobmsg_add_string(b, "hostname", in->jail.hostname);
+		if (!in->bundle) {
+			if (in->jail.hostname)
+				blobmsg_add_string(b, "hostname", in->jail.hostname);
 
-		blobmsg_add_u8(b, "procfs", in->jail.procfs);
-		blobmsg_add_u8(b, "sysfs", in->jail.sysfs);
-		blobmsg_add_u8(b, "ubus", in->jail.ubus);
-		blobmsg_add_u8(b, "log", in->jail.log);
-		blobmsg_add_u8(b, "ronly", in->jail.ronly);
-		blobmsg_add_u8(b, "netns", in->jail.netns);
-		blobmsg_add_u8(b, "userns", in->jail.userns);
-		blobmsg_add_u8(b, "cgroupsns", in->jail.cgroupsns);
+			blobmsg_add_u8(b, "procfs", in->jail.procfs);
+			blobmsg_add_u8(b, "sysfs", in->jail.sysfs);
+			blobmsg_add_u8(b, "ubus", in->jail.ubus);
+			blobmsg_add_u8(b, "log", in->jail.log);
+			blobmsg_add_u8(b, "ronly", in->jail.ronly);
+			blobmsg_add_u8(b, "netns", in->jail.netns);
+			blobmsg_add_u8(b, "userns", in->jail.userns);
+			blobmsg_add_u8(b, "cgroupsns", in->jail.cgroupsns);
+		}
 		blobmsg_add_u8(b, "console", (in->console.fd.fd > -1));
 		blobmsg_close_table(b, r);
 		if (!avl_is_empty(&in->jail.mount.avl)) {

@@ -13,6 +13,20 @@
 #ifndef _JAIL_CAPABILITIES_H_
 #define _JAIL_CAPABILITIES_H_
 
+#include <libubox/blobmsg.h>
+
+struct jail_capset {
+	uint64_t bounding;
+	uint64_t effective;
+	uint64_t inheritable;
+	uint64_t permitted;
+	uint64_t ambient;
+	uint8_t apply;
+};
+
 int drop_capabilities(const char *file);
+
+int parseOCIcapabilities(struct jail_capset *capset, struct blob_attr *msg);
+int applyOCIcapabilities(struct jail_capset capset);
 
 #endif
