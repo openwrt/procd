@@ -15,8 +15,6 @@
 #define _GNU_SOURCE 1
 #include <syslog.h>
 #include <sys/prctl.h>
-#include <sys/capability.h>
-
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
 

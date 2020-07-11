@@ -14,6 +14,7 @@
 #define _JAIL_CAPABILITIES_H_
 
 #include <libubox/blobmsg.h>
+#include <linux/capability.h>
 
 struct jail_capset {
 	uint64_t bounding;
@@ -28,5 +29,9 @@ int drop_capabilities(const char *file);
 
 int parseOCIcapabilities(struct jail_capset *capset, struct blob_attr *msg);
 int applyOCIcapabilities(struct jail_capset capset);
+
+/* capget/capset syscall wrappers are provided by libc */
+extern int capget(cap_user_header_t header, cap_user_data_t data);
+extern int capset(cap_user_header_t header, const cap_user_data_t data);
 
 #endif
