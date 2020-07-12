@@ -25,7 +25,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <libgen.h>
 #include <sched.h>
 #include <linux/limits.h>
 #include <linux/filter.h>
@@ -119,15 +118,11 @@ static void free_hooklist(struct hook_execvpe *hooklist)
 	}
 }
 
-static void free_opts(bool all) {
+static void free_opts(bool child) {
 	char **tmp;
 
-	free(opts.hostname);
-	free(opts.cwd);
-	free(opts.extroot);
-	free(opts.uidmap);
-	free(opts.gidmap);
-	if (all) {
+	/* we need to keep argv, envp and seccomp filter in child */
+	if (child) {
 		if (opts.ociseccomp) {
 			free(opts.ociseccomp->filter);
 			free(opts.ociseccomp);
@@ -146,6 +141,11 @@ static void free_opts(bool all) {
 		free(opts.envp);
 	};
 
+	free(opts.hostname);
+	free(opts.cwd);
+	free(opts.extroot);
+	free(opts.uidmap);
+	free(opts.gidmap);
 	free_hooklist(opts.hooks.createRuntime);
 	free_hooklist(opts.hooks.createContainer);
 	free_hooklist(opts.hooks.startContainer);
@@ -162,85 +162,6 @@ int debug = 0;
 static char child_stack[STACK_SIZE];
 
 int console_fd;
-
-static int mkdir_p(char *dir, mode_t mask)
-{
-	char *l = strrchr(dir, '/');
-	int ret;
-
-	if (!l)
-		return 0;
-
-	*l = '\0';
-
-	if (mkdir_p(dir, mask))
-		return -1;
-
-	*l = '/';
-
-	ret = mkdir(dir, mask);
-	if (ret && errno == EEXIST)
-		return 0;
-
-	if (ret)
-		ERROR("mkdir(%s, %d) failed: %m\n", dir, mask);
-
-	return ret;
-}
-
-static int _mount_bind(const char *root, const char *path, const char *target, int readonly, int strict, int error)
-{
-	struct stat s;
-	char new[PATH_MAX];
-	int fd;
-	int remount_flags = MS_BIND | MS_REMOUNT;
-
-	if (stat(path, &s)) {
-		ERROR("stat(%s) failed: %m\n", path);
-		return error;
-	}
-
-	snprintf(new, sizeof(new), "%s%s", root, target?target:path);
-
-	if (S_ISDIR(s.st_mode)) {
-		mkdir_p(new, 0755);
-	} else {
-		mkdir_p(dirname(new), 0755);
-		snprintf(new, sizeof(new), "%s%s", root, target?target:path);
-		fd = creat(new, 0644);
-		if (fd == -1) {
-			ERROR("creat(%s) failed: %m\n", new);
-			return -1;
-		}
-		close(fd);
-	}
-
-	if (mount(path, new, NULL, MS_BIND, NULL)) {
-		ERROR("failed to mount -B %s %s: %m\n", path, new);
-		return -1;
-	}
-
-	if (readonly)
-		remount_flags |= MS_RDONLY;
-
-	if (strict)
-		remount_flags |= MS_NOEXEC | MS_NOSUID | MS_NODEV;
-
-	if ((strict || readonly) && mount(NULL, new, NULL, remount_flags, NULL)) {
-		ERROR("failed to remount (%s%s%s) %s: %m\n", readonly?"ro":"rw",
-		      (readonly && strict)?", ":"", strict?"strict":"", new);
-		return -1;
-	}
-
-	DEBUG("mount -B %s %s (%s%s%s)\n", path, new,
-	      readonly?"ro":"rw", (readonly && strict)?", ":"", strict?"strict":"");
-
-	return 0;
-}
-
-int mount_bind(const char *root, const char *path, int readonly, int error) {
-	return _mount_bind(root, path, NULL, readonly, 0, error);
-}
 
 static int mount_overlay(char *jail_root, char *overlaydir) {
 	char *upperdir, *workdir, *optsstr, *upperetc, *upperresolvconf;
@@ -549,17 +470,16 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
+	/* make sure /etc/resolv.conf exists if in new network namespace */
 	if (opts.namespace & CLONE_NEWNET) {
-		char hostdir[PATH_MAX], jailetc[PATH_MAX], jaillink[PATH_MAX];
+		char jailetc[PATH_MAX], jaillink[PATH_MAX];
 
-		snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
-		mkdir_p(hostdir, 0755);
-		_mount_bind(jail_root, hostdir, "/tmp/resolv.conf.d", 1, 1, -1);
 		snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
 		mkdir_p(jailetc, 0755);
 		snprintf(jaillink, PATH_MAX, "%s/etc/resolv.conf", jail_root);
 		if (overlaydir)
 			unlink(jaillink);
+
 		symlink("../tmp/resolv.conf.d/resolv.conf.auto", jaillink);
 	}
 
@@ -1183,57 +1103,6 @@ out_createruntime:
 	return ret;
 };
 
-enum {
-	OCI_MOUNT_SOURCE,
-	OCI_MOUNT_DESTINATION,
-	OCI_MOUNT_TYPE,
-	OCI_MOUNT_OPTIONS,
-	__OCI_MOUNT_MAX,
-};
-
-static const struct blobmsg_policy oci_mount_policy[] = {
-	[OCI_MOUNT_SOURCE] = { "source", BLOBMSG_TYPE_STRING },
-	[OCI_MOUNT_DESTINATION] = { "destination", BLOBMSG_TYPE_STRING },
-	[OCI_MOUNT_TYPE] = { "type", BLOBMSG_TYPE_STRING },
-	[OCI_MOUNT_OPTIONS] = { "options", BLOBMSG_TYPE_ARRAY },
-};
-
-static int parseOCImount(struct blob_attr *msg)
-{
-	struct blob_attr *tb[__OCI_MOUNT_MAX];
-
-	blobmsg_parse(oci_mount_policy, __OCI_MOUNT_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
-
-	if (!tb[OCI_MOUNT_DESTINATION])
-		return EINVAL;
-
-	if (!strcmp("proc", blobmsg_get_string(tb[OCI_MOUNT_TYPE])) &&
-	    !strcmp("/proc", blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]))) {
-		opts.procfs = true;
-		return 0;
-	}
-
-	if (!strcmp("sysfs", blobmsg_get_string(tb[OCI_MOUNT_TYPE])) &&
-	    !strcmp("/sys", blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]))) {
-		opts.sysfs = true;
-		return 0;
-	}
-
-	if (!strcmp("tmpfs", blobmsg_get_string(tb[OCI_MOUNT_TYPE])) &&
-	    !strcmp("/dev", blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]))) {
-		/* we always mount a small tmpfs on /dev */
-		return 0;
-	}
-
-	INFO("ignoring unsupported mount %s %s -t %s -o %s\n",
-		blobmsg_get_string(tb[OCI_MOUNT_SOURCE]),
-		blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]),
-		blobmsg_get_string(tb[OCI_MOUNT_TYPE]),
-		blobmsg_format_json(tb[OCI_MOUNT_OPTIONS], true));
-
-	return 0;
-};
-
 
 enum {
 	OCI_PROCESS_USER_UID,
@@ -1648,7 +1517,7 @@ int main(int argc, char **argv)
 			break;
 		case 'S':
 			opts.seccomp = optarg;
-			add_mount(optarg, 1, -1);
+			add_mount_bind(optarg, 1, -1);
 			break;
 		case 'C':
 			opts.capabilities = optarg;
@@ -1676,11 +1545,11 @@ int main(int argc, char **argv)
 			break;
 		case 'u':
 			opts.namespace |= CLONE_NEWNS;
-			add_mount(ubus, 0, -1);
+			add_mount_bind(ubus, 0, -1);
 			break;
 		case 'l':
 			opts.namespace |= CLONE_NEWNS;
-			add_mount(log, 0, -1);
+			add_mount_bind(log, 0, -1);
 			break;
 		case 'U':
 			opts.user = optarg;
@@ -1786,26 +1655,32 @@ int main(int argc, char **argv)
 
 	if (opts.namespace) {
 		if (opts.namespace & CLONE_NEWNS) {
-			add_mount("/dev/full", 0, -1);
-			add_mount("/dev/null", 0, -1);
-			add_mount("/dev/random", 0, -1);
-			add_mount("/dev/urandom", 0, -1);
-			add_mount("/dev/zero", 0, -1);
-			add_mount("/dev/ptmx", 0, -1);
-			add_mount("/dev/tty", 0, -1);
+			add_mount_bind("/dev/full", 0, -1);
+			add_mount_bind("/dev/null", 0, -1);
+			add_mount_bind("/dev/random", 0, -1);
+			add_mount_bind("/dev/urandom", 0, -1);
+			add_mount_bind("/dev/zero", 0, -1);
+			add_mount_bind("/dev/ptmx", 0, -1);
+			add_mount_bind("/dev/tty", 0, -1);
 
 			if (!opts.extroot && (opts.user || opts.group)) {
-				add_mount("/etc/passwd", 0, -1);
-				add_mount("/etc/group", 0, -1);
+				add_mount_bind("/etc/passwd", 0, -1);
+				add_mount_bind("/etc/group", 0, -1);
 			}
 
 #if defined(__GLIBC__)
 			if (!opts.extroot)
-				add_mount("/etc/nsswitch.conf", 0, -1);
+				add_mount_bind("/etc/nsswitch.conf", 0, -1);
 #endif
 
 			if (!(opts.namespace & CLONE_NEWNET)) {
-				add_mount("/etc/resolv.conf", 0, -1);
+				add_mount_bind("/etc/resolv.conf", 0, -1);
+			} else {
+				char hostdir[PATH_MAX];
+
+				snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
+				mkdir_p(hostdir, 0755);
+				add_mount(hostdir, "/tmp/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, NULL, -1);
 			}
 		}
 
