@@ -53,6 +53,13 @@
 #define STACK_SIZE	(1024 * 1024)
 #define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:EyJ:"
 
+struct hook_execvpe {
+	char *file;
+	char **argv;
+	char **envp;
+	int timeout;
+};
+
 static struct {
 	char *name;
 	char *hostname;
@@ -80,6 +87,13 @@ static struct {
 	int pw_gid;
 	int gr_gid;
 	int require_jail;
+	struct {
+		struct hook_execvpe *createRuntime;
+		struct hook_execvpe *createContainer;
+		struct hook_execvpe *startContainer;
+		struct hook_execvpe *poststart;
+		struct hook_execvpe *poststop;
+	} hooks;
 } opts;
 
 static struct blob_buf ocibuf;
@@ -301,6 +315,106 @@ no_console:
 	return 1;
 }
 
+static int hook_running = 0;
+static int hook_return_code = 0;
+
+static void hook_process_timeout_cb(struct uloop_timeout *t);
+static struct uloop_timeout hook_process_timeout = {
+	.cb = hook_process_timeout_cb,
+};
+
+static void hook_process_handler(struct uloop_process *c, int ret)
+{
+	uloop_timeout_cancel(&hook_process_timeout);
+	if (WIFEXITED(ret)) {
+		hook_return_code = WEXITSTATUS(ret);
+		INFO("hook (%d) exited with exit: %d\n", c->pid, hook_return_code);
+	} else {
+		hook_return_code = WTERMSIG(ret);
+		INFO("hook (%d) exited with signal: %d\n", c->pid, hook_return_code);
+	}
+	hook_running = 0;
+	uloop_end();
+}
+
+static struct uloop_process hook_process = {
+	.cb = hook_process_handler,
+};
+
+static void hook_process_timeout_cb(struct uloop_timeout *t)
+{
+	DEBUG("hook process failed to stop, sending SIGKILL\n");
+	kill(hook_process.pid, SIGKILL);
+}
+
+static void hook_handle_signal(int signo)
+{
+	DEBUG("forwarding signal %d to the jailed process\n", signo);
+	kill(hook_process.pid, signo);
+}
+
+static int run_hook(struct hook_execvpe *hook)
+{
+	sigset_t sigmask;
+	int i;
+
+	DEBUG("executing hook %s\n", hook->file);
+	uloop_init();
+	sigfillset(&sigmask);
+	for (i = 0; i < _NSIG; i++) {
+		struct sigaction s = { 0 };
+
+		if (!sigismember(&sigmask, i))
+			continue;
+		if ((i == SIGCHLD) || (i == SIGPIPE) || (i == SIGSEGV))
+			continue;
+
+		s.sa_handler = hook_handle_signal;
+		sigaction(i, &s, NULL);
+	}
+	hook_running = 1;
+	hook_process.pid = fork();
+	if (hook_process.pid > 0) {
+		/* parent */
+		uloop_process_add(&hook_process);
+		if (hook->timeout > 0)
+			uloop_timeout_set(&hook_process_timeout, 1000 * hook->timeout);
+
+		uloop_run();
+		if (hook_running) {
+			DEBUG("uloop interrupted, killing hook process\n");
+			kill(hook_process.pid, SIGTERM);
+			uloop_timeout_set(&hook_process_timeout, 1000);
+			uloop_run();
+		}
+		uloop_done();
+
+		return 0;
+	} else if (hook_process.pid == 0) {
+		/* child */
+		execvpe(hook->file, hook->argv, hook->envp);
+		return errno;
+	} else {
+		/* fork error */
+		return errno;
+	}
+}
+
+static int run_hooks(struct hook_execvpe *hook)
+{
+	struct hook_execvpe *cur;
+	int res;
+
+	cur = hook;
+	while (cur) {
+		res = run_hook(cur++);
+		if (res)
+			return res;
+	}
+
+	return 0;
+}
+
 static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
@@ -391,6 +505,8 @@ static int build_jail_fs(void)
 			unlink(jaillink);
 		symlink("../tmp/resolv.conf.d/resolv.conf.auto", jaillink);
 	}
+
+	run_hooks(opts.hooks.createContainer);
 
 	char dirbuf[sizeof(jail_root) + 4];
 	snprintf(dirbuf, sizeof(dirbuf), "%s/old", jail_root);
@@ -689,6 +805,8 @@ static int exec_jail(void *pipes_ptr)
 		exit(EXIT_FAILURE);
 	}
 
+	run_hooks(opts.hooks.startContainer);
+
 	if (applyOCIcapabilities(opts.capset))
 		exit(EXIT_FAILURE);
 
@@ -796,6 +914,32 @@ static void netns_updown(pid_t pid, bool start)
 	ubus_free(ctx);
 }
 
+static int parseOCIenvarray(struct blob_attr *msg, char ***envp)
+{
+	struct blob_attr *cur;
+	int sz = 0, rem;
+
+	blobmsg_for_each_attr(cur, msg, rem)
+		++sz;
+
+	if (sz > 0) {
+		*envp = calloc(1 + sz, sizeof(char*));
+		if (!(*envp))
+			return ENOMEM;
+	} else {
+		*envp = NULL;
+		return 0;
+	}
+
+	sz = 0;
+	blobmsg_for_each_attr(cur, msg, rem)
+		(*envp)[sz++] = strdup(blobmsg_get_string(cur));
+
+	if (sz)
+		(*envp)[sz] = NULL;
+
+	return 0;
+}
 
 enum {
 	OCI_ROOT_PATH,
@@ -835,6 +979,170 @@ static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 	return 0;
 }
 
+
+enum {
+	OCI_HOOK_PATH,
+	OCI_HOOK_ARGS,
+	OCI_HOOK_ENV,
+	OCI_HOOK_TIMEOUT,
+	__OCI_HOOK_MAX,
+};
+
+static const struct blobmsg_policy oci_hook_policy[] = {
+	[OCI_HOOK_PATH] = { "path", BLOBMSG_TYPE_STRING },
+	[OCI_HOOK_ARGS] = { "args", BLOBMSG_TYPE_ARRAY },
+	[OCI_HOOK_ENV] = { "env", BLOBMSG_TYPE_ARRAY },
+	[OCI_HOOK_TIMEOUT] = { "timeout", BLOBMSG_TYPE_INT32 },
+};
+
+static void free_hooklist(struct hook_execvpe *hooklist)
+{
+	struct hook_execvpe *cur;
+	char **tmp;
+
+	cur = hooklist;
+	while (cur) {
+		tmp = cur->argv;
+		while (tmp)
+			free(tmp++);
+
+		tmp = cur->envp;
+		while (tmp)
+			free(tmp++);
+
+		free(cur->file);
+		free(cur++);
+	}
+}
+
+static int parseOCIhook(struct hook_execvpe **hooklist, struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_HOOK_MAX];
+	struct blob_attr *cur;
+	int rem, ret = 0;
+	int idx = 0;
+
+	blobmsg_for_each_attr(cur, msg, rem)
+		++idx;
+
+	if (!idx)
+		goto errout;
+
+	*hooklist = calloc(idx + 1, sizeof(struct hook_execvpe *));
+	idx = 0;
+
+	blobmsg_for_each_attr(cur, msg, rem) {
+		blobmsg_parse(oci_hook_policy, __OCI_HOOK_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+
+		if (!tb[OCI_HOOK_PATH]) {
+			ret = EINVAL;
+			goto errout;
+		}
+
+		hooklist[idx] = malloc(sizeof(struct hook_execvpe));
+		if (tb[OCI_HOOK_ARGS]) {
+			ret = parseOCIenvarray(tb[OCI_HOOK_ARGS], &(hooklist[idx]->argv));
+			if (ret)
+				goto errout;
+		}
+
+		if (tb[OCI_HOOK_ENV]) {
+			ret = parseOCIenvarray(tb[OCI_HOOK_ENV], &(hooklist[idx]->envp));
+			if (ret)
+				goto errout;
+		}
+
+		if (tb[OCI_HOOK_TIMEOUT])
+			hooklist[idx]->timeout = blobmsg_get_u32(tb[OCI_HOOK_TIMEOUT]);
+
+		hooklist[idx]->file = strdup(blobmsg_get_string(tb[OCI_HOOK_PATH]));
+
+		++idx;
+	}
+
+	hooklist[idx] = NULL;
+	return 0;
+
+errout:
+	free_hooklist(*hooklist);
+	*hooklist = NULL;
+
+	return ret;
+};
+
+
+enum {
+	OCI_HOOKS_PRESTART,
+	OCI_HOOKS_CREATERUNTIME,
+	OCI_HOOKS_CREATECONTAINER,
+	OCI_HOOKS_STARTCONTAINER,
+	OCI_HOOKS_POSTSTART,
+	OCI_HOOKS_POSTSTOP,
+	__OCI_HOOKS_MAX,
+};
+
+static const struct blobmsg_policy oci_hooks_policy[] = {
+	[OCI_HOOKS_PRESTART] = { "prestart", BLOBMSG_TYPE_ARRAY },
+	[OCI_HOOKS_CREATERUNTIME] = { "createRuntime", BLOBMSG_TYPE_ARRAY },
+	[OCI_HOOKS_CREATECONTAINER] = { "createContainer", BLOBMSG_TYPE_ARRAY },
+	[OCI_HOOKS_STARTCONTAINER] = { "startContainer", BLOBMSG_TYPE_ARRAY },
+	[OCI_HOOKS_POSTSTART] = { "poststart", BLOBMSG_TYPE_ARRAY },
+	[OCI_HOOKS_POSTSTOP] = { "poststop", BLOBMSG_TYPE_ARRAY },
+};
+
+static int parseOCIhooks(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_HOOKS_MAX];
+	int ret;
+
+	blobmsg_parse(oci_hooks_policy, __OCI_HOOKS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (tb[OCI_HOOKS_PRESTART])
+		INFO("warning: ignoring deprecated prestart hook");
+
+	if (tb[OCI_HOOKS_CREATERUNTIME]) {
+		ret = parseOCIhook(&opts.hooks.createRuntime, tb[OCI_HOOKS_CREATERUNTIME]);
+		if (ret)
+			return ret;
+	}
+
+	if (tb[OCI_HOOKS_CREATECONTAINER]) {
+		ret = parseOCIhook(&opts.hooks.createContainer, tb[OCI_HOOKS_CREATECONTAINER]);
+		if (ret)
+			goto out_createruntime;
+	}
+
+	if (tb[OCI_HOOKS_STARTCONTAINER]) {
+		ret = parseOCIhook(&opts.hooks.startContainer, tb[OCI_HOOKS_STARTCONTAINER]);
+		if (ret)
+			goto out_createcontainer;
+	}
+
+	if (tb[OCI_HOOKS_POSTSTART]) {
+		ret = parseOCIhook(&opts.hooks.poststart, tb[OCI_HOOKS_POSTSTART]);
+		if (ret)
+			goto out_startcontainer;
+	}
+
+	if (tb[OCI_HOOKS_POSTSTOP]) {
+		ret = parseOCIhook(&opts.hooks.poststop, tb[OCI_HOOKS_POSTSTOP]);
+		if (ret)
+			goto out_poststart;
+	}
+
+	return 0;
+
+out_poststart:
+	free_hooklist(opts.hooks.poststart);
+out_startcontainer:
+	free_hooklist(opts.hooks.startContainer);
+out_createcontainer:
+	free_hooklist(opts.hooks.createContainer);
+out_createruntime:
+	free_hooklist(opts.hooks.createRuntime);
+
+	return ret;
+};
 
 enum {
 	OCI_MOUNT_SOURCE,
@@ -944,12 +1252,10 @@ static const struct blobmsg_policy oci_process_policy[] = {
 	[OCI_PROCESS_USER] = { "user", BLOBMSG_TYPE_TABLE },
 };
 
+
 static int parseOCIprocess(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_PROCESS_MAX];
-	struct blob_attr *cur;
-	unsigned int sz = 0;
-	int rem;
 	int res;
 
 	blobmsg_parse(oci_process_policy, __OCI_PROCESS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
@@ -957,19 +1263,9 @@ static int parseOCIprocess(struct blob_attr *msg)
 	if (!tb[OCI_PROCESS_ARGS])
 		return ENOENT;
 
-	blobmsg_for_each_attr(cur, tb[OCI_PROCESS_ARGS], rem)
-		++sz;
-
-	if (!sz)
-		return ENODATA;
-
-	opts.jail_argv = calloc(1 + sz, sizeof(char*));
-	if (!opts.jail_argv)
-		return ENOMEM;
-
-	sz = 0;
-	blobmsg_for_each_attr(cur, tb[OCI_PROCESS_ARGS], rem)
-		opts.jail_argv[sz++] = blobmsg_get_string(cur);
+	res = parseOCIenvarray(tb[OCI_PROCESS_ARGS], &opts.jail_argv);
+	if (res)
+		return res;
 
 	opts.console = blobmsg_get_bool(tb[OCI_PROCESS_TERMINAL]);
 	opts.no_new_privs = blobmsg_get_bool(tb[OCI_PROCESS_NONEWPRIVILEGES]);
@@ -977,19 +1273,11 @@ static int parseOCIprocess(struct blob_attr *msg)
 	if (tb[OCI_PROCESS_CWD])
 		opts.cwd = blobmsg_get_string(tb[OCI_PROCESS_CWD]);
 
-	sz = 0;
-	blobmsg_for_each_attr(cur, tb[OCI_PROCESS_ENV], rem)
-		++sz;
-
-	if (sz > 0) {
-		opts.envp = calloc(1 + sz, sizeof(char*));
-		if (!opts.envp)
-			return ENOMEM;
+	if (tb[OCI_PROCESS_ENV]) {
+		res = parseOCIenvarray(tb[OCI_PROCESS_ENV], &opts.envp);
+		if (res)
+			return res;
 	}
-
-	sz = 0;
-	blobmsg_for_each_attr(cur, tb[OCI_PROCESS_ENV], rem)
-		opts.envp[sz++] = strdup(blobmsg_get_string(cur));
 
 	if (tb[OCI_PROCESS_USER] && (res = parseOCIprocessuser(tb[OCI_PROCESS_USER])))
 		return res;
@@ -1203,6 +1491,7 @@ enum {
 	OCI_PROCESS,
 	OCI_ROOT,
 	OCI_MOUNTS,
+	OCI_HOOKS,
 	OCI_LINUX,
 	__OCI_MAX,
 };
@@ -1213,6 +1502,7 @@ static const struct blobmsg_policy oci_policy[] = {
 	[OCI_PROCESS] = { "process", BLOBMSG_TYPE_TABLE },
 	[OCI_ROOT] = { "root", BLOBMSG_TYPE_TABLE },
 	[OCI_MOUNTS] = { "mounts", BLOBMSG_TYPE_ARRAY },
+	[OCI_HOOKS] = { "hooks", BLOBMSG_TYPE_TABLE },
 	[OCI_LINUX] = { "linux", BLOBMSG_TYPE_TABLE },
 };
 
@@ -1260,6 +1550,9 @@ static int parseOCI(const char *jsonfile)
 			return res;
 
 	if (tb[OCI_LINUX] && (res = parseOCIlinux(tb[OCI_LINUX])))
+		return res;
+
+	if (tb[OCI_HOOKS] && (res = parseOCIhooks(tb[OCI_HOOKS])))
 		return res;
 
 	return 0;
@@ -1481,6 +1774,7 @@ int main(int argc, char **argv)
 		/* parent process */
 		close(pipes[1]);
 		close(pipes[2]);
+		run_hooks(opts.hooks.createRuntime);
 		if (read(pipes[0], sig_buf, 1) < 1) {
 			ERROR("can't read from child\n");
 			return -1;
@@ -1522,6 +1816,7 @@ int main(int argc, char **argv)
 			return -1;
 		}
 		close(pipes[3]);
+		run_hooks(opts.hooks.poststart);
 		uloop_process_add(&jail_process);
 		uloop_run();
 		if (jail_running) {
@@ -1536,6 +1831,7 @@ int main(int argc, char **argv)
 			netns_updown(getpid(), false);
 			close(netns_fd);
 		}
+		run_hooks(opts.hooks.poststop);
 		return jail_return_code;
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
