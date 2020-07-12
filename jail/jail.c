@@ -96,6 +96,63 @@ static struct {
 	} hooks;
 } opts;
 
+static void free_hooklist(struct hook_execvpe *hooklist)
+{
+	struct hook_execvpe *cur;
+	char **tmp;
+
+	cur = hooklist;
+	while (cur) {
+		free(cur->file);
+		tmp = cur->argv;
+		while (tmp)
+			free(*(tmp++));
+
+		free(cur->argv);
+
+		tmp = cur->envp;
+		while (tmp)
+			free(*(tmp++));
+
+		free(cur->envp);
+		free(cur++);
+	}
+}
+
+static void free_opts(bool all) {
+	char **tmp;
+
+	free(opts.hostname);
+	free(opts.cwd);
+	free(opts.extroot);
+	free(opts.uidmap);
+	free(opts.gidmap);
+	if (all) {
+		if (opts.ociseccomp) {
+			free(opts.ociseccomp->filter);
+			free(opts.ociseccomp);
+		}
+
+		tmp = opts.jail_argv;
+		while(tmp)
+			free(*(tmp++));
+
+		free(opts.jail_argv);
+
+		tmp = opts.envp;
+		while (tmp)
+			free(*(tmp++));
+
+		free(opts.envp);
+	};
+
+	free_hooklist(opts.hooks.createRuntime);
+	free_hooklist(opts.hooks.createContainer);
+	free_hooklist(opts.hooks.startContainer);
+	free_hooklist(opts.hooks.poststart);
+	free_hooklist(opts.hooks.poststop);
+}
+
 static struct blob_buf ocibuf;
 
 extern int pivot_root(const char *new_root, const char *put_old);
@@ -834,6 +891,7 @@ static int exec_jail(void *pipes_ptr)
 	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp))
 		exit(EXIT_FAILURE);
 
+	free_opts(false);
 	INFO("exec-ing %s\n", *opts.jail_argv);
 	if (opts.envp) /* respect PATH if potentially set in ENV */
 		execvpe(*opts.jail_argv, opts.jail_argv, envp);
@@ -995,25 +1053,6 @@ static const struct blobmsg_policy oci_hook_policy[] = {
 	[OCI_HOOK_TIMEOUT] = { "timeout", BLOBMSG_TYPE_INT32 },
 };
 
-static void free_hooklist(struct hook_execvpe *hooklist)
-{
-	struct hook_execvpe *cur;
-	char **tmp;
-
-	cur = hooklist;
-	while (cur) {
-		tmp = cur->argv;
-		while (tmp)
-			free(tmp++);
-
-		tmp = cur->envp;
-		while (tmp)
-			free(tmp++);
-
-		free(cur->file);
-		free(cur++);
-	}
-}
 
 static int parseOCIhook(struct hook_execvpe **hooklist, struct blob_attr *msg)
 {
@@ -1271,7 +1310,7 @@ static int parseOCIprocess(struct blob_attr *msg)
 	opts.no_new_privs = blobmsg_get_bool(tb[OCI_PROCESS_NONEWPRIVILEGES]);
 
 	if (tb[OCI_PROCESS_CWD])
-		opts.cwd = blobmsg_get_string(tb[OCI_PROCESS_CWD]);
+		opts.cwd = strdup(blobmsg_get_string(tb[OCI_PROCESS_CWD]));
 
 	if (tb[OCI_PROCESS_ENV]) {
 		res = parseOCIenvarray(tb[OCI_PROCESS_ENV], &opts.envp);
@@ -1528,7 +1567,7 @@ static int parseOCI(const char *jsonfile)
 	}
 
 	if (tb[OCI_HOSTNAME])
-		opts.hostname = blobmsg_get_string(tb[OCI_HOSTNAME]);
+		opts.hostname = strdup(blobmsg_get_string(tb[OCI_HOSTNAME]));
 
 	if (!tb[OCI_PROCESS])
 		return ENODATA;
@@ -1554,6 +1593,8 @@ static int parseOCI(const char *jsonfile)
 
 	if (tb[OCI_HOOKS] && (res = parseOCIhooks(tb[OCI_HOOKS])))
 		return res;
+
+	blob_buf_free(&ocibuf);
 
 	return 0;
 }
@@ -1599,7 +1640,7 @@ int main(int argc, char **argv)
 			opts.namespace |= CLONE_NEWCGROUP;
 			break;
 		case 'R':
-			opts.extroot = optarg;
+			opts.extroot = strdup(optarg);
 			break;
 		case 's':
 			opts.namespace |= CLONE_NEWNS;
@@ -1623,7 +1664,7 @@ int main(int argc, char **argv)
 			break;
 		case 'h':
 			opts.namespace |= CLONE_NEWUTS;
-			opts.hostname = optarg;
+			opts.hostname = strdup(optarg);
 			break;
 		case 'r':
 			opts.namespace |= CLONE_NEWNS;
@@ -1699,7 +1740,14 @@ int main(int argc, char **argv)
 		opts.seccomp != 0 || opts.ociseccomp != 0);
 
 	if (!jsonfile) {
-		opts.jail_argv = &argv[optind];
+		/* allocate NULL-terminated array for argv */
+		opts.jail_argv = calloc(1 + argc - optind, sizeof(char**));
+		if (!opts.jail_argv)
+			return EXIT_FAILURE;
+
+		for (size_t s = optind; s < argc; s++)
+			opts.jail_argv[s - optind] = strdup(argv[s]);
+
 		if (opts.namespace & CLONE_NEWUSER)
 			get_jail_user(&opts.pw_uid, &opts.pw_gid, &opts.gr_gid);
 	}
@@ -1832,6 +1880,7 @@ int main(int argc, char **argv)
 			close(netns_fd);
 		}
 		run_hooks(opts.hooks.poststop);
+		free_opts(true);
 		return jail_return_code;
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
