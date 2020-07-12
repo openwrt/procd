@@ -1105,7 +1105,7 @@ static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 	}
 
 	/* allocate combined mapping string */
-	map = calloc(1 + len, sizeof(char));
+	map = calloc(1 + totallen, sizeof(char));
 	if (!map)
 		return ENOMEM;
 
