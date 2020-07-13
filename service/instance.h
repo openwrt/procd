@@ -39,6 +39,19 @@ struct jail {
 	int argc;
 };
 
+typedef enum instance_watchdog {
+	INSTANCE_WATCHDOG_MODE_DISABLED,
+	INSTANCE_WATCHDOG_MODE_PASSIVE,
+	INSTANCE_WATCHDOG_MODE_ACTIVE,
+	__INSTANCE_WATCHDOG_MODE_MAX,
+} instance_watchdog_mode_t;
+
+struct watchdog {
+	instance_watchdog_mode_t mode;
+	uint32_t freq;
+	struct uloop_timeout timeout;
+};
+
 struct service_instance {
 	struct vlist_node node;
 	struct service *srv;
@@ -95,6 +108,8 @@ struct service_instance {
 	struct blobmsg_list file;
 	struct blobmsg_list limits;
 	struct blobmsg_list errors;
+
+	struct watchdog watchdog;
 };
 
 void instance_start(struct service_instance *in);

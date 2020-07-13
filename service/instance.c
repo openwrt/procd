@@ -66,6 +66,7 @@ enum {
 	INSTANCE_ATTR_OVERLAYDIR,
 	INSTANCE_ATTR_TMPOVERLAYSIZE,
 	INSTANCE_ATTR_BUNDLE,
+	INSTANCE_ATTR_WATCHDOG,
 	__INSTANCE_ATTR_MAX
 };
 
@@ -97,6 +98,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_OVERLAYDIR] = { "overlaydir", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_TMPOVERLAYSIZE] = { "tmpoverlaysize", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_BUNDLE] = { "bundle", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_WATCHDOG] = { "watchdog", BLOBMSG_TYPE_ARRAY },
 };
 
 enum {
@@ -553,6 +555,11 @@ instance_start(struct service_instance *in)
 		fcntl(epipe[0], F_SETFD, FD_CLOEXEC);
 	}
 
+	if (in->watchdog.mode != INSTANCE_WATCHDOG_MODE_DISABLED) {
+		uloop_timeout_set(&in->watchdog.timeout, in->watchdog.freq * 1000);
+		DEBUG(2, "Started instance %s::%s watchdog timer : timeout = %d\n", in->srv->name, in->name, in->watchdog.freq);
+	}
+
 	service_event("instance.start", in->srv->name, in->name);
 }
 
@@ -700,6 +707,7 @@ instance_exit(struct uloop_process *p, int ret)
 
 	in->exit_code = instance_exit_code(ret);
 	uloop_timeout_cancel(&in->timeout);
+	uloop_timeout_cancel(&in->watchdog.timeout);
 	service_event("instance.stop", in->srv->name, in->name);
 
 	if (in->halt) {
@@ -757,6 +765,19 @@ instance_restart(struct service_instance *in)
 	in->restart = true;
 	kill(in->proc.pid, SIGTERM);
 	uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
+}
+
+static void
+instance_watchdog(struct uloop_timeout *t)
+{
+	struct service_instance *in = container_of(t, struct service_instance, watchdog.timeout);
+
+	DEBUG(3, "instance %s::%s watchdog timer expired\n", in->srv->name, in->name);
+
+	if (in->respawn)
+		instance_restart(in);
+	else
+		instance_stop(in, true);
 }
 
 static bool string_changed(const char *a, const char *b)
@@ -823,6 +844,12 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 
 	if (!blobmsg_list_equal(&in->errors, &in_new->errors))
+		return true;
+
+	if (in->watchdog.mode != in_new->watchdog.mode)
+		return true;
+
+	if (in->watchdog.freq != in_new->watchdog.freq)
 		return true;
 
 	return false;
@@ -1184,6 +1211,35 @@ instance_config_parse(struct service_instance *in)
 			DEBUG(3, "unknown syslog facility '%s' given, using default (LOG_DAEMON)\n", blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
 	}
 
+	if (tb[INSTANCE_ATTR_WATCHDOG]) {
+		int i = 0;
+		uint32_t vals[2] = { 0, 30 };
+
+		blobmsg_for_each_attr(cur2, tb[INSTANCE_ATTR_WATCHDOG], rem) {
+			if (i >= 2)
+				break;
+
+			vals[i] = atoi(blobmsg_get_string(cur2));
+			i++;
+		}
+
+		if (vals[0] >= 0 && vals[0] < __INSTANCE_WATCHDOG_MODE_MAX) {
+			in->watchdog.mode = vals[0];
+			DEBUG(3, "setting watchdog mode (%d)\n", vals[0]);
+		} else {
+			in->watchdog.mode = 0;
+			DEBUG(3, "unknown watchdog mode (%d) given, using default (0)\n", vals[0]);
+		}
+
+		if (vals[1] > 0) {
+			in->watchdog.freq = vals[1];
+			DEBUG(3, "setting watchdog timeout (%d)\n", vals[0]);
+		} else {
+			in->watchdog.freq = 30;
+			DEBUG(3, "invalid watchdog timeout (%d) given, using default (30)\n", vals[1]);
+		}
+	}
+
 	return true;
 }
 
@@ -1269,6 +1325,7 @@ instance_free(struct service_instance *in)
 	instance_free_stdio(in);
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
+	uloop_timeout_cancel(&in->watchdog.timeout);
 	trigger_del(in);
 	watch_del(in);
 	instance_config_cleanup(in);
@@ -1323,6 +1380,9 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	blobmsg_list_simple_init(&in->limits);
 	blobmsg_list_simple_init(&in->errors);
 	blobmsg_list_simple_init(&in->jail.mount);
+
+	in->watchdog.timeout.cb = instance_watchdog;
+
 	in->valid = instance_config_parse(in);
 }
 
@@ -1443,6 +1503,13 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 
 	if (verbose && in->trigger)
 		blobmsg_add_blob(b, in->trigger);
+
+	if (in->watchdog.mode != INSTANCE_WATCHDOG_MODE_DISABLED) {
+		void *r = blobmsg_open_table(b, "watchdog");
+		blobmsg_add_u32(b, "mode", in->watchdog.mode);
+		blobmsg_add_u32(b, "timeout", in->watchdog.freq);
+		blobmsg_close_table(b, r);
+	}
 
 	blobmsg_close_table(b, i);
 }

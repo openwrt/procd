@@ -784,6 +784,71 @@ err_console_fd:
 	return UBUS_STATUS_INVALID_ARGUMENT;
 }
 
+enum {
+	SERVICE_WATCHDOG_MODE,
+	SERVICE_WATCHDOG_TIMEOUT,
+	SERVICE_WATCHDOG_NAME,
+	SERVICE_WATCHDOG_INSTANCE,
+	__SERVICE_WATCHDOG_MAX,
+};
+
+static const struct blobmsg_policy service_watchdog_policy[__SERVICE_WATCHDOG_MAX] = {
+	[SERVICE_WATCHDOG_MODE] = { "mode", BLOBMSG_TYPE_INT32 },
+	[SERVICE_WATCHDOG_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[SERVICE_WATCHDOG_TIMEOUT] = { "timeout", BLOBMSG_TYPE_INT32 },
+	[SERVICE_WATCHDOG_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+};
+
+static int
+service_handle_watchdog(struct ubus_context *ctx, struct ubus_object *obj,
+		    struct ubus_request_data *req, const char *method,
+		    struct blob_attr *msg)
+{
+	struct blob_attr *tb[__SERVICE_WATCHDOG_MAX] = {0};
+	struct service *s;
+	struct blob_attr *cur;
+	struct service_instance *in;
+
+	blobmsg_parse(service_watchdog_policy, __SERVICE_WATCHDOG_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
+	cur = tb[SERVICE_WATCHDOG_NAME];
+	if (!cur)
+		return UBUS_STATUS_NOT_FOUND;
+
+	s = avl_find_element(&services, blobmsg_data(cur), s, avl);
+	if (!s)
+		return UBUS_STATUS_NOT_FOUND;
+
+	cur = tb[SERVICE_WATCHDOG_INSTANCE];
+	if (!cur)
+		return UBUS_STATUS_NOT_FOUND;
+
+	in = vlist_find(&s->instances, blobmsg_data(cur), in, node);
+	if (!in) {
+		ERROR("instance %s not found\n", blobmsg_get_string(cur));
+		return UBUS_STATUS_NOT_FOUND;
+	}
+
+	if (tb[SERVICE_WATCHDOG_MODE])
+		in->watchdog.mode = blobmsg_get_u32(tb[SERVICE_WATCHDOG_MODE]);
+
+	if (tb[SERVICE_WATCHDOG_TIMEOUT])
+		in->watchdog.freq = blobmsg_get_u32(tb[SERVICE_WATCHDOG_TIMEOUT]);
+
+	if (in->watchdog.mode == INSTANCE_WATCHDOG_MODE_DISABLED)
+		uloop_timeout_cancel(&in->watchdog.timeout);
+	else
+		uloop_timeout_set(&in->watchdog.timeout, in->watchdog.freq * 1000);
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "name", blobmsg_get_string(tb[SERVICE_WATCHDOG_NAME]));
+	blobmsg_add_string(&b, "instance", blobmsg_get_string(tb[SERVICE_WATCHDOG_INSTANCE]));
+	blobmsg_add_u32(&b, "mode", in->watchdog.mode);
+	blobmsg_add_u32(&b, "timeout", in->watchdog.freq);
+
+	ubus_send_reply(ctx, req, b.head);
+
+	return UBUS_STATUS_OK;
+}
 
 static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
@@ -797,6 +862,7 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("validate", service_handle_validate, validate_policy),
 	UBUS_METHOD("get_data", service_get_data, get_data_policy),
 	UBUS_METHOD("state", service_handle_state, service_state_attrs),
+	UBUS_METHOD("watchdog", service_handle_watchdog, service_watchdog_policy),
 };
 
 static struct ubus_object_type main_object_type =
