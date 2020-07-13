@@ -360,7 +360,7 @@ static int uxc_stop(char *name)
 
 	ret = 0;
 	if (ubus_lookup_id(ctx, "container", &id) ||
-		ubus_invoke(ctx, id, "del", req.head, NULL, NULL, 3000)) {
+		ubus_invoke(ctx, id, "delete", req.head, NULL, NULL, 3000)) {
 		ret = EIO;
 	}
 
