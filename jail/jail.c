@@ -533,7 +533,7 @@ static int build_jail_fs(void)
 		mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0);
 	}
 	if (opts.ronly)
-		mount(NULL, "/", NULL, MS_RDONLY | MS_REMOUNT, 0);
+		mount(NULL, "/", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
 
 	return 0;
 }
