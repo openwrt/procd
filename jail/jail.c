@@ -710,6 +710,9 @@ static int exec_jail(void *pipes_ptr)
 	if (!envp)
 		exit(EXIT_FAILURE);
 
+	if (opts.cwd && chdir(opts.cwd))
+		exit(EXIT_FAILURE);
+
 	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp))
 		exit(EXIT_FAILURE);
 
