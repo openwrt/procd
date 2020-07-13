@@ -714,7 +714,11 @@ static int exec_jail(void *pipes_ptr)
 		exit(EXIT_FAILURE);
 
 	INFO("exec-ing %s\n", *opts.jail_argv);
-	execve(*opts.jail_argv, opts.jail_argv, envp);
+	if (opts.envp) /* respect PATH if potentially set in ENV */
+		execvpe(*opts.jail_argv, opts.jail_argv, envp);
+	else
+		execve(*opts.jail_argv, opts.jail_argv, envp);
+
 	/* we get there only if execve fails */
 	ERROR("failed to execve %s: %m\n", *opts.jail_argv);
 	exit(EXIT_FAILURE);
