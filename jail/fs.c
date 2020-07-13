@@ -98,7 +98,7 @@ static int do_mount(const char *root, const char *source, const char *target, co
 		fd = creat(new, 0644);
 		if (fd == -1) {
 			ERROR("creat(%s) failed: %m\n", new);
-			return -1;
+			return error;
 		}
 		close(fd);
 	}
@@ -106,13 +106,14 @@ static int do_mount(const char *root, const char *source, const char *target, co
 	if (mountflags & MS_BIND) {
 		if (mount(source, new, filesystemtype, MS_BIND, optstr)) {
 			ERROR("failed to mount -B %s %s: %m\n", source, new);
+			return error;
 		}
 		mountflags |= MS_REMOUNT;
 	}
 
 	if (mount(source, new, filesystemtype, mountflags, optstr)) {
 		ERROR("failed to mount %s %s: %m\n", source, new);
-		return -1;
+		return error;
 	}
 
 	DEBUG("mount %s%s %s (%s)\n", (mountflags & MS_BIND)?"-B ":"", source, new,
