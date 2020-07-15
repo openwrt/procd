@@ -179,6 +179,10 @@ struct mount_opt {
 	char *optstr;
 };
 
+#ifndef MS_LAZYTIME
+#define MS_LAZYTIME (1 << 25)
+#endif
+
 static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, char **mount_data, int *error)
 {
 	struct blob_attr *cur;
@@ -237,7 +241,7 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 			mf &= ~MS_STRICTATIME;
 		else if (!strcmp("lazytime", tmp))
 			mf |= MS_LAZYTIME;
-		else if (!strcmp("nostrictatime", tmp))
+		else if (!strcmp("nolazytime", tmp))
 			mf &= ~MS_LAZYTIME;
 		else if (!strcmp("suid", tmp))
 			mf &= ~MS_NOSUID;
