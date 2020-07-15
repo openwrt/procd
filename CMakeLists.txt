@@ -114,6 +114,9 @@ INSTALL(TARGETS ujail
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 ADD_DEPENDENCIES(ujail capabilities-names-h)
+IF(SECCOMP_SUPPORT)
+  ADD_DEPENDENCIES(ujail syscall-names-h)
+ENDIF()
 
 ADD_EXECUTABLE(ujail-console jail/console.c)
 TARGET_LINK_LIBRARIES(ujail-console ${ubox} ${ubus} ${blobmsg_json})
@@ -127,9 +130,6 @@ INSTALL(TARGETS uxc
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 endif()
-IF(SECCOMP_SUPPORT)
-  ADD_DEPENDENCIES(ujail syscall-names-h)
-ENDIF()
 
 IF(UTRACE_SUPPORT)
 ADD_EXECUTABLE(utrace trace/trace.c)
