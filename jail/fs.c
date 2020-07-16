@@ -37,6 +37,8 @@
 #include "jail.h"
 #include "log.h"
 
+#define UJAIL_NOAFILE "/tmp/.ujailnoafile"
+
 struct mount {
 	struct avl_node avl;
 	const char *source;
@@ -81,18 +83,40 @@ static int do_mount(const char *root, const char *source, const char *target, co
 	char new[PATH_MAX];
 	int fd;
 	bool is_bind = (orig_mountflags & MS_BIND);
+	bool is_mask = (source == (void *)(-1));
 	unsigned long mountflags = orig_mountflags;
 
-	if (is_bind && stat(source, &s)) {
+	if (source && is_bind && stat(source, &s)) {
 		ERROR("stat(%s) failed: %m\n", source);
 		return error;
 	}
 
 	snprintf(new, sizeof(new), "%s%s", root, target?target:source);
 
-	if (!is_bind || S_ISDIR(s.st_mode)) {
+	if (is_mask) {
+		if (stat(new, &s))
+			return 0; /* doesn't exists, nothing to mask */
+
+		if (S_ISDIR(s.st_mode)) {/* use empty 0-sized tmpfs for directories */
+			if (mount(NULL, new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_NOATIME, "size=0,mode=000"))
+				return error;
+		} else {
+			/* mount-bind 0-sized file having mode 000 */
+			if (mount(UJAIL_NOAFILE, new, NULL, MS_BIND, NULL))
+				return error;
+
+			if (mount(UJAIL_NOAFILE, new, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_NOATIME, NULL))
+				return error;
+		}
+
+		DEBUG("masked path %s\n", new);
+		return 0;
+	}
+
+
+	if (!is_bind || (source && S_ISDIR(s.st_mode))) {
 		mkdir_p(new, 0755);
-	} else {
+	} else if (is_bind && source) {
 		mkdir_p(dirname(new), 0755);
 		snprintf(new, sizeof(new), "%s%s", root, target?target:source);
 		fd = creat(new, 0644);
@@ -103,16 +127,20 @@ static int do_mount(const char *root, const char *source, const char *target, co
 		close(fd);
 	}
 
-	if (mountflags & MS_BIND) {
-		if (mount(source, new, filesystemtype, MS_BIND | (mountflags & MS_REC), optstr)) {
-			ERROR("failed to mount -B %s %s: %m\n", source, new);
+	if (is_bind) {
+		if (mount(source?:new, new, filesystemtype, MS_BIND | (mountflags & MS_REC), optstr)) {
+			if (error)
+				ERROR("failed to mount -B %s %s: %m\n", source, new);
+
 			return error;
 		}
 		mountflags |= MS_REMOUNT;
 	}
 
-	if (mount(source, new, filesystemtype, mountflags, optstr)) {
-		ERROR("failed to mount %s %s: %m\n", source, new);
+	if (mount(source?:(is_bind?new:NULL), new, filesystemtype, mountflags, optstr)) {
+		if (error)
+			ERROR("failed to mount %s %s: %m\n", source, new);
+
 		return error;
 	}
 
@@ -134,15 +162,19 @@ int add_mount(const char *source, const char *target, const char *filesystemtype
 	m = calloc(1, sizeof(struct mount));
 	assert(m != NULL);
 	m->avl.key = m->target = strdup(target);
-	if (source)
-		m->source = strdup(source);
+	if (source) {
+		if (source != (void*)(-1))
+			m->source = strdup(source);
+		else
+			m->source = (void*)(-1);
+	}
 	if (filesystemtype)
 		m->filesystemtype = strdup(filesystemtype);
 	m->mountflags = mountflags;
 	m->error = error;
 
 	avl_insert(&mounts, &m->avl);
-	DEBUG("adding mount %s %s bind(%d) ro(%d) err(%d)\n", m->source, m->target,
+	DEBUG("adding mount %s %s bind(%d) ro(%d) err(%d)\n", (m->source == (void*)(-1))?"mask":m->source, m->target,
 		!!(m->mountflags & MS_BIND), !!(m->mountflags & MS_RDONLY), m->error != 0);
 
 	return 0;
@@ -157,7 +189,6 @@ int add_mount_bind(const char *path, int readonly, int error)
 
 	return add_mount(path, path, NULL, mountflags, NULL, error);
 }
-
 
 enum {
 	OCI_MOUNT_SOURCE,
@@ -299,7 +330,7 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 	DEBUG("mount flags(%08lx) fsopts(\"%s\")\n", mf, *mount_data?:"");
 
 	return 0;
-};
+}
 
 int parseOCImount(struct blob_attr *msg)
 {
@@ -319,18 +350,28 @@ int parseOCImount(struct blob_attr *msg)
 			return ret;
 	}
 
-	add_mount(tb[OCI_MOUNT_SOURCE] ? blobmsg_get_string(tb[OCI_MOUNT_SOURCE]) : NULL,
+	return add_mount(tb[OCI_MOUNT_SOURCE] ? blobmsg_get_string(tb[OCI_MOUNT_SOURCE]) : NULL,
 		  blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]),
 		  tb[OCI_MOUNT_TYPE] ? blobmsg_get_string(tb[OCI_MOUNT_TYPE]) : NULL,
 		  mount_flags, mount_data, err);
+}
 
-	return 0;
-};
+static void build_noafile(void) {
+	int fd;
 
+	fd = creat(UJAIL_NOAFILE, 0000);
+	if (fd == -1)
+		return;
+
+	close(fd);
+	return;
+}
 
 int mount_all(const char *jailroot) {
 	struct library *l;
 	struct mount *m;
+
+	build_noafile();
 
 	avl_for_each_element(&libraries, l, avl)
 		add_mount_bind(l->path, 1, -1);

@@ -1233,7 +1233,6 @@ static int parseOCIlinuxns(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_NAMESPACE_MAX];
 
-
 	blobmsg_parse(oci_linux_namespace_policy, __OCI_LINUX_NAMESPACE_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
 	if (!tb[OCI_LINUX_NAMESPACE_TYPE])
@@ -1382,6 +1381,22 @@ static int parseOCIlinux(struct blob_attr *msg)
 		res = parseOCIuidgidmappings(tb[OCI_LINUX_GIDMAPPINGS], 1);
 		if (res)
 			return res;
+	}
+
+	if (tb[OCI_LINUX_READONLYPATHS]) {
+		blobmsg_for_each_attr(cur, tb[OCI_LINUX_READONLYPATHS], rem) {
+			res = add_mount(NULL, blobmsg_get_string(cur), NULL, MS_BIND | MS_REC | MS_RDONLY, NULL, 0);
+			if (res)
+				return res;
+		}
+	}
+
+	if (tb[OCI_LINUX_MASKEDPATHS]) {
+		blobmsg_for_each_attr(cur, tb[OCI_LINUX_MASKEDPATHS], rem) {
+			res = add_mount((void *)(-1), blobmsg_get_string(cur), NULL, 0, NULL, 1);
+			if (res)
+				return res;
+		}
 	}
 
 	if (tb[OCI_LINUX_SECCOMP]) {
