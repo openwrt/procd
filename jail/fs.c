@@ -104,7 +104,7 @@ static int do_mount(const char *root, const char *source, const char *target, co
 	}
 
 	if (mountflags & MS_BIND) {
-		if (mount(source, new, filesystemtype, MS_BIND, optstr)) {
+		if (mount(source, new, filesystemtype, MS_BIND | (mountflags & MS_REC), optstr)) {
 			ERROR("failed to mount -B %s %s: %m\n", source, new);
 			return error;
 		}
@@ -217,6 +217,10 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 			mf &= ~MS_NODEV;
 		else if (!strcmp("nodev", tmp))
 			mf |= MS_NODEV;
+		else if (!strcmp("iversion", tmp))
+			mf |= MS_I_VERSION;
+		else if (!strcmp("noiversion", tmp))
+			mf &= ~MS_I_VERSION;
 		else if (!strcmp("diratime", tmp))
 			mf &= ~MS_NODIRATIME;
 		else if (!strcmp("nodiratime", tmp))
