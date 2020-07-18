@@ -59,6 +59,11 @@ struct hook_execvpe {
 	int timeout;
 };
 
+struct sysctl_val {
+	char *entry;
+	char *value;
+};
+
 static struct {
 	char *name;
 	char *hostname;
@@ -76,6 +81,7 @@ static struct {
 	char **envp;
 	char *uidmap;
 	char *gidmap;
+	struct sysctl_val **sysctl;
 	int no_new_privs;
 	int namespace;
 	int procfs;
@@ -122,6 +128,18 @@ static void free_hooklist(struct hook_execvpe **hooklist)
 	free(hooklist);
 }
 
+static void free_sysctl(void) {
+	struct sysctl_val *cur;
+	cur = *opts.sysctl;
+
+	while (cur) {
+		free(cur->entry);
+		free(cur->value);
+		free(cur++);
+	}
+	free(opts.sysctl);
+}
+
 static void free_opts(bool child) {
 	char **tmp;
 
@@ -145,6 +163,7 @@ static void free_opts(bool child) {
 		free(opts.envp);
 	};
 
+	free_sysctl();
 	free(opts.hostname);
 	free(opts.cwd);
 	free(opts.extroot);
@@ -402,6 +421,50 @@ static int run_hooks(struct hook_execvpe **hooklist)
 	return 0;
 }
 
+static int apply_sysctl(const char *jail_root)
+{
+	struct sysctl_val **cur;
+	char *procdir, *fname;
+	int f;
+
+	if (!opts.sysctl)
+		return 0;
+
+	asprintf(&procdir, "%s/proc", jail_root);
+	if (!procdir)
+		return ENOMEM;
+
+	mkdir(procdir, 0700);
+	if (mount("proc", procdir, "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0))
+		return EPERM;
+
+	cur = opts.sysctl;
+
+	while (*cur) {
+		asprintf(&fname, "%s/sys/%s", procdir, (*cur)->entry);
+		if (!fname)
+			return ENOMEM;
+
+		DEBUG("sysctl: writing '%s' to %s\n", (*cur)->value, fname);
+
+		f = open(fname, O_WRONLY);
+		if (f == -1) {
+			ERROR("sysctl: can't open %s\n", fname);
+			return errno;
+		}
+		write(f, (*cur)->value, strlen((*cur)->value));
+
+		free(fname);
+		close(f);
+		++cur;
+	}
+	umount(procdir);
+	rmdir(procdir);
+	free(procdir);
+
+	return 0;
+}
+
 static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
@@ -412,6 +475,11 @@ static int build_jail_fs(void)
 
 	if (mkdtemp(jail_root) == NULL) {
 		ERROR("mkdtemp(%s) failed: %m\n", jail_root);
+		return -1;
+	}
+
+	if (apply_sysctl(jail_root)) {
+		ERROR("failed to apply sysctl values\n");
 		return -1;
 	}
 
@@ -1381,6 +1449,49 @@ static const struct blobmsg_policy oci_linux_policy[] = {
 	[OCI_LINUX_ROOTFSPROPAGATION] = { "rootfsPropagation", BLOBMSG_TYPE_STRING },
 };
 
+static int parseOCIsysctl(struct blob_attr *msg)
+{
+	struct blob_attr *cur;
+	int rem;
+	char *tmp, *tc;
+	size_t cnt = 0;
+
+	blobmsg_for_each_attr(cur, msg, rem) {
+		if (!blobmsg_name(cur) || !blobmsg_get_string(cur))
+			return EINVAL;
+
+		++cnt;
+	}
+
+	if (!cnt)
+		return 0;
+
+	opts.sysctl = calloc(cnt + 1, sizeof(struct sysctl_val *));
+	if (!opts.sysctl)
+		return ENOMEM;
+
+	cnt = 0;
+	blobmsg_for_each_attr(cur, msg, rem) {
+		opts.sysctl[cnt] = malloc(sizeof(struct sysctl_val));
+		if (!opts.sysctl[cnt])
+			return ENOMEM;
+
+		/* replace '.' with '/' in entry name */
+		tc = tmp = strdup(blobmsg_name(cur));
+		while ((tc = strchr(tc, '.')))
+			*tc = '/';
+
+		opts.sysctl[cnt]->value = strdup(blobmsg_get_string(cur));
+		opts.sysctl[cnt]->entry = tmp;
+
+		++cnt;
+	}
+
+	opts.sysctl[cnt] = NULL;
+
+	return 0;
+}
+
 static int parseOCIlinux(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_MAX];
@@ -1424,6 +1535,12 @@ static int parseOCIlinux(struct blob_attr *msg)
 			if (res)
 				return res;
 		}
+	}
+
+	if (tb[OCI_LINUX_SYSCTL]) {
+		res = parseOCIsysctl(tb[OCI_LINUX_SYSCTL]);
+		if (res)
+			return res;
 	}
 
 	if (tb[OCI_LINUX_SECCOMP]) {
