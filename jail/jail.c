@@ -87,20 +87,23 @@ static struct {
 	int gr_gid;
 	int require_jail;
 	struct {
-		struct hook_execvpe *createRuntime;
-		struct hook_execvpe *createContainer;
-		struct hook_execvpe *startContainer;
-		struct hook_execvpe *poststart;
-		struct hook_execvpe *poststop;
+		struct hook_execvpe **createRuntime;
+		struct hook_execvpe **createContainer;
+		struct hook_execvpe **startContainer;
+		struct hook_execvpe **poststart;
+		struct hook_execvpe **poststop;
 	} hooks;
 } opts;
 
-static void free_hooklist(struct hook_execvpe *hooklist)
+static void free_hooklist(struct hook_execvpe **hooklist)
 {
 	struct hook_execvpe *cur;
 	char **tmp;
 
-	cur = hooklist;
+	if (!hooklist)
+		return;
+
+	cur = *hooklist;
 	while (cur) {
 		free(cur->file);
 		tmp = cur->argv;
@@ -116,6 +119,7 @@ static void free_hooklist(struct hook_execvpe *hooklist)
 		free(cur->envp);
 		free(cur++);
 	}
+	free(hooklist);
 }
 
 static void free_opts(bool child) {
@@ -306,10 +310,10 @@ static void hook_process_handler(struct uloop_process *c, int ret)
 	uloop_timeout_cancel(&hook_process_timeout);
 	if (WIFEXITED(ret)) {
 		hook_return_code = WEXITSTATUS(ret);
-		INFO("hook (%d) exited with exit: %d\n", c->pid, hook_return_code);
+		DEBUG("hook (%d) exited with exit: %d\n", c->pid, hook_return_code);
 	} else {
 		hook_return_code = WTERMSIG(ret);
-		INFO("hook (%d) exited with signal: %d\n", c->pid, hook_return_code);
+		DEBUG("hook (%d) exited with signal: %d\n", c->pid, hook_return_code);
 	}
 	hook_running = 0;
 	uloop_end();
@@ -325,36 +329,29 @@ static void hook_process_timeout_cb(struct uloop_timeout *t)
 	kill(hook_process.pid, SIGKILL);
 }
 
-static void hook_handle_signal(int signo)
-{
-	DEBUG("forwarding signal %d to the jailed process\n", signo);
-	kill(hook_process.pid, signo);
-}
-
 static int run_hook(struct hook_execvpe *hook)
 {
-	sigset_t sigmask;
-	int i;
+	struct stat s;
 
 	DEBUG("executing hook %s\n", hook->file);
+
+	if (stat(hook->file, &s))
+		return ENOENT;
+
+	if (!((unsigned long)s.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+		return EPERM;
+
+	if (!((unsigned long)s.st_mode & (S_IRUSR | S_IRGRP | S_IROTH)))
+		return EPERM;
+
 	uloop_init();
-	sigfillset(&sigmask);
-	for (i = 0; i < _NSIG; i++) {
-		struct sigaction s = { 0 };
 
-		if (!sigismember(&sigmask, i))
-			continue;
-		if ((i == SIGCHLD) || (i == SIGPIPE) || (i == SIGSEGV))
-			continue;
-
-		s.sa_handler = hook_handle_signal;
-		sigaction(i, &s, NULL);
-	}
 	hook_running = 1;
 	hook_process.pid = fork();
 	if (hook_process.pid > 0) {
 		/* parent */
 		uloop_process_add(&hook_process);
+
 		if (hook->timeout > 0)
 			uloop_timeout_set(&hook_process_timeout, 1000 * hook->timeout);
 
@@ -367,27 +364,39 @@ static int run_hook(struct hook_execvpe *hook)
 		}
 		uloop_done();
 
-		return 0;
+		waitpid(hook_process.pid, NULL, WCONTINUED);
+
+		return hook_return_code;
 	} else if (hook_process.pid == 0) {
 		/* child */
 		execvpe(hook->file, hook->argv, hook->envp);
-		return errno;
+		hook_running = 0;
+		_exit(errno);
 	} else {
 		/* fork error */
+		hook_running = 0;
 		return errno;
 	}
 }
 
-static int run_hooks(struct hook_execvpe *hook)
+static int run_hooks(struct hook_execvpe **hooklist)
 {
-	struct hook_execvpe *cur;
+	struct hook_execvpe **cur;
 	int res;
 
-	cur = hook;
-	while (cur) {
-		res = run_hook(cur++);
+	if (!hooklist)
+		return 0; /* Nothing to do */
+
+	cur = hooklist;
+
+	while (*cur) {
+		res = run_hook(*cur);
 		if (res)
-			return res;
+			DEBUG(" error running hook %s\n", (*cur)->file);
+		else
+			DEBUG(" success running hook %s\n", (*cur)->file);
+
+		++cur;
 	}
 
 	return 0;
@@ -781,7 +790,6 @@ static int exec_jail(void *pipes_ptr)
 		ERROR("failed to build jail fs\n");
 		exit(EXIT_FAILURE);
 	}
-
 	run_hooks(opts.hooks.startContainer);
 
 	if (applyOCIcapabilities(opts.capset))
@@ -811,6 +819,7 @@ static int exec_jail(void *pipes_ptr)
 	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp))
 		exit(EXIT_FAILURE);
 
+	uloop_end();
 	free_opts(false);
 	INFO("exec-ing %s\n", *opts.jail_argv);
 	if (opts.envp) /* respect PATH if potentially set in ENV */
@@ -823,7 +832,7 @@ static int exec_jail(void *pipes_ptr)
 	exit(EXIT_FAILURE);
 }
 
-static int jail_running = 1;
+static int jail_running = 0;
 static int jail_return_code = 0;
 
 static void jail_process_timeout_cb(struct uloop_timeout *t);
@@ -857,8 +866,15 @@ static void jail_process_timeout_cb(struct uloop_timeout *t)
 
 static void jail_handle_signal(int signo)
 {
-	DEBUG("forwarding signal %d to the jailed process\n", signo);
-	kill(jail_process.pid, signo);
+	if (hook_running) {
+		DEBUG("forwarding signal %d to the hook process\n", signo);
+		kill(hook_process.pid, signo);
+	}
+
+	if (jail_running) {
+		DEBUG("forwarding signal %d to the jailed process\n", signo);
+		kill(jail_process.pid, signo);
+	}
 }
 
 static int netns_open_pid(const pid_t target_ns)
@@ -974,7 +990,7 @@ static const struct blobmsg_policy oci_hook_policy[] = {
 };
 
 
-static int parseOCIhook(struct hook_execvpe **hooklist, struct blob_attr *msg)
+static int parseOCIhook(struct hook_execvpe ***hooklist, struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_HOOK_MAX];
 	struct blob_attr *cur;
@@ -985,10 +1001,13 @@ static int parseOCIhook(struct hook_execvpe **hooklist, struct blob_attr *msg)
 		++idx;
 
 	if (!idx)
-		goto errout;
+		return 0;
 
 	*hooklist = calloc(idx + 1, sizeof(struct hook_execvpe *));
 	idx = 0;
+
+	if (!(*hooklist))
+		return ENOMEM;
 
 	blobmsg_for_each_attr(cur, msg, rem) {
 		blobmsg_parse(oci_hook_policy, __OCI_HOOK_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
@@ -998,28 +1017,36 @@ static int parseOCIhook(struct hook_execvpe **hooklist, struct blob_attr *msg)
 			goto errout;
 		}
 
-		hooklist[idx] = malloc(sizeof(struct hook_execvpe));
+		(*hooklist)[idx] = malloc(sizeof(struct hook_execvpe));
 		if (tb[OCI_HOOK_ARGS]) {
-			ret = parseOCIenvarray(tb[OCI_HOOK_ARGS], &(hooklist[idx]->argv));
+			ret = parseOCIenvarray(tb[OCI_HOOK_ARGS], &((*hooklist)[idx]->argv));
 			if (ret)
 				goto errout;
-		}
+		} else {
+			(*hooklist)[idx]->argv = calloc(2, sizeof(char *));
+			((*hooklist)[idx]->argv)[0] = strdup(blobmsg_get_string(tb[OCI_HOOK_PATH]));
+			((*hooklist)[idx]->argv)[1] = NULL;
+		};
+
 
 		if (tb[OCI_HOOK_ENV]) {
-			ret = parseOCIenvarray(tb[OCI_HOOK_ENV], &(hooklist[idx]->envp));
+			ret = parseOCIenvarray(tb[OCI_HOOK_ENV], &((*hooklist)[idx]->envp));
 			if (ret)
 				goto errout;
 		}
 
 		if (tb[OCI_HOOK_TIMEOUT])
-			hooklist[idx]->timeout = blobmsg_get_u32(tb[OCI_HOOK_TIMEOUT]);
+			(*hooklist)[idx]->timeout = blobmsg_get_u32(tb[OCI_HOOK_TIMEOUT]);
 
-		hooklist[idx]->file = strdup(blobmsg_get_string(tb[OCI_HOOK_PATH]));
+		(*hooklist)[idx]->file = strdup(blobmsg_get_string(tb[OCI_HOOK_PATH]));
 
 		++idx;
 	}
 
-	hooklist[idx] = NULL;
+	(*hooklist)[idx] = NULL;
+
+	DEBUG("added %d hooks\n", idx);
+
 	return 0;
 
 errout:
@@ -1057,7 +1084,7 @@ static int parseOCIhooks(struct blob_attr *msg)
 	blobmsg_parse(oci_hooks_policy, __OCI_HOOKS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
 	if (tb[OCI_HOOKS_PRESTART])
-		INFO("warning: ignoring deprecated prestart hook");
+		INFO("warning: ignoring deprecated prestart hook\n");
 
 	if (tb[OCI_HOOKS_CREATERUNTIME]) {
 		ret = parseOCIhook(&opts.hooks.createRuntime, tb[OCI_HOOKS_CREATERUNTIME]);
@@ -1194,7 +1221,7 @@ static int parseOCIprocess(struct blob_attr *msg)
 	    (res = parseOCIcapabilities(&opts.capset, tb[OCI_PROCESS_CAPABILITIES])))
 		return res;
 
-	/* ToDo: rlimits, capabilities */
+	/* ToDo: rlimits */
 
 	return 0;
 }
@@ -1490,7 +1517,7 @@ int main(int argc, char **argv)
 	const char log[] = "/dev/log";
 	const char ubus[] = "/var/run/ubus.sock";
 	char *jsonfile = NULL;
-	int ch, i;
+	int i, ch;
 	int pipes[4];
 	char sig_buf[1];
 	int netns_fd;
@@ -1653,8 +1680,6 @@ int main(int argc, char **argv)
 	if (opts.name)
 		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
 
-	uloop_init();
-
 	sigfillset(&sigmask);
 	for (i = 0; i < _NSIG; i++) {
 		struct sigaction s = { 0 };
@@ -1708,6 +1733,7 @@ int main(int argc, char **argv)
 	}
 
 	if (jail_process.pid > 0) {
+		jail_running = 1;
 		seteuid(0);
 		/* parent process */
 		close(pipes[1]);
@@ -1755,6 +1781,8 @@ int main(int argc, char **argv)
 		}
 		close(pipes[3]);
 		run_hooks(opts.hooks.poststart);
+
+		uloop_init();
 		uloop_process_add(&jail_process);
 		uloop_run();
 		if (jail_running) {
