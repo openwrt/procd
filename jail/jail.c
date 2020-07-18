@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2015 John Crispin <blogic@openwrt.org>
+ * Copyright (C) 2020 Daniel Golle <daniel@makrotopia.org>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License version 2.1
@@ -91,6 +92,8 @@ static struct {
 	int pw_uid;
 	int pw_gid;
 	int gr_gid;
+	gid_t *additional_gids;
+	size_t num_additional_gids;
 	int require_jail;
 	struct {
 		struct hook_execvpe **createRuntime;
@@ -860,6 +863,18 @@ static int exec_jail(void *pipes_ptr)
 	}
 	run_hooks(opts.hooks.startContainer);
 
+	if (!(opts.namespace & CLONE_NEWUSER)) {
+		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
+
+		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
+	}
+
+	if (opts.additional_gids &&
+	    (setgroups(opts.num_additional_gids, opts.additional_gids) < 0)) {
+		ERROR("setgroups failed: %m\n");
+		exit(EXIT_FAILURE);
+	}
+
 	if (applyOCIcapabilities(opts.capset))
 		exit(EXIT_FAILURE);
 
@@ -869,12 +884,6 @@ static int exec_jail(void *pipes_ptr)
 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
                 ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
 		exit(EXIT_FAILURE);
-	}
-
-	if (!(opts.namespace & CLONE_NEWUSER)) {
-		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
-
-		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
 	}
 
 	char **envp = build_envp(opts.seccomp, opts.envp);
@@ -1216,6 +1225,9 @@ static const struct blobmsg_policy oci_process_user_policy[] = {
 
 static int parseOCIprocessuser(struct blob_attr *msg) {
 	struct blob_attr *tb[__OCI_PROCESS_USER_MAX];
+	struct blob_attr *cur;
+	int rem;
+	int has_gid = 0;
 
 	blobmsg_parse(oci_process_user_policy, __OCI_PROCESS_USER_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
@@ -1225,9 +1237,37 @@ static int parseOCIprocessuser(struct blob_attr *msg) {
 	if (tb[OCI_PROCESS_USER_GID]) {
 		opts.pw_gid = blobmsg_get_u32(tb[OCI_PROCESS_USER_GID]);
 		opts.gr_gid = blobmsg_get_u32(tb[OCI_PROCESS_USER_GID]);
+		has_gid = 1;
 	}
 
-	/* ToDo: umask, additional GIDs */
+	if (tb[OCI_PROCESS_USER_ADDITIONALGIDS]) {
+		size_t gidcnt = 0;
+
+		blobmsg_for_each_attr(cur, tb[OCI_PROCESS_USER_ADDITIONALGIDS], rem) {
+			++gidcnt;
+			if (has_gid && (blobmsg_get_u32(cur) == opts.gr_gid))
+				continue;
+		}
+
+		if (gidcnt) {
+			opts.additional_gids = calloc(gidcnt + has_gid, sizeof(gid_t));
+			gidcnt = 0;
+
+			/* always add primary GID to set of GIDs if set */
+			if (has_gid)
+				opts.additional_gids[gidcnt++] = opts.gr_gid;
+
+			blobmsg_for_each_attr(cur, tb[OCI_PROCESS_USER_ADDITIONALGIDS], rem) {
+				if (has_gid && (blobmsg_get_u32(cur) == opts.gr_gid))
+					continue;
+				opts.additional_gids[gidcnt++] = blobmsg_get_u32(cur);
+			}
+			opts.num_additional_gids = gidcnt;
+		}
+		DEBUG("read %lu additional groups\n", gidcnt);
+	}
+
+	/* ToDo: umask */
 
 	return 0;
 }
