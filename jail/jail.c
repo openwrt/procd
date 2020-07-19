@@ -585,7 +585,7 @@ static int build_jail_fs(void)
 		if (overlaydir)
 			unlink(jaillink);
 
-		symlink("../tmp/resolv.conf.d/resolv.conf.auto", jaillink);
+		symlink("../dev/resolv.conf.d/resolv.conf.auto", jaillink);
 	}
 
 	run_hooks(opts.hooks.createContainer);
@@ -2051,7 +2051,7 @@ int main(int argc, char **argv)
 
 				snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
 				mkdir_p(hostdir, 0755);
-				add_mount(hostdir, "/tmp/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, NULL, -1);
+				add_mount(hostdir, "/dev/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, NULL, -1);
 			}
 		}
 
