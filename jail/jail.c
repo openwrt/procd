@@ -579,8 +579,6 @@ static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
 	char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
-	char tmpdevdir[] = "/tmp/ujail-XXXXXX/dev";
-	char tmpdevptsdir[] = "/tmp/ujail-XXXXXX/dev/pts";
 	char *overlaydir = NULL;
 	mode_t old_umask;
 
@@ -642,23 +640,13 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	snprintf(tmpdevdir, sizeof(tmpdevdir), "%s/dev", jail_root);
-	mkdir_p(tmpdevdir, 0755);
-	if (mount(NULL, tmpdevdir, "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "size=1M"))
-		return -1;
-
-	snprintf(tmpdevptsdir, sizeof(tmpdevptsdir), "%s/dev/pts", jail_root);
-	mkdir_p(tmpdevptsdir, 0755);
-	if (mount(NULL, tmpdevptsdir, "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, NULL))
-		return -1;
-
-	if (opts.console)
-		create_dev_console(jail_root);
-
 	if (mount_all(jail_root)) {
 		ERROR("mount_all() failed\n");
 		return -1;
 	}
+
+	if (opts.console)
+		create_dev_console(jail_root);
 
 	/* make sure /etc/resolv.conf exists if in new network namespace */
 	if (opts.namespace & CLONE_NEWNET) {
@@ -704,27 +692,6 @@ static int build_jail_fs(void)
 	if (create_devices()) {
 		ERROR("create_devices() failed\n");
 		return -1;
-	}
-	if (opts.procfs) {
-		mkdir("/proc", 0755);
-		mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
-		/*
-		 * make /proc/sys read-only while keeping read-write to
-		 * /proc/sys/net if CLONE_NEWNET is set.
-		 */
-		if (opts.namespace & CLONE_NEWNET)
-			mount("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, 0);
-
-		mount("/proc/sys", "/proc/sys", NULL, MS_BIND, 0);
-		mount(NULL, "/proc/sys", NULL, MS_REMOUNT | MS_RDONLY, 0);
-		mount(NULL, "/proc", NULL, MS_REMOUNT, 0);
-
-		if (opts.namespace & CLONE_NEWNET)
-			mount("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, 0);
-	}
-	if (opts.sysfs) {
-		mkdir("/sys", 0755);
-		mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0);
 	}
 	if (opts.ronly)
 		mount(NULL, "/", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
@@ -2244,6 +2211,19 @@ int main(int argc, char **argv)
 				mkdir_p(hostdir, 0755);
 				add_mount(hostdir, "/dev/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, NULL, -1);
 			}
+
+			/* default mounts */
+			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "size=1M", -1);
+			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
+
+			if (opts.procfs || jsonfile)
+				add_mount("proc", "/proc", "proc", MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL, -1);
+
+			if (opts.sysfs || jsonfile)
+				add_mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, NULL, -1);
+
+			if (jsonfile)
+				add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, "mode=1777", -1);
 		}
 
 		if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
