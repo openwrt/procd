@@ -20,6 +20,7 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 /* musl only defined 15 limit types, make sure all 16 are supported */
 #ifndef RLIMIT_RTTIME
@@ -77,6 +78,14 @@ struct sysctl_val {
 	char *value;
 };
 
+struct mknod_args {
+	char *path;
+	mode_t mode;
+	dev_t dev;
+	uid_t uid;
+	gid_t gid;
+};
+
 static struct {
 	char *name;
 	char *hostname;
@@ -119,6 +128,7 @@ static struct {
 	struct rlimit *rlimits[RLIM_NLIMITS];
 	int oom_score_adj;
 	bool set_oom_score_adj;
+	struct mknod_args **devices;
 } opts;
 
 static void free_hooklist(struct hook_execvpe **hooklist)
@@ -160,6 +170,21 @@ static void free_sysctl(void) {
 	free(opts.sysctl);
 }
 
+static void free_devices(void) {
+	struct mknod_args **cur;
+
+	if (!opts.devices)
+		return;
+
+	cur = opts.devices;
+
+	while (*cur) {
+		free((*cur)->path);
+		free(*(cur++));
+	}
+	free(opts.devices);
+}
+
 static void free_rlimits(void) {
 	int type;
 
@@ -192,6 +217,7 @@ static void free_opts(bool child) {
 
 	free_rlimits();
 	free_sysctl();
+	free_devices();
 	free(opts.hostname);
 	free(opts.cwd);
 	free(opts.extroot);
@@ -493,6 +519,62 @@ static int apply_sysctl(const char *jail_root)
 	return 0;
 }
 
+static struct mknod_args default_devices[] = {
+	{ .path = "/dev/null", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 3) },
+	{ .path = "/dev/zero", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 5) },
+	{ .path = "/dev/full", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 7) },
+	{ .path = "/dev/random", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 8) },
+	{ .path = "/dev/urandom", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 9) },
+	{ .path = "/dev/tty", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP), .dev = makedev(5, 0), .gid = 5 },
+	{ 0 },
+};
+
+static int create_devices(void)
+{
+	struct mknod_args **cur, *curdef;
+
+	if (!opts.devices)
+		goto only_default_devices;
+
+	cur = opts.devices;
+
+	while (*cur) {
+		DEBUG("creating %s (mode=%08o)\n", (*cur)->path, (*cur)->mode);
+		if (mknod((*cur)->path, (*cur)->mode, (*cur)->dev))
+			return errno;
+
+		if (((*cur)->uid || (*cur)->gid) &&
+		    chown((*cur)->path, (*cur)->uid, (*cur)->gid))
+			return errno;
+
+		++cur;
+	}
+
+only_default_devices:
+	curdef = default_devices;
+	while(curdef->path) {
+		DEBUG("creating %s (mode=%08o)\n", curdef->path, curdef->mode);
+		if (mknod(curdef->path, curdef->mode, curdef->dev)) {
+			++curdef;
+			continue; /* may already exist, eg. due to a bind-mount */
+		}
+		if ((curdef->uid || curdef->gid) &&
+		    chown(curdef->path, curdef->uid, curdef->gid))
+			return errno;
+
+		++curdef;
+	}
+
+	/* Dev symbolic links as defined in OCI spec */
+	symlink("/dev/pts/ptmx", "/dev/ptmx");
+	symlink("/proc/self/fd", "/dev/fd");
+	symlink("/proc/self/fd/0", "/dev/stdin");
+	symlink("/proc/self/fd/1", "/dev/stdout");
+	symlink("/proc/self/fd/2", "/dev/stderr");
+
+	return 0;
+}
+
 static int build_jail_fs(void)
 {
 	char jail_root[] = "/tmp/ujail-XXXXXX";
@@ -500,6 +582,9 @@ static int build_jail_fs(void)
 	char tmpdevdir[] = "/tmp/ujail-XXXXXX/dev";
 	char tmpdevptsdir[] = "/tmp/ujail-XXXXXX/dev/pts";
 	char *overlaydir = NULL;
+	mode_t old_umask;
+
+	old_umask = umask(0);
 
 	if (mkdtemp(jail_root) == NULL) {
 		ERROR("mkdtemp(%s) failed: %m\n", jail_root);
@@ -616,6 +701,10 @@ static int build_jail_fs(void)
 	umount2("/old", MNT_DETACH);
 	rmdir("/old");
 
+	if (create_devices()) {
+		ERROR("create_devices() failed\n");
+		return -1;
+	}
 	if (opts.procfs) {
 		mkdir("/proc", 0755);
 		mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
@@ -639,6 +728,8 @@ static int build_jail_fs(void)
 	}
 	if (opts.ronly)
 		mount(NULL, "/", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
+
+	umask(old_umask);
 
 	return 0;
 }
@@ -1615,10 +1706,111 @@ static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 }
 
 enum {
+	OCI_DEVICES_TYPE,
+	OCI_DEVICES_PATH,
+	OCI_DEVICES_MAJOR,
+	OCI_DEVICES_MINOR,
+	OCI_DEVICES_FILEMODE,
+	OCI_DEVICES_UID,
+	OCI_DEVICES_GID,
+	__OCI_DEVICES_MAX,
+};
+
+static const struct blobmsg_policy oci_devices_policy[] = {
+	[OCI_DEVICES_TYPE] = { "type", BLOBMSG_TYPE_STRING },
+	[OCI_DEVICES_PATH] = { "path", BLOBMSG_TYPE_STRING },
+	[OCI_DEVICES_MAJOR] = { "major", BLOBMSG_TYPE_INT32 },
+	[OCI_DEVICES_MINOR] = { "minor", BLOBMSG_TYPE_INT32 },
+	[OCI_DEVICES_FILEMODE] = { "fileMode", BLOBMSG_TYPE_INT32 },
+	[OCI_DEVICES_UID] = { "uid", BLOBMSG_TYPE_INT32 },
+	[OCI_DEVICES_GID] = { "uid", BLOBMSG_TYPE_INT32 },
+};
+
+static mode_t resolve_devtype(char *tstr)
+{
+	if (!strcmp("c", tstr) ||
+	    !strcmp("u", tstr))
+		return S_IFCHR;
+	else if (!strcmp("b", tstr))
+		return S_IFBLK;
+	else if (!strcmp("p", tstr))
+		return S_IFIFO;
+	else
+		return 0;
+}
+
+static int parseOCIdevices(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_DEVICES_MAX];
+	struct blob_attr *cur;
+	int rem;
+	size_t cnt = 0;
+	struct mknod_args *tmp;
+
+	blobmsg_for_each_attr(cur, msg, rem)
+		++cnt;
+
+	opts.devices = calloc(cnt + 1, sizeof(struct mknod_args *));
+
+	cnt = 0;
+	blobmsg_for_each_attr(cur, msg, rem) {
+		blobmsg_parse(oci_devices_policy, __OCI_DEVICES_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+		if (!tb[OCI_DEVICES_TYPE] ||
+		    !tb[OCI_DEVICES_PATH])
+			return ENODATA;
+
+		tmp = calloc(1, sizeof(struct mknod_args));
+		if (!tmp)
+			return ENOMEM;
+
+		tmp->mode = resolve_devtype(blobmsg_get_string(tb[OCI_DEVICES_TYPE]));
+		if (!tmp->mode)
+			return EINVAL;
+
+		if (tmp->mode != S_IFIFO) {
+			if (!tb[OCI_DEVICES_MAJOR] || !tb[OCI_DEVICES_MINOR])
+				return ENODATA;
+
+			tmp->dev = makedev(blobmsg_get_u32(tb[OCI_DEVICES_MAJOR]),
+					   blobmsg_get_u32(tb[OCI_DEVICES_MINOR]));
+		}
+
+		if (tb[OCI_DEVICES_FILEMODE]) {
+			if (~(S_IRWXU|S_IRWXG|S_IRWXO) & blobmsg_get_u32(tb[OCI_DEVICES_FILEMODE]))
+				return EINVAL;
+
+			tmp->mode |= blobmsg_get_u32(tb[OCI_DEVICES_FILEMODE]);
+		} else {
+			tmp->mode |= (S_IRUSR|S_IWUSR); /* 0600 */
+		}
+
+		tmp->path = strdup(blobmsg_get_string(tb[OCI_DEVICES_PATH]));
+
+		if (tb[OCI_DEVICES_UID])
+			tmp->uid = blobmsg_get_u32(tb[OCI_DEVICES_UID]);
+		else
+			tmp->uid = -1;
+
+		if (tb[OCI_DEVICES_GID])
+			tmp->gid = blobmsg_get_u32(tb[OCI_DEVICES_GID]);
+		else
+			tmp->gid = -1;
+
+		DEBUG("read device %s (%s)\n", blobmsg_get_string(tb[OCI_DEVICES_PATH]), blobmsg_get_string(tb[OCI_DEVICES_TYPE]));
+		opts.devices[cnt++] = tmp;
+	}
+
+	opts.devices[cnt] = NULL;
+
+	return 0;
+}
+
+enum {
 	OCI_LINUX_RESOURCES,
 	OCI_LINUX_SECCOMP,
 	OCI_LINUX_SYSCTL,
 	OCI_LINUX_NAMESPACES,
+	OCI_LINUX_DEVICES,
 	OCI_LINUX_UIDMAPPINGS,
 	OCI_LINUX_GIDMAPPINGS,
 	OCI_LINUX_MASKEDPATHS,
@@ -1632,6 +1824,7 @@ static const struct blobmsg_policy oci_linux_policy[] = {
 	[OCI_LINUX_SECCOMP] = { "seccomp", BLOBMSG_TYPE_TABLE },
 	[OCI_LINUX_SYSCTL] = { "sysctl", BLOBMSG_TYPE_TABLE },
 	[OCI_LINUX_NAMESPACES] = { "namespaces", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_DEVICES] = { "devices", BLOBMSG_TYPE_ARRAY },
 	[OCI_LINUX_UIDMAPPINGS] = { "uidMappings", BLOBMSG_TYPE_ARRAY },
 	[OCI_LINUX_GIDMAPPINGS] = { "gidMappings", BLOBMSG_TYPE_ARRAY },
 	[OCI_LINUX_MASKEDPATHS] = { "maskedPaths", BLOBMSG_TYPE_ARRAY },
@@ -1737,6 +1930,12 @@ static int parseOCIlinux(struct blob_attr *msg)
 		opts.ociseccomp = parseOCIlinuxseccomp(tb[OCI_LINUX_SECCOMP]);
 		if (!opts.ociseccomp)
 			return EINVAL;
+	}
+
+	if (tb[OCI_LINUX_DEVICES]) {
+		res = parseOCIdevices(tb[OCI_LINUX_DEVICES]);
+		if (res)
+			return res;
 	}
 
 	return 0;
@@ -2026,14 +2225,6 @@ int main(int argc, char **argv)
 
 	if (opts.namespace) {
 		if (opts.namespace & CLONE_NEWNS) {
-			add_mount_bind("/dev/full", 0, -1);
-			add_mount_bind("/dev/null", 0, -1);
-			add_mount_bind("/dev/random", 0, -1);
-			add_mount_bind("/dev/urandom", 0, -1);
-			add_mount_bind("/dev/zero", 0, -1);
-			add_mount_bind("/dev/ptmx", 0, -1);
-			add_mount_bind("/dev/tty", 0, -1);
-
 			if (!opts.extroot && (opts.user || opts.group)) {
 				add_mount_bind("/etc/passwd", 0, -1);
 				add_mount_bind("/etc/group", 0, -1);
