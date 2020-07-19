@@ -170,6 +170,10 @@ int add_mount(const char *source, const char *target, const char *filesystemtype
 	}
 	if (filesystemtype)
 		m->filesystemtype = strdup(filesystemtype);
+
+	if (optstr)
+		m->optstr = strdup(optstr);
+
 	m->mountflags = mountflags;
 	m->error = error;
 
@@ -350,10 +354,15 @@ int parseOCImount(struct blob_attr *msg)
 			return ret;
 	}
 
-	return add_mount(tb[OCI_MOUNT_SOURCE] ? blobmsg_get_string(tb[OCI_MOUNT_SOURCE]) : NULL,
+	ret = add_mount(tb[OCI_MOUNT_SOURCE] ? blobmsg_get_string(tb[OCI_MOUNT_SOURCE]) : NULL,
 		  blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]),
 		  tb[OCI_MOUNT_TYPE] ? blobmsg_get_string(tb[OCI_MOUNT_TYPE]) : NULL,
 		  mount_flags, mount_data, err);
+
+	if (mount_data)
+		free(mount_data);
+
+	return ret;
 }
 
 static void build_noafile(void) {
