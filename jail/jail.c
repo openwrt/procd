@@ -117,6 +117,8 @@ static struct {
 		struct hook_execvpe **poststop;
 	} hooks;
 	struct rlimit *rlimits[RLIM_NLIMITS];
+	int oom_score_adj;
+	bool set_oom_score_adj;
 } opts;
 
 static void free_hooklist(struct hook_execvpe **hooklist)
@@ -1416,6 +1418,7 @@ enum {
 	OCI_PROCESS_CAPABILITIES,
 	OCI_PROCESS_CWD,
 	OCI_PROCESS_ENV,
+	OCI_PROCESS_OOMSCOREADJ,
 	OCI_PROCESS_NONEWPRIVILEGES,
 	OCI_PROCESS_RLIMITS,
 	OCI_PROCESS_TERMINAL,
@@ -1428,6 +1431,7 @@ static const struct blobmsg_policy oci_process_policy[] = {
 	[OCI_PROCESS_CAPABILITIES] = { "capabilities", BLOBMSG_TYPE_TABLE },
 	[OCI_PROCESS_CWD] = { "cwd", BLOBMSG_TYPE_STRING },
 	[OCI_PROCESS_ENV] = { "env", BLOBMSG_TYPE_ARRAY },
+	[OCI_PROCESS_OOMSCOREADJ] = { "oomScoreAdj", BLOBMSG_TYPE_INT32 },
 	[OCI_PROCESS_NONEWPRIVILEGES] = { "noNewPrivileges", BLOBMSG_TYPE_BOOL },
 	[OCI_PROCESS_RLIMITS] = { "rlimits", BLOBMSG_TYPE_ARRAY },
 	[OCI_PROCESS_TERMINAL] = { "terminal", BLOBMSG_TYPE_BOOL },
@@ -1471,6 +1475,11 @@ static int parseOCIprocess(struct blob_attr *msg)
 	if (tb[OCI_PROCESS_RLIMITS] &&
 	    (res = parseOCIrlimits(tb[OCI_PROCESS_RLIMITS])))
 		return res;
+
+	if (tb[OCI_PROCESS_OOMSCOREADJ]) {
+		opts.oom_score_adj = blobmsg_get_u32(tb[OCI_PROCESS_OOMSCOREADJ]);
+		opts.set_oom_score_adj = true;
+	}
 
 	return 0;
 }
@@ -1808,6 +1817,25 @@ static int parseOCI(const char *jsonfile)
 	return 0;
 }
 
+static int set_oom_score_adj(void)
+{
+	int f;
+	char fname[32];
+
+	if (!opts.set_oom_score_adj)
+		return 0;
+
+	snprintf(fname, sizeof(fname), "/proc/%u/oom_score_adj", jail_process.pid);
+	f = open(fname, O_WRONLY | O_TRUNC);
+	if (f == -1)
+		return errno;
+
+	dprintf(f, "%d", opts.oom_score_adj);
+	close(f);
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	sigset_t sigmask;
@@ -2047,6 +2075,8 @@ int main(int argc, char **argv)
 			return -1;
 		}
 		close(pipes[0]);
+		set_oom_score_adj();
+
 		if (opts.namespace & CLONE_NEWUSER) {
 			if (write_setgroups(jail_process.pid, true)) {
 				ERROR("can't write setgroups\n");
