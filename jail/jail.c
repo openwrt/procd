@@ -94,6 +94,8 @@ static struct {
 	int gr_gid;
 	gid_t *additional_gids;
 	size_t num_additional_gids;
+	mode_t umask;
+	bool set_umask;
 	int require_jail;
 	struct {
 		struct hook_execvpe **createRuntime;
@@ -875,6 +877,9 @@ static int exec_jail(void *pipes_ptr)
 		exit(EXIT_FAILURE);
 	}
 
+	if (opts.set_umask)
+		umask(opts.umask);
+
 	if (applyOCIcapabilities(opts.capset))
 		exit(EXIT_FAILURE);
 
@@ -1267,7 +1272,10 @@ static int parseOCIprocessuser(struct blob_attr *msg) {
 		DEBUG("read %lu additional groups\n", gidcnt);
 	}
 
-	/* ToDo: umask */
+	if (tb[OCI_PROCESS_USER_UMASK]) {
+		opts.umask = blobmsg_get_u32(tb[OCI_PROCESS_USER_UMASK]);
+		opts.set_umask = true;
+	}
 
 	return 0;
 }
