@@ -17,6 +17,18 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+
+/* musl only defined 15 limit types, make sure all 16 are supported */
+#ifndef RLIMIT_RTTIME
+#define RLIMIT_RTTIME 15
+#undef RLIMIT_NLIMITS
+#define RLIMIT_NLIMITS 16
+#undef RLIM_NLIMITS
+#define RLIM_NLIMITS 16
+#endif
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -24,12 +36,12 @@
 #include <pwd.h>
 #include <grp.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 #include <sched.h>
 #include <linux/limits.h>
 #include <linux/filter.h>
 #include <signal.h>
+#include <inttypes.h>
 
 #include "capabilities.h"
 #include "elf.h"
@@ -104,6 +116,7 @@ static struct {
 		struct hook_execvpe **poststart;
 		struct hook_execvpe **poststop;
 	} hooks;
+	struct rlimit *rlimits[RLIM_NLIMITS];
 } opts;
 
 static void free_hooklist(struct hook_execvpe **hooklist)
@@ -145,6 +158,13 @@ static void free_sysctl(void) {
 	free(opts.sysctl);
 }
 
+static void free_rlimits(void) {
+	int type;
+
+	for (type = 0; type < RLIM_NLIMITS; ++type)
+		free(opts.rlimits[type]);
+}
+
 static void free_opts(bool child) {
 	char **tmp;
 
@@ -168,6 +188,7 @@ static void free_opts(bool child) {
 		free(opts.envp);
 	};
 
+	free_rlimits();
 	free_sysctl();
 	free(opts.hostname);
 	free(opts.cwd);
@@ -735,6 +756,22 @@ static void set_jail_user(int pw_uid, int user_gid, int gr_gid)
 	}
 }
 
+static int apply_rlimits(void)
+{
+	int resource;
+
+	for (resource = 0; resource < RLIM_NLIMITS; ++resource) {
+		if (opts.rlimits[resource])
+			DEBUG("applying limits to resource %u\n", resource);
+
+		if (opts.rlimits[resource] &&
+		    setrlimit(resource, opts.rlimits[resource]))
+			return errno;
+	}
+
+	return 0;
+}
+
 #define MAX_ENVP	8
 static char** build_envp(const char *seccomp, char **ocienvp)
 {
@@ -1280,6 +1317,100 @@ static int parseOCIprocessuser(struct blob_attr *msg) {
 	return 0;
 }
 
+/* from manpage GETRLIMIT(2) */
+static const char* const rlimit_names[RLIM_NLIMITS] = {
+	[RLIMIT_AS] = "AS",
+	[RLIMIT_CORE] = "CORE",
+	[RLIMIT_CPU] = "CPU",
+	[RLIMIT_DATA] = "DATA",
+	[RLIMIT_FSIZE] = "FSIZE",
+	[RLIMIT_LOCKS] = "LOCKS",
+	[RLIMIT_MEMLOCK] = "MEMLOCK",
+	[RLIMIT_MSGQUEUE] = "MSGQUEUE",
+	[RLIMIT_NICE] = "NICE",
+	[RLIMIT_NOFILE] = "NOFILE",
+	[RLIMIT_NPROC] = "NPROC",
+	[RLIMIT_RSS] = "RSS",
+	[RLIMIT_RTPRIO] = "RTPRIO",
+	[RLIMIT_RTTIME] = "RTTIME",
+	[RLIMIT_SIGPENDING] = "SIGPENDING",
+	[RLIMIT_STACK] = "STACK",
+};
+
+static int resolve_rlimit(char *type) {
+	unsigned int rltype;
+
+	for (rltype = 0; rltype < RLIM_NLIMITS; ++rltype)
+		if (rlimit_names[rltype] &&
+		    !strncmp("RLIMIT_", type, 7) &&
+		    !strcmp(rlimit_names[rltype], type + 7))
+			return rltype;
+
+	return -1;
+}
+
+
+static int parseOCIrlimits(struct blob_attr *msg)
+{
+	struct blob_attr *cur, *cure;
+	int rem, reme;
+	int limtype = -1;
+	struct rlimit *curlim;
+	rlim_t soft, hard;
+	bool sethard = false, setsoft = false;
+
+	blobmsg_for_each_attr(cur, msg, rem) {
+		blobmsg_for_each_attr(cure, cur, reme) {
+			if (!strcmp(blobmsg_name(cure), "type") && (blobmsg_type(cure) == BLOBMSG_TYPE_STRING)) {
+				limtype = resolve_rlimit(blobmsg_get_string(cure));
+			} else if (!strcmp(blobmsg_name(cure), "soft")) {
+				switch (blobmsg_type(cure)) {
+					case BLOBMSG_TYPE_INT32:
+						soft = blobmsg_get_u32(cure);
+						break;
+					case BLOBMSG_TYPE_INT64:
+						soft = blobmsg_get_u64(cure);
+						break;
+					default:
+						return EINVAL;
+				}
+				setsoft = true;
+			} else if (!strcmp(blobmsg_name(cure), "hard")) {
+				switch (blobmsg_type(cure)) {
+					case BLOBMSG_TYPE_INT32:
+						hard = blobmsg_get_u32(cure);
+						break;
+					case BLOBMSG_TYPE_INT64:
+						hard = blobmsg_get_u64(cure);
+						break;
+					default:
+						return EINVAL;
+				}
+				sethard = true;
+			} else {
+				return EINVAL;
+			}
+		}
+
+		if (limtype < 0)
+			return EINVAL;
+
+		if (opts.rlimits[limtype])
+			return ENOTUNIQ;
+
+		if (!sethard || !setsoft)
+			return ENODATA;
+
+		curlim = malloc(sizeof(struct rlimit));
+		curlim->rlim_cur = soft;
+		curlim->rlim_max = hard;
+
+		opts.rlimits[limtype] = curlim;
+	}
+
+	return 0;
+};
+
 enum {
 	OCI_PROCESS_ARGS,
 	OCI_PROCESS_CAPABILITIES,
@@ -1337,7 +1468,9 @@ static int parseOCIprocess(struct blob_attr *msg)
 	    (res = parseOCIcapabilities(&opts.capset, tb[OCI_PROCESS_CAPABILITIES])))
 		return res;
 
-	/* ToDo: rlimits */
+	if (tb[OCI_PROCESS_RLIMITS] &&
+	    (res = parseOCIrlimits(tb[OCI_PROCESS_RLIMITS])))
+		return res;
 
 	return 0;
 }
@@ -1840,6 +1973,11 @@ int main(int argc, char **argv)
 		opts.seccomp = 0;
 		if (opts.require_jail)
 			return -1;
+	}
+
+	if (apply_rlimits()) {
+		ERROR("error applying resource limits\n");
+		exit(EXIT_FAILURE);
 	}
 
 	if (opts.name)
