@@ -1366,7 +1366,7 @@ static int parseOCIprocessuser(struct blob_attr *msg) {
 			}
 			opts.num_additional_gids = gidcnt;
 		}
-		DEBUG("read %lu additional groups\n", gidcnt);
+		DEBUG("read %zu additional groups\n", gidcnt);
 	}
 
 	if (tb[OCI_PROCESS_USER_UMASK]) {
