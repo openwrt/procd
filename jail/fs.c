@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <linux/limits.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -47,6 +48,7 @@ struct mount {
 	unsigned long mountflags;
 	const char *optstr;
 	int error;
+	bool inner;
 };
 
 struct avl_tree mounts;
@@ -76,11 +78,12 @@ int mkdir_p(char *dir, mode_t mask)
 	return ret;
 }
 
-static int do_mount(const char *root, const char *source, const char *target, const char *filesystemtype,
-		    unsigned long orig_mountflags, const char *optstr, int error)
+static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
+		    unsigned long orig_mountflags, const char *optstr, int error, bool inner)
 {
 	struct stat s;
 	char new[PATH_MAX];
+	char *source = (char *)orig_source;
 	int fd;
 	bool is_bind = (orig_mountflags & MS_BIND);
 	bool is_mask = (source == (void *)(-1));
@@ -89,6 +92,11 @@ static int do_mount(const char *root, const char *source, const char *target, co
 	if (source && is_bind && stat(source, &s)) {
 		ERROR("stat(%s) failed: %m\n", source);
 		return error;
+	}
+
+	if (!is_mask && orig_source && inner) {
+		if (asprintf(&source, "%s%s", root, orig_source) < 0)
+			return ENOMEM;
 	}
 
 	snprintf(new, sizeof(new), "%s%s", root, target?target:source);
@@ -132,6 +140,9 @@ static int do_mount(const char *root, const char *source, const char *target, co
 			if (error)
 				ERROR("failed to mount -B %s %s: %m\n", source, new);
 
+			if (inner)
+				free(source);
+
 			return error;
 		}
 		mountflags |= MS_REMOUNT;
@@ -141,17 +152,23 @@ static int do_mount(const char *root, const char *source, const char *target, co
 		if (error)
 			ERROR("failed to mount %s %s: %m\n", source, new);
 
+		if (inner)
+			free(source);
+
 		return error;
 	}
 
 	DEBUG("mount %s%s %s (%s)\n", (mountflags & MS_BIND)?"-B ":"", source, new,
 	      (mountflags & MS_RDONLY)?"ro":"rw");
 
+	if (inner)
+		free(source);
+
 	return 0;
 }
 
-int add_mount(const char *source, const char *target, const char *filesystemtype,
-	      unsigned long mountflags, const char *optstr, int error)
+static int _add_mount(const char *source, const char *target, const char *filesystemtype,
+	      unsigned long mountflags, const char *optstr, int error, bool inner)
 {
 	assert(target != NULL);
 
@@ -176,12 +193,25 @@ int add_mount(const char *source, const char *target, const char *filesystemtype
 
 	m->mountflags = mountflags;
 	m->error = error;
+	m->inner = inner;
 
 	avl_insert(&mounts, &m->avl);
 	DEBUG("adding mount %s %s bind(%d) ro(%d) err(%d)\n", (m->source == (void*)(-1))?"mask":m->source, m->target,
 		!!(m->mountflags & MS_BIND), !!(m->mountflags & MS_RDONLY), m->error != 0);
 
 	return 0;
+}
+
+int add_mount(const char *source, const char *target, const char *filesystemtype,
+	      unsigned long mountflags, const char *optstr, int error)
+{
+	return _add_mount(source, target, filesystemtype, mountflags, optstr, error, false);
+}
+
+int add_mount_inner(const char *source, const char *target, const char *filesystemtype,
+	      unsigned long mountflags, const char *optstr, int error)
+{
+	return _add_mount(source, target, filesystemtype, mountflags, optstr, error, true);
 }
 
 int add_mount_bind(const char *path, int readonly, int error)
@@ -386,7 +416,7 @@ int mount_all(const char *jailroot) {
 		add_mount_bind(l->path, 1, -1);
 
 	avl_for_each_element(&mounts, m, avl)
-		if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags, m->optstr, m->error))
+		if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags, m->optstr, m->error, m->inner))
 			return -1;
 
 	return 0;

@@ -2216,14 +2216,37 @@ int main(int argc, char **argv)
 			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "size=1M", -1);
 			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
 
-			if (opts.procfs || jsonfile)
-				add_mount("proc", "/proc", "proc", MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL, -1);
+			if (opts.procfs || jsonfile) {
+				add_mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL, -1);
 
+				/*
+				 * hack to make /proc/sys/net read-write while the rest of /proc/sys is read-only
+				 * which cannot be expressed with OCI spec, but happends to be very useful.
+				 * Only apply it if '/proc/sys' is not already listed as mount, maskedPath or
+				 * readonlyPath.
+				 * If not running in a new network namespace, only make /proc/sys read-only.
+				 * If running in a new network namespace, temporarily stash (ie. mount-bind)
+				 * /proc/sys/net into (totally unrelated, but surely existing) /proc/self/net.
+				 * Then we mount-bind /proc/sys read-only and then mount-move /proc/self/net into
+				 * /proc/sys/net.
+				 * This works because mounts are executed in incrementing strcmp() order and
+				 * /proc/self/net appears there before /proc/sys/net and hence the operation
+				 * succeeds as the bind-mount of /proc/self/net is performed first and then
+				 * move-mount of /proc/sys/net follows because 'e' preceeds 'y' in the ASCII
+				 * table (and in the alphabet).
+				 */
+				if (!add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, NULL, -1))
+					if (opts.namespace & CLONE_NEWNET)
+						if (!add_mount_inner("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, NULL, -1))
+							add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, NULL, -1);
+
+			}
 			if (opts.sysfs || jsonfile)
 				add_mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, NULL, -1);
 
 			if (jsonfile)
 				add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, "mode=1777", -1);
+
 		}
 
 		if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)

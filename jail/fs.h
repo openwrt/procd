@@ -19,6 +19,8 @@
 int mkdir_p(char *dir, mode_t mask);
 int add_mount(const char *source, const char *target, const char *filesystemtype,
 	      unsigned long mountflags, const char *optstr, int error);
+int add_mount_inner(const char *source, const char *target, const char *filesystemtype,
+	      unsigned long mountflags, const char *optstr, int error);
 int add_mount_bind(const char *path, int readonly, int error);
 int parseOCImount(struct blob_attr *msg);
 int add_path_and_deps(const char *path, int readonly, int error, int lib);
