@@ -39,8 +39,9 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sched.h>
-#include <linux/limits.h>
 #include <linux/filter.h>
+#include <linux/limits.h>
+#include <linux/nsfs.h>
 #include <signal.h>
 #include <inttypes.h>
 
@@ -106,6 +107,18 @@ static struct {
 	struct sysctl_val **sysctl;
 	int no_new_privs;
 	int namespace;
+	struct {
+		int pid;
+		int net;
+		int ns;
+		int ipc;
+		int uts;
+		int user;
+		int cgroup;
+#ifdef CLONE_NEWTIME
+		int time;
+#endif
+	} setns;
 	int procfs;
 	int ronly;
 	int sysfs;
@@ -130,6 +143,21 @@ static struct {
 	bool set_oom_score_adj;
 	struct mknod_args **devices;
 } opts;
+
+static inline bool has_namespaces(void)
+{
+return ((opts.setns.pid != -1) ||
+	(opts.setns.net != -1) ||
+	(opts.setns.ns != -1) ||
+	(opts.setns.ipc != -1) ||
+	(opts.setns.uts != -1) ||
+	(opts.setns.user != -1) ||
+	(opts.setns.cgroup != -1) ||
+#ifdef CLONE_NEWTIME
+	(opts.setns.time != -1) ||
+#endif
+	opts.namespace);
+}
 
 static void free_hooklist(struct hook_execvpe **hooklist)
 {
@@ -909,6 +937,51 @@ ujail will not use namespace/build a jail,\n\
 and will only drop capabilities/apply seccomp filter.\n\n");
 }
 
+static int* get_namespace_fd(const unsigned int nstype)
+{
+	switch (nstype) {
+		case CLONE_NEWPID:
+			return &opts.setns.pid;
+		case CLONE_NEWNET:
+			return &opts.setns.net;
+		case CLONE_NEWNS:
+			return &opts.setns.ns;
+		case CLONE_NEWIPC:
+			return &opts.setns.ipc;
+		case CLONE_NEWUTS:
+			return &opts.setns.uts;
+		case CLONE_NEWUSER:
+			return &opts.setns.user;
+		case CLONE_NEWCGROUP:
+			return &opts.setns.cgroup;
+#ifdef CLONE_NEWTIME
+		case CLONE_NEWTIME:
+			return &opts.setns.time;
+#endif
+		default:
+			return NULL;
+	}
+}
+
+static int setns_open(unsigned long nstype)
+{
+	int *fd = get_namespace_fd(nstype);
+
+	if (!*fd)
+		return EFAULT;
+
+	if (*fd == -1)
+		return 0;
+
+	if (setns(*fd, nstype) == -1) {
+		close(*fd);
+		return errno;
+	}
+
+	close(*fd);
+	return 0;
+}
+
 static int exec_jail(void *pipes_ptr)
 {
 	int *pipes = (int*)pipes_ptr;
@@ -917,6 +990,15 @@ static int exec_jail(void *pipes_ptr)
 
 	close(pipes[0]);
 	close(pipes[3]);
+
+	setns_open(CLONE_NEWUSER);
+	setns_open(CLONE_NEWNET);
+	setns_open(CLONE_NEWNS);
+	setns_open(CLONE_NEWIPC);
+	setns_open(CLONE_NEWUTS);
+#ifdef CLONE_NEWTIME
+	setns_open(CLONE_NEWTIME);
+#endif
 
 	buf[0] = 'i';
 	if (write(pipes[1], buf, 1) < 1) {
@@ -935,7 +1017,7 @@ static int exec_jail(void *pipes_ptr)
 	close(pipes[1]);
 	close(pipes[2]);
 
-	if (opts.namespace & CLONE_NEWUSER) {
+	if ((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1)) {
 		if (setregid(0, 0) < 0) {
 			ERROR("setgid\n");
 			exit(EXIT_FAILURE);
@@ -962,7 +1044,7 @@ static int exec_jail(void *pipes_ptr)
 	}
 	run_hooks(opts.hooks.startContainer);
 
-	if (!(opts.namespace & CLONE_NEWUSER)) {
+	if (!(opts.namespace & CLONE_NEWUSER) && (opts.setns.user == -1)) {
 		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
 
 		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
@@ -1063,6 +1145,15 @@ static int netns_open_pid(const pid_t target_ns)
 	snprintf(pid_net_path, sizeof(pid_net_path), "/proc/%u/ns/net", target_ns);
 
 	return open(pid_net_path, O_RDONLY);
+}
+
+static int pidns_open_pid(const pid_t target_ns)
+{
+	char pid_pid_path[PATH_MAX];
+
+	snprintf(pid_pid_path, sizeof(pid_pid_path), "/proc/%u/ns/pid", target_ns);
+
+	return open(pid_pid_path, O_RDONLY);
 }
 
 static void netns_updown(pid_t pid, bool start)
@@ -1553,7 +1644,7 @@ static const struct blobmsg_policy oci_linux_namespace_policy[] = {
 	[OCI_LINUX_NAMESPACE_PATH] = { "path", BLOBMSG_TYPE_STRING },
 };
 
-static unsigned int resolve_nstype(char *type) {
+static int resolve_nstype(char *type) {
 	if (!strcmp("pid", type))
 		return CLONE_NEWPID;
 	else if (!strcmp("network", type))
@@ -1568,6 +1659,10 @@ static unsigned int resolve_nstype(char *type) {
 		return CLONE_NEWUSER;
 	else if (!strcmp("cgroup", type))
 		return CLONE_NEWCGROUP;
+#ifdef CLONE_NEWTIME
+	else if (!strcmp("time", type))
+		return CLONE_NEWTIME;
+#endif
 	else
 		return 0;
 }
@@ -1575,16 +1670,50 @@ static unsigned int resolve_nstype(char *type) {
 static int parseOCIlinuxns(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_NAMESPACE_MAX];
+	int nstype;
+	int *setns;
+	int fd;
 
 	blobmsg_parse(oci_linux_namespace_policy, __OCI_LINUX_NAMESPACE_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
 	if (!tb[OCI_LINUX_NAMESPACE_TYPE])
 		return EINVAL;
 
-	if (tb[OCI_LINUX_NAMESPACE_PATH])
-		return ENOTSUP; /* ToDo */
+	nstype = resolve_nstype(blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_TYPE]));
+	if (!nstype)
+		return EINVAL;
 
-	opts.namespace |= resolve_nstype(blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_TYPE]));
+	if (opts.namespace & nstype)
+		return ENOTUNIQ;
+
+	setns = get_namespace_fd(nstype);
+
+	if (!setns)
+		return EFAULT;
+
+	if (*setns != -1)
+		return ENOTUNIQ;
+
+	if (tb[OCI_LINUX_NAMESPACE_PATH]) {
+		DEBUG("opening existing %s namespace from path %s\n",
+			blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_TYPE]),
+			blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_PATH]));
+
+		fd = open(blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_PATH]), O_RDONLY);
+		if (fd == -1)
+			return errno?:ESTALE;
+
+		if (ioctl(fd, NS_GET_NSTYPE) != nstype)
+			return EINVAL;
+
+		DEBUG("opened existing %s namespace got filehandler %u\n",
+			blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_TYPE]),
+			fd);
+
+		*setns = fd;
+	} else {
+		opts.namespace |= nstype;
+	}
 
 	return 0;
 };
@@ -2002,6 +2131,7 @@ static int set_oom_score_adj(void)
 	return 0;
 }
 
+
 int main(int argc, char **argv)
 {
 	sigset_t sigmask;
@@ -2013,6 +2143,7 @@ int main(int argc, char **argv)
 	int pipes[4];
 	char sig_buf[1];
 	int netns_fd;
+	int pidns_fd;
 
 	if (uid) {
 		ERROR("not root, aborting: %m\n");
@@ -2109,8 +2240,20 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (opts.namespace)
+	if (opts.namespace && !jsonfile)
 		opts.namespace |= CLONE_NEWIPC | CLONE_NEWPID;
+
+	/* those are filehandlers, so -1 indicates unused */
+	opts.setns.pid = -1;
+	opts.setns.net = -1;
+	opts.setns.ns = -1;
+	opts.setns.ipc = -1;
+	opts.setns.uts = -1;
+	opts.setns.user = -1;
+	opts.setns.cgroup = -1;
+#ifdef CLONE_NEWTIME
+	opts.setns.time = -1;
+#endif
 
 	if (jsonfile) {
 		int ocires;
@@ -2132,7 +2275,7 @@ int main(int argc, char **argv)
 		usage();
 		return EXIT_FAILURE;
 	}
-	if (!(opts.namespace||opts.capabilities||opts.seccomp)) {
+	if (!(jsonfile||opts.namespace||opts.capabilities||opts.seccomp)) {
 		ERROR("Not using namespaces, capabilities or seccomp !!!\n\n");
 		usage();
 		return EXIT_FAILURE;
@@ -2190,7 +2333,10 @@ int main(int argc, char **argv)
 		sigaction(i, &s, NULL);
 	}
 
-	if (opts.namespace) {
+	if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
+		return -1;
+
+	if (has_namespaces()) {
 		if (opts.namespace & CLONE_NEWNS) {
 			if (!opts.extroot && (opts.user || opts.group)) {
 				add_mount_bind("/etc/passwd", 0, -1);
@@ -2204,7 +2350,7 @@ int main(int argc, char **argv)
 
 			if (!(opts.namespace & CLONE_NEWNET)) {
 				add_mount_bind("/etc/resolv.conf", 0, -1);
-			} else {
+			} else if (opts.setns.net == -1) {
 				char hostdir[PATH_MAX];
 
 				snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
@@ -2249,8 +2395,12 @@ int main(int argc, char **argv)
 
 		}
 
-		if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
-			return -1;
+		if (opts.setns.pid != -1) {
+			pidns_fd = pidns_open_pid(getpid());
+			setns_open(CLONE_NEWPID);
+		} else {
+			pidns_fd = -1;
+		}
 
 		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | opts.namespace, &pipes);
 	} else {
@@ -2258,9 +2408,29 @@ int main(int argc, char **argv)
 	}
 
 	if (jail_process.pid > 0) {
+		/* parent process */
 		jail_running = 1;
 		seteuid(0);
-		/* parent process */
+		if (pidns_fd != -1) {
+			setns(pidns_fd, CLONE_NEWPID);
+			close(pidns_fd);
+		}
+		if (opts.setns.net != -1)
+			close(opts.setns.net);
+		if (opts.setns.ns != -1)
+			close(opts.setns.ns);
+		if (opts.setns.ipc != -1)
+			close(opts.setns.ipc);
+		if (opts.setns.uts != -1)
+			close(opts.setns.uts);
+		if (opts.setns.user != -1)
+			close(opts.setns.user);
+		if (opts.setns.cgroup != -1)
+			close(opts.setns.cgroup);
+#ifdef CLONE_NEWTIME
+		if (opts.setns.time != -1)
+			close(opts.setns.time);
+#endif
 		close(pipes[1]);
 		close(pipes[2]);
 		run_hooks(opts.hooks.createRuntime);
@@ -2329,7 +2499,7 @@ int main(int argc, char **argv)
 		return jail_return_code;
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
-		return exec_jail(NULL);
+		return exec_jail(&pipes);
 	} else {
 		ERROR("failed to clone/fork: %m\n");
 		return EXIT_FAILURE;
