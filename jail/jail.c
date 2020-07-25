@@ -142,6 +142,7 @@ static struct {
 	int oom_score_adj;
 	bool set_oom_score_adj;
 	struct mknod_args **devices;
+	bool oci;
 } opts;
 
 static inline bool has_namespaces(void)
@@ -400,24 +401,34 @@ no_console:
 
 static int hook_running = 0;
 static int hook_return_code = 0;
+static struct hook_execvpe **current_hook = NULL;
+typedef void (*hook_return_handler)(void);
+static hook_return_handler hook_return_cb = NULL;
 
 static void hook_process_timeout_cb(struct uloop_timeout *t);
 static struct uloop_timeout hook_process_timeout = {
 	.cb = hook_process_timeout_cb,
 };
 
+static void run_hooklist(void);
 static void hook_process_handler(struct uloop_process *c, int ret)
 {
 	uloop_timeout_cancel(&hook_process_timeout);
+
 	if (WIFEXITED(ret)) {
 		hook_return_code = WEXITSTATUS(ret);
-		DEBUG("hook (%d) exited with exit: %d\n", c->pid, hook_return_code);
+		if (hook_return_code)
+			ERROR("hook (%d) exited with exit: %d\n", c->pid, hook_return_code);
+		else
+			DEBUG("hook (%d) exited with exit: %d\n", c->pid, hook_return_code);
+
 	} else {
 		hook_return_code = WTERMSIG(ret);
-		DEBUG("hook (%d) exited with signal: %d\n", c->pid, hook_return_code);
+		ERROR("hook (%d) exited with signal: %d\n", c->pid, hook_return_code);
 	}
 	hook_running = 0;
-	uloop_end();
+	++current_hook;
+	run_hooklist();
 }
 
 static struct uloop_process hook_process = {
@@ -430,77 +441,63 @@ static void hook_process_timeout_cb(struct uloop_timeout *t)
 	kill(hook_process.pid, SIGKILL);
 }
 
-static int run_hook(struct hook_execvpe *hook)
+static void run_hooklist(void)
 {
+	struct hook_execvpe *hook = *current_hook;
 	struct stat s;
+
+	if (!hook)
+		hook_return_cb();
 
 	DEBUG("executing hook %s\n", hook->file);
 
 	if (stat(hook->file, &s))
-		return ENOENT;
+		hook_process_handler(&hook_process, ENOENT);
 
 	if (!((unsigned long)s.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
-		return EPERM;
+		hook_process_handler(&hook_process, EPERM);
 
 	if (!((unsigned long)s.st_mode & (S_IRUSR | S_IRGRP | S_IROTH)))
-		return EPERM;
-
-	uloop_init();
+		hook_process_handler(&hook_process, EPERM);
 
 	hook_running = 1;
 	hook_process.pid = fork();
-	if (hook_process.pid > 0) {
-		/* parent */
-		uloop_process_add(&hook_process);
-
-		if (hook->timeout > 0)
-			uloop_timeout_set(&hook_process_timeout, 1000 * hook->timeout);
-
-		uloop_run();
-		if (hook_running) {
-			DEBUG("uloop interrupted, killing hook process\n");
-			kill(hook_process.pid, SIGTERM);
-			uloop_timeout_set(&hook_process_timeout, 1000);
-			uloop_run();
-		}
-		uloop_done();
-
-		waitpid(hook_process.pid, NULL, WCONTINUED);
-
-		return hook_return_code;
-	} else if (hook_process.pid == 0) {
+	if (hook_process.pid == 0) {
 		/* child */
-		execvpe(hook->file, hook->argv, hook->envp);
-		hook_running = 0;
+		execve(hook->file, hook->argv, hook->envp);
+		ERROR("execve error %m\n");
 		_exit(errno);
-	} else {
+	} else if (hook_process.pid < 0) {
 		/* fork error */
+		ERROR("hook fork error\n");
 		hook_running = 0;
-		return errno;
+		hook_process_handler(&hook_process, errno);
+	}
+
+	/* parent */
+	uloop_process_add(&hook_process);
+
+	if (hook->timeout > 0)
+		uloop_timeout_set(&hook_process_timeout, 1000 * hook->timeout);
+
+	uloop_run();
+	if (hook_running) {
+		DEBUG("uloop interrupted, killing jail process\n");
+		kill(hook_process.pid, SIGTERM);
+		uloop_timeout_set(&hook_process_timeout, 1000);
+		uloop_run();
 	}
 }
 
-static int run_hooks(struct hook_execvpe **hooklist)
+static void run_hooks(struct hook_execvpe **hooklist, hook_return_handler return_cb)
 {
-	struct hook_execvpe **cur;
-	int res;
-
 	if (!hooklist)
-		return 0; /* Nothing to do */
+		return_cb();
 
-	cur = hooklist;
+	current_hook = hooklist;
+	hook_return_cb = return_cb;
 
-	while (*cur) {
-		res = run_hook(*cur);
-		if (res)
-			DEBUG(" error running hook %s\n", (*cur)->file);
-		else
-			DEBUG(" success running hook %s\n", (*cur)->file);
-
-		++cur;
-	}
-
-	return 0;
+	run_hooklist();
 }
 
 static int apply_sysctl(const char *jail_root)
@@ -614,12 +611,13 @@ only_default_devices:
 	return 0;
 }
 
+static char jail_root[] = "/tmp/ujail-XXXXXX";
+static char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
+static mode_t old_umask;
+static void enter_jail_fs(void);
 static int build_jail_fs(void)
 {
-	char jail_root[] = "/tmp/ujail-XXXXXX";
-	char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
 	char *overlaydir = NULL;
-	mode_t old_umask;
 
 	old_umask = umask(0);
 
@@ -700,19 +698,26 @@ static int build_jail_fs(void)
 		symlink("../dev/resolv.conf.d/resolv.conf.auto", jaillink);
 	}
 
-	run_hooks(opts.hooks.createContainer);
+	run_hooks(opts.hooks.createContainer, enter_jail_fs);
 
+	return 0;
+}
+
+static void post_jail_fs(void);
+static void enter_jail_fs(void)
+{
 	char dirbuf[sizeof(jail_root) + 4];
+
 	snprintf(dirbuf, sizeof(dirbuf), "%s/old", jail_root);
 	mkdir(dirbuf, 0755);
 
 	if (pivot_root(jail_root, dirbuf) == -1) {
 		ERROR("pivot_root(%s, %s) failed: %m\n", jail_root, dirbuf);
-		return -1;
+		exit(-1);
 	}
 	if (chdir("/")) {
 		ERROR("chdir(/) (after pivot_root) failed: %m\n");
-		return -1;
+		exit(-1);
 	}
 
 	snprintf(dirbuf, sizeof(dirbuf), "/old%s", jail_root);
@@ -730,14 +735,13 @@ static int build_jail_fs(void)
 
 	if (create_devices()) {
 		ERROR("create_devices() failed\n");
-		return -1;
+		exit(-1);
 	}
 	if (opts.ronly)
 		mount(NULL, "/", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
 
 	umask(old_umask);
-
-	return 0;
+	post_jail_fs();
 }
 
 static int write_uid_gid_map(pid_t child_pid, bool gidmap, char *mapstr)
@@ -993,11 +997,82 @@ static int setns_open(unsigned long nstype)
 	return 0;
 }
 
+static int jail_running = 0;
+static int jail_return_code = 0;
+
+static void jail_process_timeout_cb(struct uloop_timeout *t);
+static struct uloop_timeout jail_process_timeout = {
+	.cb = jail_process_timeout_cb,
+};
+static void poststop(void);
+static void jail_process_handler(struct uloop_process *c, int ret)
+{
+	uloop_timeout_cancel(&jail_process_timeout);
+	if (WIFEXITED(ret)) {
+		jail_return_code = WEXITSTATUS(ret);
+		INFO("jail (%d) exited with exit: %d\n", c->pid, jail_return_code);
+	} else {
+		jail_return_code = WTERMSIG(ret);
+		INFO("jail (%d) exited with signal: %d\n", c->pid, jail_return_code);
+	}
+	jail_running = 0;
+	poststop();
+}
+
+static struct uloop_process jail_process = {
+	.cb = jail_process_handler,
+};
+
+static void jail_process_timeout_cb(struct uloop_timeout *t)
+{
+	DEBUG("jail process failed to stop, sending SIGKILL\n");
+	kill(jail_process.pid, SIGKILL);
+}
+
+static void jail_handle_signal(int signo)
+{
+	if (hook_running) {
+		DEBUG("forwarding signal %d to the hook process\n", signo);
+		kill(hook_process.pid, signo);
+	}
+
+	if (jail_running) {
+		DEBUG("forwarding signal %d to the jailed process\n", signo);
+		kill(jail_process.pid, signo);
+	}
+}
+
+static void signals_init(void)
+{
+	int i;
+	sigset_t sigmask;
+
+	sigfillset(&sigmask);
+	for (i = 0; i < _NSIG; i++) {
+		struct sigaction s = { 0 };
+
+		if (!sigismember(&sigmask, i))
+			continue;
+		if ((i == SIGCHLD) || (i == SIGPIPE) || (i == SIGSEGV))
+			continue;
+
+		s.sa_handler = jail_handle_signal;
+		sigaction(i, &s, NULL);
+	}
+}
+
+static void pre_exec_jail(struct uloop_timeout *t);
+static struct uloop_timeout pre_exec_timeout = {
+	.cb = pre_exec_jail,
+};
+
 static int exec_jail(void *pipes_ptr)
 {
 	int *pipes = (int*)pipes_ptr;
 	char buf[1];
-	int pw_uid, pw_gid, gr_gid;
+
+	uloop_init();
+	signals_init();
 
 	close(pipes[0]);
 	close(pipes[3]);
@@ -1014,15 +1089,15 @@ static int exec_jail(void *pipes_ptr)
 	buf[0] = 'i';
 	if (write(pipes[1], buf, 1) < 1) {
 		ERROR("can't write to parent\n");
-		exit(EXIT_FAILURE);
+		return EXIT_FAILURE;
 	}
 	if (read(pipes[2], buf, 1) < 1) {
 		ERROR("can't read from parent\n");
-		exit(EXIT_FAILURE);
+		return EXIT_FAILURE;
 	}
 	if (buf[0] != 'O') {
 		ERROR("parent had an error, child exiting\n");
-		exit(EXIT_FAILURE);
+		return EXIT_FAILURE;
 	}
 
 	close(pipes[1]);
@@ -1049,13 +1124,32 @@ static int exec_jail(void *pipes_ptr)
 		exit(EXIT_FAILURE);
 	}
 
+	uloop_timeout_add(&pre_exec_timeout);
+	uloop_run();
+
+	exit(-1);
+}
+
+static void pre_exec_jail(struct uloop_timeout *t)
+{
 	if ((opts.namespace & CLONE_NEWNS) && build_jail_fs()) {
 		ERROR("failed to build jail fs\n");
 		exit(EXIT_FAILURE);
+	} else {
+		run_hooks(opts.hooks.createContainer, post_jail_fs);
 	}
-	run_hooks(opts.hooks.startContainer);
+}
 
+static void post_start_hook(void);
+static void post_jail_fs(void)
+{
+	run_hooks(opts.hooks.startContainer, post_start_hook);
+}
+
+static void post_start_hook(void)
+{
 	if (!(opts.namespace & CLONE_NEWUSER) && (opts.setns.user == -1)) {
+		int pw_uid, pw_gid, gr_gid;
 		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
 
 		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
@@ -1102,51 +1196,6 @@ static int exec_jail(void *pipes_ptr)
 	/* we get there only if execve fails */
 	ERROR("failed to execve %s: %m\n", *opts.jail_argv);
 	exit(EXIT_FAILURE);
-}
-
-static int jail_running = 0;
-static int jail_return_code = 0;
-
-static void jail_process_timeout_cb(struct uloop_timeout *t);
-static struct uloop_timeout jail_process_timeout = {
-	.cb = jail_process_timeout_cb,
-};
-
-static void jail_process_handler(struct uloop_process *c, int ret)
-{
-	uloop_timeout_cancel(&jail_process_timeout);
-	if (WIFEXITED(ret)) {
-		jail_return_code = WEXITSTATUS(ret);
-		INFO("jail (%d) exited with exit: %d\n", c->pid, jail_return_code);
-	} else {
-		jail_return_code = WTERMSIG(ret);
-		INFO("jail (%d) exited with signal: %d\n", c->pid, jail_return_code);
-	}
-	jail_running = 0;
-	uloop_end();
-}
-
-static struct uloop_process jail_process = {
-	.cb = jail_process_handler,
-};
-
-static void jail_process_timeout_cb(struct uloop_timeout *t)
-{
-	DEBUG("jail process failed to stop, sending SIGKILL\n");
-	kill(jail_process.pid, SIGKILL);
-}
-
-static void jail_handle_signal(int signo)
-{
-	if (hook_running) {
-		DEBUG("forwarding signal %d to the hook process\n", signo);
-		kill(hook_process.pid, signo);
-	}
-
-	if (jail_running) {
-		DEBUG("forwarding signal %d to the jailed process\n", signo);
-		kill(jail_process.pid, signo);
-	}
 }
 
 static int netns_open_pid(const pid_t target_ns)
@@ -1298,7 +1347,7 @@ static int parseOCIhook(struct hook_execvpe ***hooklist, struct blob_attr *msg)
 			goto errout;
 		}
 
-		(*hooklist)[idx] = malloc(sizeof(struct hook_execvpe));
+		(*hooklist)[idx] = calloc(1, sizeof(struct hook_execvpe));
 		if (tb[OCI_HOOK_ARGS]) {
 			ret = parseOCIenvarray(tb[OCI_HOOK_ARGS], &((*hooklist)[idx]->argv));
 			if (ret)
@@ -2143,18 +2192,21 @@ static int set_oom_score_adj(void)
 }
 
 
+static void post_main(struct uloop_timeout *t);
+static struct uloop_timeout post_main_timeout = {
+	.cb = post_main,
+};
+static int pipes[4];
+static int netns_fd;
+static int pidns_fd;
+static void post_create_runtime(void);
 int main(int argc, char **argv)
 {
-	sigset_t sigmask;
 	uid_t uid = getuid();
 	const char log[] = "/dev/log";
 	const char ubus[] = "/var/run/ubus.sock";
 	char *jsonfile = NULL;
-	int i, ch;
-	int pipes[4];
-	char sig_buf[1];
-	int netns_fd;
-	int pidns_fd;
+	int ch;
 
 	if (uid) {
 		ERROR("not root, aborting: %m\n");
@@ -2274,6 +2326,7 @@ int main(int argc, char **argv)
 			ERROR("parsing of OCI JSON spec has failed: %s (%d)\n", strerror(ocires), ocires);
 			return ocires;
 		}
+		opts.oci = true;
 	}
 
 	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
@@ -2282,11 +2335,11 @@ int main(int argc, char **argv)
 	}
 
 	/* no <binary> param found */
-	if (!jsonfile && (argc - optind < 1)) {
+	if (!opts.oci && (argc - optind < 1)) {
 		usage();
 		return EXIT_FAILURE;
 	}
-	if (!(jsonfile||opts.namespace||opts.capabilities||opts.seccomp)) {
+	if (!(opts.oci||opts.namespace||opts.capabilities||opts.seccomp)) {
 		ERROR("Not using namespaces, capabilities or seccomp !!!\n\n");
 		usage();
 		return EXIT_FAILURE;
@@ -2296,7 +2349,7 @@ int main(int argc, char **argv)
 		opts.capabilities != 0 || opts.capset.apply,
 		opts.seccomp != 0 || opts.ociseccomp != 0);
 
-	if (!jsonfile) {
+	if (!opts.oci) {
 		/* allocate NULL-terminated array for argv */
 		opts.jail_argv = calloc(1 + argc - optind, sizeof(char**));
 		if (!opts.jail_argv)
@@ -2331,22 +2384,21 @@ int main(int argc, char **argv)
 	if (opts.name)
 		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
 
-	sigfillset(&sigmask);
-	for (i = 0; i < _NSIG; i++) {
-		struct sigaction s = { 0 };
-
-		if (!sigismember(&sigmask, i))
-			continue;
-		if ((i == SIGCHLD) || (i == SIGPIPE) || (i == SIGSEGV))
-			continue;
-
-		s.sa_handler = jail_handle_signal;
-		sigaction(i, &s, NULL);
-	}
+	uloop_init();
+	signals_init();
 
 	if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
 		return -1;
 
+	uloop_timeout_add(&post_main_timeout);
+	uloop_run();
+
+	/* unreachable */
+	return 0;
+}
+
+static void post_main(struct uloop_timeout *t)
+{
 	if (has_namespaces()) {
 		if (opts.namespace & CLONE_NEWNS) {
 			if (!opts.extroot && (opts.user || opts.group)) {
@@ -2373,7 +2425,7 @@ int main(int argc, char **argv)
 			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "size=1M", -1);
 			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
 
-			if (opts.procfs || jsonfile) {
+			if (opts.procfs || opts.oci) {
 				add_mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL, -1);
 
 				/*
@@ -2398,10 +2450,10 @@ int main(int argc, char **argv)
 							add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, NULL, -1);
 
 			}
-			if (opts.sysfs || jsonfile)
+			if (opts.sysfs || opts.oci)
 				add_mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, NULL, -1);
 
-			if (jsonfile)
+			if (opts.oci)
 				add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, "mode=1777", -1);
 
 		}
@@ -2420,6 +2472,8 @@ int main(int argc, char **argv)
 
 	if (jail_process.pid > 0) {
 		/* parent process */
+		char sig_buf[1];
+
 		jail_running = 1;
 		seteuid(0);
 		if (pidns_fd != -1) {
@@ -2444,10 +2498,9 @@ int main(int argc, char **argv)
 #endif
 		close(pipes[1]);
 		close(pipes[2]);
-		run_hooks(opts.hooks.createRuntime);
 		if (read(pipes[0], sig_buf, 1) < 1) {
 			ERROR("can't read from child\n");
-			return -1;
+			exit(-1);
 		}
 		close(pipes[0]);
 		set_oom_score_adj();
@@ -2455,7 +2508,7 @@ int main(int argc, char **argv)
 		if (opts.namespace & CLONE_NEWUSER) {
 			if (write_setgroups(jail_process.pid, true)) {
 				ERROR("can't write setgroups\n");
-				return -1;
+				exit(-1);
 			}
 			if (!opts.uidmap) {
 				bool has_gr = (opts.gr_gid != -1);
@@ -2476,43 +2529,62 @@ int main(int argc, char **argv)
 		if (opts.namespace & CLONE_NEWNET) {
 			if (!opts.name) {
 				ERROR("netns needs a named jail\n");
-				return -1;
+				exit(-1);
 			}
 			netns_fd = netns_open_pid(jail_process.pid);
 			netns_updown(jail_process.pid, true);
 		}
-
-		sig_buf[0] = 'O';
-		if (write(pipes[3], sig_buf, 1) < 0) {
-			ERROR("can't write to child\n");
-			return -1;
-		}
-		close(pipes[3]);
-		run_hooks(opts.hooks.poststart);
-
-		uloop_init();
-		uloop_process_add(&jail_process);
-		uloop_run();
-		if (jail_running) {
-			DEBUG("uloop interrupted, killing jail process\n");
-			kill(jail_process.pid, SIGTERM);
-			uloop_timeout_set(&jail_process_timeout, 1000);
-			uloop_run();
-		}
-		uloop_done();
-		if (opts.namespace & CLONE_NEWNET) {
-			setns(netns_fd, CLONE_NEWNET);
-			netns_updown(getpid(), false);
-			close(netns_fd);
-		}
-		run_hooks(opts.hooks.poststop);
-		free_opts(true);
-		return jail_return_code;
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
-		return exec_jail(&pipes);
+		exit(exec_jail(&pipes));
 	} else {
 		ERROR("failed to clone/fork: %m\n");
-		return EXIT_FAILURE;
+		exit(EXIT_FAILURE);
 	}
+	run_hooks(opts.hooks.createRuntime, post_create_runtime);
+}
+
+static void post_poststart(void);
+static void post_create_runtime(void)
+{
+	char sig_buf[1];
+
+	sig_buf[0] = 'O';
+	if (write(pipes[3], sig_buf, 1) < 0) {
+		ERROR("can't write to child\n");
+		exit(-1);
+	}
+	close(pipes[3]);
+	run_hooks(opts.hooks.poststart, post_poststart);
+}
+
+
+static void post_poststart(void)
+{
+	uloop_process_add(&jail_process);
+	uloop_run(); /* idle here while jail is running */
+	if (jail_running) {
+		DEBUG("uloop interrupted, killing jail process\n");
+		kill(jail_process.pid, SIGTERM);
+		uloop_timeout_set(&jail_process_timeout, 1000);
+		uloop_run();
+	}
+	uloop_done();
+	poststop();
+}
+
+static void post_poststop(void);
+static void poststop(void) {
+	if (opts.namespace & CLONE_NEWNET) {
+		setns(netns_fd, CLONE_NEWNET);
+		netns_updown(getpid(), false);
+		close(netns_fd);
+	}
+	run_hooks(opts.hooks.poststop, post_poststop);
+}
+
+static void post_poststop(void)
+{
+	free_opts(true);
+	exit(jail_return_code);
 }
