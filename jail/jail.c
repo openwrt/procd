@@ -547,6 +547,17 @@ static int apply_sysctl(const char *jail_root)
 	return 0;
 }
 
+/* glibc defines makedev calling a function. make sure it's a pure macro */
+#if defined(__GLIBC__)
+#undef makedev
+/* from musl's sys/sysmacros.h */
+#define makedev(x,y) ( \
+	(((x)&0xfffff000ULL) << 32) | \
+	(((x)&0x00000fffULL) << 8) | \
+	(((y)&0xffffff00ULL) << 12) | \
+	(((y)&0x000000ffULL)) )
+#endif
+
 static struct mknod_args default_devices[] = {
 	{ .path = "/dev/null", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 3) },
 	{ .path = "/dev/zero", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 5) },
