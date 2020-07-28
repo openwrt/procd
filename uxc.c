@@ -30,20 +30,23 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <glob.h>
+#include <signal.h>
 
 #include "log.h"
 
+#define OCI_VERSION_STRING "1.0.2"
 #define UXC_CONFDIR "/etc/uxc"
 #define UXC_RUNDIR "/var/run/uxc"
 
 struct runtime_state {
 	struct avl_node avl;
-	const char *container_name;
-	const char *instance_name;
-	const char *jail_name;
+	char *container_name;
+	char *instance_name;
+	char *jail_name;
 	bool running;
-	int pid;
+	int runtime_pid;
 	int exitcode;
+	struct blob_attr *ocistate;
 };
 
 AVL_TREE(runtime, avl_strcmp, false, NULL);
@@ -56,9 +59,10 @@ static int usage(void) {
 	printf("syntax: uxc {command} [parameters ...]\n");
 	printf("commands:\n");
 	printf("\tlist\t\t\t\tlist all configured containers\n");
-	printf("\tcreate {conf} {path} [enabled]\tcreate {conf} for OCI bundle at {path}\n");
+	printf("\tcreate {conf} [path] [enabled]\tcreate {conf} for OCI bundle at {path}\n");
 	printf("\tstart {conf}\t\t\tstart container {conf}\n");
-	printf("\tstop {conf}\t\t\tstop container {conf}\n");
+	printf("\tstate {conf}\t\t\tget state of container {conf}\n");
+	printf("\tkill {conf} {signal}\t\tsend signal to container {conf}\n");
 	printf("\tenable {conf}\t\t\tstart container {conf} on boot\n");
 	printf("\tdisable {conf}\t\t\tdon't start container {conf} on boot\n");
 	printf("\tdelete {conf}\t\t\tdelete {conf}\n");
@@ -159,6 +163,56 @@ runtime_alloc(const char *container_name)
 	return s;
 }
 
+enum {
+	STATE_OCIVERSION,
+	STATE_ID,
+	STATE_STATUS,
+	STATE_PID,
+	STATE_BUNDLE,
+	STATE_ANNOTATIONS,
+	__STATE_MAX,
+};
+
+static const struct blobmsg_policy state_policy[__STATE_MAX] = {
+	[STATE_OCIVERSION] = { .name = "ociVersion", .type = BLOBMSG_TYPE_STRING },
+	[STATE_ID] = { .name = "id", .type = BLOBMSG_TYPE_STRING },
+	[STATE_STATUS] = { .name = "status", .type = BLOBMSG_TYPE_STRING },
+	[STATE_PID] = { .name = "pid", .type = BLOBMSG_TYPE_INT32 },
+	[STATE_BUNDLE] = { .name = "bundle", .type = BLOBMSG_TYPE_STRING },
+	[STATE_ANNOTATIONS] = { .name = "annotations", .type = BLOBMSG_TYPE_TABLE },
+};
+
+
+static void ocistate_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	struct blob_attr **ocistate = (struct blob_attr **)req->priv;
+	struct blob_attr *tb[__STATE_MAX];
+
+	blobmsg_parse(state_policy, __STATE_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (!tb[STATE_OCIVERSION] ||
+	    !tb[STATE_ID] ||
+	    !tb[STATE_STATUS] ||
+	    !tb[STATE_BUNDLE])
+		return;
+
+	*ocistate = blob_memdup(msg);
+}
+
+static void get_ocistate(struct blob_attr **ocistate, const char *name)
+{
+	char *objname;
+	unsigned int id;
+
+	*ocistate = NULL;
+
+	asprintf(&objname, "container.%s", name);
+	if (ubus_lookup_id(ctx, objname, &id))
+		return;
+
+	ubus_invoke(ctx, id, "state", NULL, ocistate_cb, ocistate, 3000);
+}
+
 static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 {
 	struct blob_attr *cur, *curi, *tl[__LIST_MAX], *ti[__INSTANCE_MAX], *tj[__JAIL_MAX];
@@ -202,7 +256,7 @@ static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 			rs = runtime_alloc(container_name);
 			rs->instance_name = strdup(instance_name);
 			rs->jail_name = strdup(jail_name);
-			rs->pid = pid;
+			rs->runtime_pid = pid;
 			rs->exitcode = exitcode;
 			rs->running = running;
 			avl_insert(&runtime, &rs->avl);
@@ -214,12 +268,17 @@ static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 
 static int runtime_load(void)
 {
+	struct runtime_state *item, *tmp;
 	uint32_t id;
 
 	avl_init(&runtime, avl_strcmp, false, NULL);
 	if (ubus_lookup_id(ctx, "container", &id) ||
 		ubus_invoke(ctx, id, "list", NULL, list_cb, &runtime, 3000))
 		return EIO;
+
+
+	avl_for_each_element_safe(&runtime, item, avl, tmp)
+		get_ocistate(&item->ocistate, item->jail_name);
 
 	return 0;
 }
@@ -230,18 +289,72 @@ static void runtime_free(void)
 
 	avl_for_each_element_safe(&runtime, item, avl, tmp) {
 		avl_delete(&runtime, &item->avl);
+		free(item->instance_name);
+		free(item->jail_name);
+		free(item->ocistate);
 		free(item);
 	}
 
 	return;
 }
 
+static int uxc_state(char *name)
+{
+	struct runtime_state *s = avl_find_element(&runtime, name, s, avl);
+	struct blob_attr *ocistate = NULL;
+	struct blob_attr *cur, *tb[__CONF_MAX];
+	int rem;
+	char *bundle = NULL;
+	char *jail_name = NULL;
+	static struct blob_buf buf;
+
+	if (s)
+		ocistate = s->ocistate;
+
+	if (ocistate) {
+		printf("%s\n", blobmsg_format_json_indent(ocistate, true, 0));
+		return 0;
+	}
+
+	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
+		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+		if (!tb[CONF_NAME] || !tb[CONF_PATH])
+			continue;
+
+		if (!strcmp(name, blobmsg_get_string(tb[CONF_NAME]))) {
+			if (tb[CONF_JAIL])
+				jail_name = blobmsg_get_string(tb[CONF_JAIL]);
+			else
+				jail_name = name;
+
+			bundle = blobmsg_get_string(tb[CONF_PATH]);
+			break;
+		}
+	}
+
+	if (!bundle)
+		return ENOENT;
+
+	blob_buf_init(&buf, 0);
+	blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
+	blobmsg_add_string(&buf, "id", jail_name);
+	blobmsg_add_string(&buf, "status", s?"stopped":"uninitialized");
+	blobmsg_add_string(&buf, "bundle", bundle);
+
+	printf("%s\n", blobmsg_format_json_indent(buf.head, true, 0));
+	blob_buf_free(&buf);
+
+	return 0;
+}
+
 static int uxc_list(void)
 {
-	struct blob_attr *cur, *tb[__CONF_MAX];
+	struct blob_attr *cur, *tb[__CONF_MAX], *ts[__STATE_MAX];
 	int rem;
 	struct runtime_state *s = NULL;
 	char *name;
+	char *ocistatus;
+	int container_pid = -1;
 	bool autostart;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
@@ -250,17 +363,27 @@ static int uxc_list(void)
 			continue;
 
 		autostart = tb[CONF_AUTOSTART] && blobmsg_get_bool(tb[CONF_AUTOSTART]);
-
+		ocistatus = NULL;
+		container_pid = 0;
 		name = blobmsg_get_string(tb[CONF_NAME]);
 		s = avl_find_element(&runtime, name, s, avl);
 
-		printf("[%c] %s %s", autostart?'*':' ', name, (s && s->running)?"RUNNING":"STOPPED");
+		if (s && s->ocistate) {
+			blobmsg_parse(state_policy, __STATE_MAX, ts, blobmsg_data(s->ocistate), blobmsg_len(s->ocistate));
+			ocistatus = blobmsg_get_string(ts[STATE_STATUS]);
+			container_pid = blobmsg_get_u32(ts[STATE_PID]);
+		}
+
+		printf("[%c] %s %s", autostart?'*':' ', name, ocistatus?:(s && s->running)?"creating":"stopped");
 
 		if (s && !s->running && (s->exitcode >= 0))
 			printf(" exitcode: %d (%s)", s->exitcode, strerror(s->exitcode));
 
-		if (s && s->running && (s->pid >= 0))
-			printf(" pid: %d", s->pid);
+		if (s && s->running && (s->runtime_pid >= 0))
+			printf(" runtime pid: %d", s->runtime_pid);
+
+		if (s && s->running && (container_pid >= 0))
+			printf(" container pid: %d", container_pid);
 
 		printf("\n");
 	}
@@ -268,7 +391,7 @@ static int uxc_list(void)
 	return 0;
 }
 
-static int uxc_start(char *name)
+static int uxc_create(char *name, bool immediately)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -289,7 +412,6 @@ static int uxc_start(char *name)
 
 		found = true;
 		path = strdup(blobmsg_get_string(tb[CONF_PATH]));
-
 
 		break;
 	}
@@ -312,6 +434,7 @@ static int uxc_start(char *name)
 	blobmsg_add_string(&req, "bundle", path);
 	j = blobmsg_open_table(&req, "jail");
 	blobmsg_add_string(&req, "name", jailname?:name);
+	blobmsg_add_u8(&req, "immediately", immediately);
 	blobmsg_close_table(&req, j);
 	blobmsg_close_table(&req, in);
 	blobmsg_close_table(&req, ins);
@@ -329,7 +452,19 @@ static int uxc_start(char *name)
 	return ret;
 }
 
-static int uxc_stop(char *name)
+static int uxc_start(const char *name)
+{
+	char *objname;
+	unsigned int id;
+
+	asprintf(&objname, "container.%s", name);
+	if (ubus_lookup_id(ctx, objname, &id))
+		return ENOENT;
+
+	return ubus_invoke(ctx, id, "start", NULL, NULL, NULL, 3000);
+}
+
+static int uxc_kill(char *name, int signal)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -361,17 +496,17 @@ static int uxc_stop(char *name)
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", name);
 	blobmsg_add_string(&req, "instance", s->instance_name);
+	blobmsg_add_u32(&req, "signal", signal);
 
 	ret = 0;
 	if (ubus_lookup_id(ctx, "container", &id) ||
-		ubus_invoke(ctx, id, "delete", req.head, NULL, NULL, 3000)) {
+		ubus_invoke(ctx, id, "signal", req.head, NULL, NULL, 3000)) {
 		ret = EIO;
 	}
 
-	blob_buf_free(&req);
-
 	return ret;
 }
+
 
 static int uxc_set(char *name, char *path, bool autostart, bool add)
 {
@@ -440,7 +575,6 @@ static int uxc_set(char *name, char *path, bool autostart, bool add)
 
 	blob_buf_free(&req);
 
-	/* ToDo: tell ujail to run createRuntime and createContainer hooks */
 	return 0;
 }
 
@@ -456,7 +590,7 @@ static int uxc_boot(void)
 			continue;
 
 		name = strdup(blobmsg_get_string(tb[CONF_NAME]));
-		ret += uxc_start(name);
+		ret += uxc_create(name, true);
 		free(name);
 	}
 
@@ -539,11 +673,20 @@ int main(int argc, char **argv)
 			goto usage_out;
 
 		ret = uxc_start(argv[2]);
-	} else if(!strcmp("stop", argv[1])) {
+	} else if(!strcmp("state", argv[1])) {
 		if (argc < 3)
 			goto usage_out;
 
-		ret = uxc_stop(argv[2]);
+		ret = uxc_state(argv[2]);
+	} else if(!strcmp("kill", argv[1])) {
+		int signal = SIGTERM;
+		if (argc < 3)
+			goto usage_out;
+
+		if (argc == 4)
+			signal = atoi(argv[3]);
+
+		ret = uxc_kill(argv[2], signal);
 	} else if(!strcmp("enable", argv[1])) {
 		if (argc < 3)
 			goto usage_out;
@@ -561,7 +704,7 @@ int main(int argc, char **argv)
 		ret = uxc_delete(argv[2]);
 	} else if(!strcmp("create", argv[1])) {
 		bool autostart = false;
-		if (argc < 4)
+		if (argc < 3)
 			goto usage_out;
 
 		if (argc == 5) {
@@ -570,7 +713,14 @@ int main(int argc, char **argv)
 			else
 				autostart = atoi(argv[4]);
 		}
-		ret = uxc_set(argv[2], argv[3], autostart, true);
+
+		if (argc >= 4) {
+			ret = uxc_set(argv[2], argv[3], autostart, true);
+			if (ret)
+				goto runtime_out;
+		}
+
+		ret = uxc_create(argv[2], false);
 	} else
 		goto usage_out;
 
