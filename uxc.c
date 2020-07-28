@@ -203,11 +203,13 @@ static void get_ocistate(struct blob_attr **ocistate, const char *name)
 {
 	char *objname;
 	unsigned int id;
-
+	int ret;
 	*ocistate = NULL;
 
 	asprintf(&objname, "container.%s", name);
-	if (ubus_lookup_id(ctx, objname, &id))
+	ret = ubus_lookup_id(ctx, objname, &id);
+	free(objname);
+	if (ret)
 		return;
 
 	ubus_invoke(ctx, id, "state", NULL, ocistate_cb, ocistate, 3000);
@@ -469,7 +471,8 @@ static int uxc_kill(char *name, int signal)
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	int rem, ret;
-	uint32_t id;
+	char *objname;
+	unsigned int id;
 	struct runtime_state *s = NULL;
 	bool found = false;
 
@@ -494,17 +497,20 @@ static int uxc_kill(char *name, int signal)
 		return ENOENT;
 
 	blob_buf_init(&req, 0);
-	blobmsg_add_string(&req, "name", name);
-	blobmsg_add_string(&req, "instance", s->instance_name);
 	blobmsg_add_u32(&req, "signal", signal);
+	blobmsg_add_string(&req, "name", name);
+	printf("%s\n", blobmsg_format_json_indent(req.head, true, 0));
 
-	ret = 0;
-	if (ubus_lookup_id(ctx, "container", &id) ||
-		ubus_invoke(ctx, id, "signal", req.head, NULL, NULL, 3000)) {
-		ret = EIO;
-	}
+	asprintf(&objname, "container.%s", name);
+	ret = ubus_lookup_id(ctx, objname, &id);
+	free(objname);
+	if (ret)
+		return ENOENT;
 
-	return ret;
+	if (ubus_invoke(ctx, id, "kill", req.head, NULL, NULL, 3000))
+		return EIO;
+
+	return 0;
 }
 
 
