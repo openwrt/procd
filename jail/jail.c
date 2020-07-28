@@ -2279,9 +2279,48 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
+enum {
+	CONTAINER_KILL_ATTR_SIGNAL,
+	__CONTAINER_KILL_ATTR_MAX,
+};
+
+static const struct blobmsg_policy container_kill_attrs[__CONTAINER_KILL_ATTR_MAX] = {
+	[CONTAINER_KILL_ATTR_SIGNAL] = { "signal", BLOBMSG_TYPE_INT32 },
+};
+
+static int
+container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
+		    struct ubus_request_data *req, const char *method,
+		    struct blob_attr *msg)
+{
+	struct blob_attr *tb[__CONTAINER_KILL_ATTR_MAX], *cur;
+	int sig = SIGTERM;
+
+	blobmsg_parse(container_kill_attrs, __CONTAINER_KILL_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
+
+	cur = tb[CONTAINER_KILL_ATTR_SIGNAL];
+	if (cur)
+		sig = blobmsg_get_u32(cur);
+
+	if (jail_oci_state == OCI_STATE_CREATING)
+		return UBUS_STATUS_NOT_FOUND;
+
+	if (kill(jail_process.pid, sig) == 0)
+		return 0;
+
+	switch (errno) {
+	case EINVAL: return UBUS_STATUS_INVALID_ARGUMENT;
+	case EPERM:  return UBUS_STATUS_PERMISSION_DENIED;
+	case ESRCH:  return UBUS_STATUS_NOT_FOUND;
+	}
+
+	return UBUS_STATUS_UNKNOWN_ERROR;
+}
+
 static struct ubus_method container_methods[] = {
 	UBUS_METHOD_NOARG("start", handle_start),
 	UBUS_METHOD_NOARG("state", handle_state),
+	UBUS_METHOD("kill", container_handle_kill, container_kill_attrs),
 };
 
 static struct ubus_object_type container_object_type =

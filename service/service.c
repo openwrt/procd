@@ -935,7 +935,6 @@ static struct ubus_method container_object_methods[] = {
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
 	UBUS_METHOD("list", service_handle_list, service_list_attrs),
 	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
-	UBUS_METHOD("signal", service_handle_signal, service_signal_attrs),
 	UBUS_METHOD("state", service_handle_state, service_state_attrs),
 	UBUS_METHOD("console_set", container_handle_console, container_console_policy),
 	UBUS_METHOD("console_attach", container_handle_console, container_console_policy),
