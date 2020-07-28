@@ -637,6 +637,12 @@ errout:
 	return ret;
 }
 
+static void reload_conf(void)
+{
+	blob_buf_free(&conf);
+	conf_load(false);
+}
+
 int main(int argc, char **argv)
 {
 	int ret = EINVAL;
@@ -718,8 +724,9 @@ int main(int argc, char **argv)
 			ret = uxc_set(argv[2], argv[3], autostart, true);
 			if (ret)
 				goto runtime_out;
-		}
 
+			reload_conf();
+		}
 		ret = uxc_create(argv[2], false);
 	} else
 		goto usage_out;
