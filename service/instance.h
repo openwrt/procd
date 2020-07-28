@@ -76,6 +76,7 @@ struct service_instance {
 	bool trace;
 	bool has_jail;
 	bool require_jail;
+	bool immediately;
 	bool no_new_privs;
 	struct jail jail;
 	char *seccomp;

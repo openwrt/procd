@@ -115,6 +115,7 @@ enum {
 	JAIL_ATTR_CGROUPSNS,
 	JAIL_ATTR_CONSOLE,
 	JAIL_ATTR_REQUIREJAIL,
+	JAIL_ATTR_IMMEDIATELY,
 	__JAIL_ATTR_MAX,
 };
 
@@ -132,6 +133,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_CGROUPSNS] = { "cgroupsns", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_CONSOLE] = { "console", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_REQUIREJAIL] = { "requirejail", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_IMMEDIATELY] = { "immediately", BLOBMSG_TYPE_BOOL },
 };
 
 struct instance_netdev {
@@ -297,6 +299,9 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = "-T";
 		argv[argc++] = in->tmpoverlaysize;
 	}
+
+	if (in->immediately)
+		argv[argc++] = "-i";
 
 	if (in->bundle) {
 		argv[argc++] = "-J";
@@ -957,6 +962,10 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		in->require_jail = true;
 		jail->argc++;
 	}
+	if (tb[JAIL_ATTR_IMMEDIATELY] && blobmsg_get_bool(tb[JAIL_ATTR_IMMEDIATELY])) {
+		in->immediately = true;
+		jail->argc++;
+	}
 	if (tb[JAIL_ATTR_NAME]) {
 		jail->name = strdup(blobmsg_get_string(tb[JAIL_ATTR_NAME]));
 		jail->argc += 2;
@@ -1356,6 +1365,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->syslog_facility = LOG_DAEMON;
 	in->exit_code = 0;
 	in->require_jail = false;
+	in->immediately = false;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;

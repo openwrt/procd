@@ -65,7 +65,9 @@
 #endif
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:EyJ:"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:EyJ:i"
+
+#define OCI_VERSION_STRING "1.0.2"
 
 struct hook_execvpe {
 	char *file;
@@ -142,8 +144,23 @@ static struct {
 	int oom_score_adj;
 	bool set_oom_score_adj;
 	struct mknod_args **devices;
-	bool oci;
+	char *ocibundle;
+	bool immediately;
+	struct blob_attr *annotations;
 } opts;
+
+static struct blob_buf ocibuf;
+
+extern int pivot_root(const char *new_root, const char *put_old);
+
+int debug = 0;
+
+static char child_stack[STACK_SIZE];
+
+static struct ubus_context *parent_ctx;
+
+int console_fd;
+
 
 static inline bool has_namespaces(void)
 {
@@ -252,23 +269,13 @@ static void free_opts(bool child) {
 	free(opts.extroot);
 	free(opts.uidmap);
 	free(opts.gidmap);
+	free(opts.annotations);
 	free_hooklist(opts.hooks.createRuntime);
 	free_hooklist(opts.hooks.createContainer);
 	free_hooklist(opts.hooks.startContainer);
 	free_hooklist(opts.hooks.poststart);
 	free_hooklist(opts.hooks.poststop);
 }
-
-static struct blob_buf ocibuf;
-
-extern int pivot_root(const char *new_root, const char *put_old);
-
-int debug = 0;
-
-static char child_stack[STACK_SIZE];
-
-int console_fd;
-
 static int mount_overlay(char *jail_root, char *overlaydir) {
 	char *upperdir, *workdir, *optsstr, *upperetc, *upperresolvconf;
 	const char mountoptsformat[] = "lowerdir=%s,upperdir=%s,workdir=%s";
@@ -334,24 +341,24 @@ out:
 
 static void pass_console(int console_fd)
 {
-	struct ubus_context *ctx = ubus_connect(NULL);
+	struct ubus_context *child_ctx = ubus_connect(NULL);
 	static struct blob_buf req;
 	uint32_t id;
 
-	if (!ctx)
+	if (!child_ctx)
 		return;
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", opts.name);
 
-	if (ubus_lookup_id(ctx, "container", &id) ||
-	    ubus_invoke_fd(ctx, id, "console_set", req.head, NULL, NULL, 3000, console_fd))
+	if (ubus_lookup_id(child_ctx, "container", &id) ||
+	    ubus_invoke_fd(child_ctx, id, "console_set", req.head, NULL, NULL, 3000, console_fd))
 		INFO("ubus request failed\n");
 	else
 		close(console_fd);
 
 	blob_buf_free(&req);
-	ubus_free(ctx);
+	ubus_free(child_ctx);
 }
 
 static int create_dev_console(const char *jail_root)
@@ -942,7 +949,8 @@ static void usage(void)
 	fprintf(stderr, "  -T <size>\tuse tmpfs r/w overlayfs with <size>\n");
 	fprintf(stderr, "  -E\t\tfail if jail cannot be setup\n");
 	fprintf(stderr, "  -y\t\tprovide jail console\n");
-	fprintf(stderr, "  -J <dir>\tstart OCI bundle\n");
+	fprintf(stderr, "  -J <dir>\tcreate container from OCI bundle\n");
+	fprintf(stderr, "  -j\t\tstart container immediately\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -1066,9 +1074,9 @@ static struct uloop_timeout pre_exec_timeout = {
 	.cb = pre_exec_jail,
 };
 
-static int exec_jail(void *pipes_ptr)
+int pipes[4];
+static int exec_jail(void *arg)
 {
-	int *pipes = (int*)pipes_ptr;
 	char buf[1];
 
 	uloop_init();
@@ -1091,6 +1099,7 @@ static int exec_jail(void *pipes_ptr)
 		ERROR("can't write to parent\n");
 		return EXIT_FAILURE;
 	}
+	close(pipes[1]);
 	if (read(pipes[2], buf, 1) < 1) {
 		ERROR("can't read from parent\n");
 		return EXIT_FAILURE;
@@ -1099,10 +1108,6 @@ static int exec_jail(void *pipes_ptr)
 		ERROR("parent had an error, child exiting\n");
 		return EXIT_FAILURE;
 	}
-
-	close(pipes[1]);
-	close(pipes[2]);
-
 	if ((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1)) {
 		if (setregid(0, 0) < 0) {
 			ERROR("setgid\n");
@@ -1143,6 +1148,18 @@ static void pre_exec_jail(struct uloop_timeout *t)
 static void post_start_hook(void);
 static void post_jail_fs(void)
 {
+	char buf[1];
+
+	if (read(pipes[2], buf, 1) < 1) {
+		ERROR("can't read from parent\n");
+		exit(EXIT_FAILURE);
+	}
+	if (buf[0] != '!') {
+		ERROR("parent had an error, child exiting\n");
+		exit(EXIT_FAILURE);
+	}
+	close(pipes[2]);
+
 	run_hooks(opts.hooks.startContainer, post_start_hook);
 }
 
@@ -1218,11 +1235,10 @@ static int pidns_open_pid(const pid_t target_ns)
 
 static void netns_updown(pid_t pid, bool start)
 {
-	struct ubus_context *ctx = ubus_connect(NULL);
 	static struct blob_buf req;
 	uint32_t id;
 
-	if (!ctx)
+	if (!parent_ctx)
 		return;
 
 	blob_buf_init(&req, 0);
@@ -1230,12 +1246,11 @@ static void netns_updown(pid_t pid, bool start)
 	blobmsg_add_u32(&req, "pid", pid);
 	blobmsg_add_u8(&req, "start", start);
 
-	if (ubus_lookup_id(ctx, "network", &id) ||
-	    ubus_invoke(ctx, id, "netns_updown", req.head, NULL, NULL, 3000))
+	if (ubus_lookup_id(parent_ctx, "network", &id) ||
+	    ubus_invoke(parent_ctx, id, "netns_updown", req.head, NULL, NULL, 3000))
 		INFO("ubus request failed\n");
 
 	blob_buf_free(&req);
-	ubus_free(ctx);
 }
 
 static int parseOCIenvarray(struct blob_attr *msg, char ***envp)
@@ -2105,6 +2120,7 @@ enum {
 	OCI_MOUNTS,
 	OCI_HOOKS,
 	OCI_LINUX,
+	OCI_ANNOTATIONS,
 	__OCI_MAX,
 };
 
@@ -2116,6 +2132,7 @@ static const struct blobmsg_policy oci_policy[] = {
 	[OCI_MOUNTS] = { "mounts", BLOBMSG_TYPE_ARRAY },
 	[OCI_HOOKS] = { "hooks", BLOBMSG_TYPE_TABLE },
 	[OCI_LINUX] = { "linux", BLOBMSG_TYPE_TABLE },
+	[OCI_ANNOTATIONS] = { "annotations", BLOBMSG_TYPE_TABLE },
 };
 
 static int parseOCI(const char *jsonfile)
@@ -2167,6 +2184,9 @@ static int parseOCI(const char *jsonfile)
 	if (tb[OCI_HOOKS] && (res = parseOCIhooks(tb[OCI_HOOKS])))
 		return res;
 
+	if (tb[OCI_ANNOTATIONS])
+		opts.annotations = blob_memdup(tb[OCI_ANNOTATIONS]);
+
 	blob_buf_free(&ocibuf);
 
 	return 0;
@@ -2192,11 +2212,91 @@ static int set_oom_score_adj(void)
 }
 
 
+enum {
+	OCI_STATE_CREATING,
+	OCI_STATE_CREATED,
+	OCI_STATE_RUNNING,
+	OCI_STATE_STOPPED,
+};
+
+static int jail_oci_state = OCI_STATE_CREATED;
+static void pipe_send_start_container(struct uloop_timeout *t);
+static struct uloop_timeout start_container_timeout = {
+	.cb = pipe_send_start_container,
+};
+
+static int handle_start(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	if (jail_oci_state != OCI_STATE_CREATED)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	uloop_timeout_add(&start_container_timeout);
+
+	return UBUS_STATUS_OK;
+}
+
+static struct blob_buf bb;
+static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	char *statusstr;
+
+	switch (jail_oci_state) {
+		case OCI_STATE_CREATING:
+			statusstr = "creating";
+			break;
+		case OCI_STATE_CREATED:
+			statusstr = "created";
+			break;
+		case OCI_STATE_RUNNING:
+			statusstr = "running";
+			break;
+		case OCI_STATE_STOPPED:
+			statusstr = "stopped";
+			break;
+		default:
+			statusstr = "unknown";
+	}
+
+	blob_buf_init(&bb, 0);
+	blobmsg_add_string(&bb, "ociVersion", OCI_VERSION_STRING);
+	blobmsg_add_string(&bb, "id", opts.name);
+	blobmsg_add_string(&bb, "status", statusstr);
+	if (jail_oci_state == OCI_STATE_CREATED ||
+	    jail_oci_state == OCI_STATE_RUNNING)
+		blobmsg_add_u32(&bb, "pid", jail_process.pid);
+
+	blobmsg_add_string(&bb, "bundle", opts.ocibundle);
+
+	if (opts.annotations)
+		blobmsg_add_blob(&bb, opts.annotations);
+
+	ubus_send_reply(ctx, req, bb.head);
+
+	return UBUS_STATUS_OK;
+}
+
+static struct ubus_method container_methods[] = {
+	UBUS_METHOD_NOARG("start", handle_start),
+	UBUS_METHOD_NOARG("state", handle_state),
+};
+
+static struct ubus_object_type container_object_type =
+	UBUS_OBJECT_TYPE("container", container_methods);
+
+static struct ubus_object container_object = {
+	.type = &container_object_type,
+	.methods = container_methods,
+	.n_methods = ARRAY_SIZE(container_methods),
+};
+
 static void post_main(struct uloop_timeout *t);
 static struct uloop_timeout post_main_timeout = {
 	.cb = post_main,
 };
-static int pipes[4];
 static int netns_fd;
 static int pidns_fd;
 static void post_create_runtime(void);
@@ -2205,8 +2305,7 @@ int main(int argc, char **argv)
 	uid_t uid = getuid();
 	const char log[] = "/dev/log";
 	const char ubus[] = "/var/run/ubus.sock";
-	char *jsonfile = NULL;
-	int ch;
+	int ch, ret;
 
 	if (uid) {
 		ERROR("not root, aborting: %m\n");
@@ -2298,12 +2397,15 @@ int main(int argc, char **argv)
 			opts.console = 1;
 			break;
 		case 'J':
-			asprintf(&jsonfile, "%s/config.json", optarg);
+			opts.ocibundle = strdup(optarg);
+			break;
+		case 'i':
+			opts.immediately = true;
 			break;
 		}
 	}
 
-	if (opts.namespace && !jsonfile)
+	if (opts.namespace && !opts.ocibundle)
 		opts.namespace |= CLONE_NEWIPC | CLONE_NEWPID;
 
 	/* those are filehandlers, so -1 indicates unused */
@@ -2318,15 +2420,17 @@ int main(int argc, char **argv)
 	opts.setns.time = -1;
 #endif
 
-	if (jsonfile) {
+	if (opts.ocibundle) {
+		char *jsonfile;
 		int ocires;
+
+		asprintf(&jsonfile, "%s/config.json", opts.ocibundle);
 		ocires = parseOCI(jsonfile);
 		free(jsonfile);
 		if (ocires) {
 			ERROR("parsing of OCI JSON spec has failed: %s (%d)\n", strerror(ocires), ocires);
 			return ocires;
 		}
-		opts.oci = true;
 	}
 
 	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
@@ -2335,11 +2439,11 @@ int main(int argc, char **argv)
 	}
 
 	/* no <binary> param found */
-	if (!opts.oci && (argc - optind < 1)) {
+	if (!opts.ocibundle && (argc - optind < 1)) {
 		usage();
 		return EXIT_FAILURE;
 	}
-	if (!(opts.oci||opts.namespace||opts.capabilities||opts.seccomp)) {
+	if (!(opts.ocibundle||opts.namespace||opts.capabilities||opts.seccomp)) {
 		ERROR("Not using namespaces, capabilities or seccomp !!!\n\n");
 		usage();
 		return EXIT_FAILURE;
@@ -2349,7 +2453,27 @@ int main(int argc, char **argv)
 		opts.capabilities != 0 || opts.capset.apply,
 		opts.seccomp != 0 || opts.ociseccomp != 0);
 
-	if (!opts.oci) {
+	uloop_init();
+	signals_init();
+
+	parent_ctx = ubus_connect(NULL);
+	ubus_add_uloop(parent_ctx);
+
+	if (opts.ocibundle) {
+		char *objname;
+		if (asprintf(&objname, "container.%s", opts.name) < 0)
+			exit(-ENOMEM);
+
+		container_object.name = objname;
+		ret = ubus_add_object(parent_ctx, &container_object);
+		if (ret) {
+			ERROR("Failed to add object: %s\n", ubus_strerror(ret));
+			exit(-1);
+		}
+	}
+
+	/* deliberately not using 'else' on unrelated conditional branches */
+	if (!opts.ocibundle) {
 		/* allocate NULL-terminated array for argv */
 		opts.jail_argv = calloc(1 + argc - optind, sizeof(char**));
 		if (!opts.jail_argv)
@@ -2376,20 +2500,6 @@ int main(int argc, char **argv)
 			return -1;
 	}
 
-	if (apply_rlimits()) {
-		ERROR("error applying resource limits\n");
-		exit(EXIT_FAILURE);
-	}
-
-	if (opts.name)
-		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
-
-	uloop_init();
-	signals_init();
-
-	if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
-		return -1;
-
 	uloop_timeout_add(&post_main_timeout);
 	uloop_run();
 
@@ -2399,6 +2509,17 @@ int main(int argc, char **argv)
 
 static void post_main(struct uloop_timeout *t)
 {
+	if (apply_rlimits()) {
+		ERROR("error applying resource limits\n");
+		exit(EXIT_FAILURE);
+	}
+
+	if (opts.name)
+		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
+
+	if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
+		exit(-1);
+
 	if (has_namespaces()) {
 		if (opts.namespace & CLONE_NEWNS) {
 			if (!opts.extroot && (opts.user || opts.group)) {
@@ -2425,7 +2546,7 @@ static void post_main(struct uloop_timeout *t)
 			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "size=1M", -1);
 			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
 
-			if (opts.procfs || opts.oci) {
+			if (opts.procfs || opts.ocibundle) {
 				add_mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL, -1);
 
 				/*
@@ -2450,10 +2571,10 @@ static void post_main(struct uloop_timeout *t)
 							add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, NULL, -1);
 
 			}
-			if (opts.sysfs || opts.oci)
+			if (opts.sysfs || opts.ocibundle)
 				add_mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, NULL, -1);
 
-			if (opts.oci)
+			if (opts.ocibundle)
 				add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, "mode=1777", -1);
 
 		}
@@ -2465,7 +2586,7 @@ static void post_main(struct uloop_timeout *t)
 			pidns_fd = -1;
 		}
 
-		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | opts.namespace, &pipes);
+		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | opts.namespace, NULL);
 	} else {
 		jail_process.pid = fork();
 	}
@@ -2474,6 +2595,7 @@ static void post_main(struct uloop_timeout *t)
 		/* parent process */
 		char sig_buf[1];
 
+		uloop_process_add(&jail_process);
 		jail_running = 1;
 		seteuid(0);
 		if (pidns_fd != -1) {
@@ -2536,7 +2658,7 @@ static void post_main(struct uloop_timeout *t)
 		}
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
-		exit(exec_jail(&pipes));
+		exit(exec_jail(NULL));
 	} else {
 		ERROR("failed to clone/fork: %m\n");
 		exit(EXIT_FAILURE);
@@ -2554,14 +2676,31 @@ static void post_create_runtime(void)
 		ERROR("can't write to child\n");
 		exit(-1);
 	}
+
+	jail_oci_state = OCI_STATE_CREATED;
+	if (opts.ocibundle && !opts.immediately)
+		uloop_run(); /* wait for 'start' command via ubus */
+	else
+		pipe_send_start_container(NULL);
+}
+
+static void pipe_send_start_container(struct uloop_timeout *t)
+{
+	char sig_buf[1];
+
+	jail_oci_state = OCI_STATE_RUNNING;
+	sig_buf[0] = '!';
+	if (write(pipes[3], sig_buf, 1) < 0) {
+		ERROR("can't write to child\n");
+		exit(-1);
+	}
 	close(pipes[3]);
+
 	run_hooks(opts.hooks.poststart, post_poststart);
 }
 
-
 static void post_poststart(void)
 {
-	uloop_process_add(&jail_process);
 	uloop_run(); /* idle here while jail is running */
 	if (jail_running) {
 		DEBUG("uloop interrupted, killing jail process\n");
@@ -2586,5 +2725,8 @@ static void poststop(void) {
 static void post_poststop(void)
 {
 	free_opts(true);
+	if (parent_ctx)
+		ubus_free(parent_ctx);
+
 	exit(jail_return_code);
 }
