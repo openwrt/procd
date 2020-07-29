@@ -14,7 +14,12 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
+#include <sys/types.h>
+#include <fcntl.h>
+
 #include <unistd.h>
+#include <sched.h>
 
 #include <libubox/blobmsg_json.h>
 #include <libubox/avl-cmp.h>
@@ -295,6 +300,97 @@ static const struct blobmsg_policy container_console_policy[__CONTAINER_CONSOLE_
 static inline bool is_container_obj(struct ubus_object *obj)
 {
 	return (obj && (strcmp(obj->name, "container") == 0));
+}
+
+static inline void put_namespace(struct blob_buf *b, char *name)
+{
+	char nsfname[32];
+	struct stat statbuf;
+
+	snprintf(nsfname, sizeof(nsfname), "/proc/self/ns/%s", name);
+
+	if (!stat(nsfname, &statbuf))
+		blobmsg_add_string(b, NULL, name);
+}
+
+static void put_cgroups(struct blob_buf *b)
+{
+	int fd, ret;
+	static char buf[512] = "";
+	char *t, *z;
+
+	fd = open("/sys/fs/cgroup/cgroup.controllers", O_RDONLY);
+	if (fd == -1)
+		return;
+
+	ret = read(fd, &buf, sizeof(buf));
+	close(fd);
+
+	if (ret < 2)
+		return;
+
+	t = buf;
+	while(t) {
+		z = t;
+		/* replace space with \0 and direct next entry */
+		t = strchr(z, ' ');
+		if (t) {
+			*(t++) = '\0';
+		} else { /* replace trailing new-line with \0 */
+			t = strchr(z, '\n');
+			if (!t) /* shouldn't happen, but don't segfault if it does */
+				break;
+
+			*t = '\0';
+			t = NULL;
+		}
+		blobmsg_add_string(b, NULL, z);
+	}
+}
+
+static int
+container_handle_features(struct ubus_context *ctx, struct ubus_object *obj,
+		    struct ubus_request_data *req, const char *method,
+		    struct blob_attr *msg)
+{
+	struct utsname utsbuf;
+	struct stat statbuf;
+	void *nsarray, *cgarray;
+
+	if (stat("/sbin/ujail", &statbuf))
+		return UBUS_STATUS_NOT_SUPPORTED;
+
+	if (uname(&utsbuf) < 0)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "machine", utsbuf.machine);
+
+#ifdef SECCOMP_SUPPORT
+	blobmsg_add_u8(&b, "seccomp", true);
+#else
+	blobmsg_add_u8(&b, "seccomp", false);
+#endif
+
+	cgarray = blobmsg_open_array(&b, "cgroup");
+	put_cgroups(&b);
+	blobmsg_close_array(&b, cgarray);
+
+	nsarray = blobmsg_open_array(&b, "namespaces");
+	put_namespace(&b, "cgroup");
+	put_namespace(&b, "ipc");
+	put_namespace(&b, "mnt");
+	put_namespace(&b, "net");
+	put_namespace(&b, "pid");
+#ifdef CLONE_NEWTIME
+	put_namespace(&b, "time");
+#endif
+	put_namespace(&b, "user");
+	put_namespace(&b, "uts");
+	blobmsg_close_array(&b, nsarray);
+	ubus_send_reply(ctx, req, b.head);
+
+	return UBUS_STATUS_OK;
 }
 
 static int
@@ -936,6 +1032,7 @@ static struct ubus_method container_object_methods[] = {
 	UBUS_METHOD("list", service_handle_list, service_list_attrs),
 	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
 	UBUS_METHOD("state", service_handle_state, service_state_attrs),
+	UBUS_METHOD_NOARG("get_features", container_handle_features),
 	UBUS_METHOD("console_set", container_handle_console, container_console_policy),
 	UBUS_METHOD("console_attach", container_handle_console, container_console_policy),
 };
