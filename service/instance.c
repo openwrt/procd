@@ -799,6 +799,18 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (!blob_attr_equal(in->command, in_new->command))
 		return true;
 
+	if (string_changed(in->bundle, in_new->bundle))
+		return true;
+
+	if (string_changed(in->extroot, in_new->extroot))
+		return true;
+
+	if (string_changed(in->overlaydir, in_new->overlaydir))
+		return true;
+
+	if (string_changed(in->tmpoverlaysize, in_new->tmpoverlaysize))
+		return true;
+
 	if (!blobmsg_list_equal(&in->env, &in_new->env))
 		return true;
 
@@ -826,6 +838,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (in->pw_gid != in_new->pw_gid)
 		return true;
 
+	if (in->gr_gid != in_new->gr_gid)
+		return true;
+
 	if (string_changed(in->pidfile, in_new->pidfile))
 		return true;
 
@@ -835,11 +850,14 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 	if (in->respawn_timeout != in_new->respawn_timeout)
 		return true;
-	if (in->bundle && in_new->bundle && strcmp(in->bundle, in_new->bundle))
+
+	if (in->reload_signal != in_new->reload_signal)
 		return true;
-	if ((!in->seccomp && in_new->seccomp) ||
-	    (in->seccomp && !in_new->seccomp) ||
-	    (in->seccomp && in_new->seccomp && strcmp(in->seccomp, in_new->seccomp)))
+
+	if (in->term_timeout != in_new->term_timeout)
+		return true;
+
+	if (string_changed(in->seccomp, in_new->seccomp))
 		return true;
 
 	if (!blobmsg_list_equal(&in->limits, &in_new->limits))
@@ -849,6 +867,57 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 
 	if (!blobmsg_list_equal(&in->errors, &in_new->errors))
+		return true;
+
+	if (in->has_jail != in_new->has_jail)
+		return true;
+
+	if (in->trace != in_new->trace)
+		return true;
+
+	if (in->require_jail != in_new->require_jail)
+		return true;
+
+	if (in->immediately != in_new->immediately)
+		return true;
+
+	if (in->no_new_privs != in_new->no_new_privs)
+		return true;
+
+	if (string_changed(in->jail.name, in_new->jail.name))
+		return true;
+
+	if (string_changed(in->jail.hostname, in_new->jail.hostname))
+		return true;
+
+	if (in->jail.procfs != in_new->jail.procfs)
+		return true;
+
+	if (in->jail.sysfs != in_new->jail.sysfs)
+		return true;
+
+	if (in->jail.ubus != in_new->jail.ubus)
+		return true;
+
+	if (in->jail.log != in_new->jail.log)
+		return true;
+
+	if (in->jail.ronly != in_new->jail.ronly)
+		return true;
+
+	if (in->jail.netns != in_new->jail.netns)
+		return true;
+
+	if (in->jail.userns != in_new->jail.userns)
+		return true;
+
+	if (in->jail.cgroupsns != in_new->jail.cgroupsns)
+		return true;
+
+	if (in->jail.console != in_new->jail.console)
+		return true;
+
+	if (!blobmsg_list_equal(&in->jail.mount, &in_new->jail.mount))
 		return true;
 
 	if (in->watchdog.mode != in_new->watchdog.mode)
@@ -958,7 +1027,7 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 
 	jail->argc = 2;
 
-	if (tb[JAIL_ATTR_REQUIREJAIL]) {
+	if (tb[JAIL_ATTR_REQUIREJAIL] && blobmsg_get_bool(tb[JAIL_ATTR_REQUIREJAIL])) {
 		in->require_jail = true;
 		jail->argc++;
 	}
@@ -974,40 +1043,40 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->hostname = strdup(blobmsg_get_string(tb[JAIL_ATTR_HOSTNAME]));
 		jail->argc += 2;
 	}
-	if (tb[JAIL_ATTR_PROCFS]) {
-		jail->procfs = blobmsg_get_bool(tb[JAIL_ATTR_PROCFS]);
+	if (tb[JAIL_ATTR_PROCFS] && blobmsg_get_bool(tb[JAIL_ATTR_PROCFS])) {
+		jail->procfs = true;
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_SYSFS]) {
-		jail->sysfs = blobmsg_get_bool(tb[JAIL_ATTR_SYSFS]);
+	if (tb[JAIL_ATTR_SYSFS] && blobmsg_get_bool(tb[JAIL_ATTR_SYSFS])) {
+		jail->sysfs = true;
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_UBUS]) {
-		jail->ubus = blobmsg_get_bool(tb[JAIL_ATTR_UBUS]);
+	if (tb[JAIL_ATTR_UBUS] && blobmsg_get_bool(tb[JAIL_ATTR_UBUS])) {
+		jail->ubus = true;
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_LOG]) {
-		jail->log = blobmsg_get_bool(tb[JAIL_ATTR_LOG]);
+	if (tb[JAIL_ATTR_LOG] && blobmsg_get_bool(tb[JAIL_ATTR_LOG])) {
+		jail->log = true;
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_RONLY]) {
-		jail->ronly = blobmsg_get_bool(tb[JAIL_ATTR_RONLY]);
+	if (tb[JAIL_ATTR_RONLY] && blobmsg_get_bool(tb[JAIL_ATTR_RONLY])) {
+		jail->ronly = true;
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_NETNS]) {
-		jail->netns = blobmsg_get_bool(tb[JAIL_ATTR_NETNS]);
+	if (tb[JAIL_ATTR_NETNS] && blobmsg_get_bool(tb[JAIL_ATTR_NETNS])) {
+		jail->netns = true;
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_USERNS]) {
-		jail->userns = blobmsg_get_bool(tb[JAIL_ATTR_USERNS]);
+	if (tb[JAIL_ATTR_USERNS] && blobmsg_get_bool(tb[JAIL_ATTR_USERNS])) {
+		jail->userns = true;
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_CGROUPSNS]) {
-		jail->cgroupsns = blobmsg_get_bool(tb[JAIL_ATTR_CGROUPSNS]);
+	if (tb[JAIL_ATTR_CGROUPSNS] && blobmsg_get_bool(tb[JAIL_ATTR_CGROUPSNS])) {
+		jail->cgroupsns = true;
 		jail->argc++;
 	}
-	if (tb[JAIL_ATTR_CONSOLE]) {
-		jail->console = blobmsg_get_bool(tb[JAIL_ATTR_CONSOLE]);
+	if (tb[JAIL_ATTR_CONSOLE] && blobmsg_get_bool(tb[JAIL_ATTR_CONSOLE])) {
+		jail->console = true;
 		jail->argc++;
 	}
 
@@ -1295,13 +1364,42 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->respawn_retry = in_src->respawn_retry;
 	in->respawn_threshold = in_src->respawn_threshold;
 	in->respawn_timeout = in_src->respawn_timeout;
+	in->reload_signal = in_src->reload_signal;
+	in->term_timeout = in_src->term_timeout;
+	in->watchdog.mode = in_src->watchdog.mode;
+	in->watchdog.freq = in_src->watchdog.freq;
+	in->watchdog.timeout = in_src->watchdog.timeout;
 	in->name = in_src->name;
+	in->nice = in_src->nice;
 	in->trace = in_src->trace;
 	in->node.avl.key = in_src->node.avl.key;
 	in->syslog_facility = in_src->syslog_facility;
+	in->require_jail = in_src->require_jail;
+	in->no_new_privs = in_src->no_new_privs;
+	in->immediately = in_src->immediately;
+	in->uid = in_src->uid;
+	in->pw_gid = in_src->pw_gid;
+	in->gr_gid = in_src->gr_gid;
+
+	in->has_jail = in_src->has_jail;
+	in->jail.procfs = in_src->jail.procfs;
+	in->jail.sysfs = in_src->jail.sysfs;
+	in->jail.ubus = in_src->jail.ubus;
+	in->jail.log = in_src->jail.log;
+	in->jail.ronly = in_src->jail.ronly;
+	in->jail.netns = in_src->jail.netns;
+	in->jail.cgroupsns = in_src->jail.cgroupsns;
+	in->jail.console = in_src->jail.console;
+	in->jail.argc = in_src->jail.argc;
 
 	instance_config_move_strdup(&in->pidfile, in_src->pidfile);
 	instance_config_move_strdup(&in->seccomp, in_src->seccomp);
+	instance_config_move_strdup(&in->bundle, in_src->bundle);
+	instance_config_move_strdup(&in->extroot, in_src->extroot);
+	instance_config_move_strdup(&in->overlaydir, in_src->overlaydir);
+	instance_config_move_strdup(&in->tmpoverlaysize, in_src->tmpoverlaysize);
+	instance_config_move_strdup(&in->user, in_src->user);
+	instance_config_move_strdup(&in->group, in_src->group);
 	instance_config_move_strdup(&in->jail.name, in_src->jail.name);
 	instance_config_move_strdup(&in->jail.hostname, in_src->jail.hostname);
 
@@ -1492,6 +1590,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 			blobmsg_add_u8(b, "netns", in->jail.netns);
 			blobmsg_add_u8(b, "userns", in->jail.userns);
 			blobmsg_add_u8(b, "cgroupsns", in->jail.cgroupsns);
+		} else {
+			blobmsg_add_u8(b, "immediately", in->immediately);
 		}
 		blobmsg_add_u8(b, "console", (in->console.fd.fd > -1));
 		blobmsg_close_table(b, r);
