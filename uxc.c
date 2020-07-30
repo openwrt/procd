@@ -499,7 +499,6 @@ static int uxc_kill(char *name, int signal)
 	blob_buf_init(&req, 0);
 	blobmsg_add_u32(&req, "signal", signal);
 	blobmsg_add_string(&req, "name", name);
-	printf("%s\n", blobmsg_format_json_indent(req.head, true, 0));
 
 	asprintf(&objname, "container.%s", name);
 	ret = ubus_lookup_id(ctx, objname, &id);
