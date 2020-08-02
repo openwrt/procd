@@ -1090,9 +1090,6 @@ static int exec_jail(void *arg)
 	setns_open(CLONE_NEWNS);
 	setns_open(CLONE_NEWIPC);
 	setns_open(CLONE_NEWUTS);
-#ifdef CLONE_NEWTIME
-	setns_open(CLONE_NEWTIME);
-#endif
 
 	buf[0] = 'i';
 	if (write(pipes[1], buf, 1) < 1) {
@@ -1215,20 +1212,11 @@ static void post_start_hook(void)
 	exit(EXIT_FAILURE);
 }
 
-static int netns_open_pid(const pid_t target_ns)
-{
-	char pid_net_path[PATH_MAX];
-
-	snprintf(pid_net_path, sizeof(pid_net_path), "/proc/%u/ns/net", target_ns);
-
-	return open(pid_net_path, O_RDONLY);
-}
-
-static int pidns_open_pid(const pid_t target_ns)
+static int ns_open_pid(const char *nstype, const pid_t target_ns)
 {
 	char pid_pid_path[PATH_MAX];
 
-	snprintf(pid_pid_path, sizeof(pid_pid_path), "/proc/%u/ns/pid", target_ns);
+	snprintf(pid_pid_path, sizeof(pid_pid_path), "/proc/%u/ns/%s", target_ns, nstype);
 
 	return open(pid_pid_path, O_RDONLY);
 }
@@ -2338,6 +2326,9 @@ static struct uloop_timeout post_main_timeout = {
 };
 static int netns_fd;
 static int pidns_fd;
+#ifdef CLONE_NEWTIME
+static int timens_fd;
+#endif
 static void post_create_runtime(void);
 int main(int argc, char **argv)
 {
@@ -2619,11 +2610,18 @@ static void post_main(struct uloop_timeout *t)
 		}
 
 		if (opts.setns.pid != -1) {
-			pidns_fd = pidns_open_pid(getpid());
+			pidns_fd = ns_open_pid("pid", getpid());
 			setns_open(CLONE_NEWPID);
 		} else {
 			pidns_fd = -1;
 		}
+
+#ifdef CLONE_NEWTIME
+		if (opts.setns.time != -1) {
+			timens_fd = ns_open_pid("time", getpid());
+			setns_open(CLONE_NEWTIME);
+		}
+#endif
 
 		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | opts.namespace, NULL);
 	} else {
@@ -2641,6 +2639,12 @@ static void post_main(struct uloop_timeout *t)
 			setns(pidns_fd, CLONE_NEWPID);
 			close(pidns_fd);
 		}
+#ifdef CLONE_NEWTIME
+		if (timens_fd != -1)
+			setns(timens_fd, CLONE_NEWTIME);
+			close(timens_fd);
+		}
+#endif
 		if (opts.setns.net != -1)
 			close(opts.setns.net);
 		if (opts.setns.ns != -1)
@@ -2653,10 +2657,6 @@ static void post_main(struct uloop_timeout *t)
 			close(opts.setns.user);
 		if (opts.setns.cgroup != -1)
 			close(opts.setns.cgroup);
-#ifdef CLONE_NEWTIME
-		if (opts.setns.time != -1)
-			close(opts.setns.time);
-#endif
 		close(pipes[1]);
 		close(pipes[2]);
 		if (read(pipes[0], sig_buf, 1) < 1) {
@@ -2692,7 +2692,7 @@ static void post_main(struct uloop_timeout *t)
 				ERROR("netns needs a named jail\n");
 				exit(-1);
 			}
-			netns_fd = netns_open_pid(jail_process.pid);
+			netns_fd = ns_open_pid("net", jail_process.pid);
 			netns_updown(jail_process.pid, true);
 		}
 	} else if (jail_process.pid == 0) {
