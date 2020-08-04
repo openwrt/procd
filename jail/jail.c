@@ -1531,6 +1531,19 @@ static int parseOCIprocessuser(struct blob_attr *msg) {
 	return 0;
 }
 
+enum {
+	OCI_PROCESS_RLIMIT_TYPE,
+	OCI_PROCESS_RLIMIT_SOFT,
+	OCI_PROCESS_RLIMIT_HARD,
+	__OCI_PROCESS_RLIMIT_MAX,
+};
+
+static const struct blobmsg_policy oci_process_rlimit_policy[] = {
+	[OCI_PROCESS_RLIMIT_TYPE] = { "type", BLOBMSG_TYPE_STRING },
+	[OCI_PROCESS_RLIMIT_SOFT] = { "soft", BLOBMSG_CAST_INT64 },
+	[OCI_PROCESS_RLIMIT_HARD] = { "hard", BLOBMSG_CAST_INT64 },
+};
+
 /* from manpage GETRLIMIT(2) */
 static const char* const rlimit_names[RLIM_NLIMITS] = {
 	[RLIMIT_AS] = "AS",
@@ -1564,63 +1577,32 @@ static int resolve_rlimit(char *type) {
 }
 
 
-static int parseOCIrlimits(struct blob_attr *msg)
+static int parseOCIrlimit(struct blob_attr *msg)
 {
-	struct blob_attr *cur, *cure;
-	int rem, reme;
+	struct blob_attr *tb[__OCI_PROCESS_RLIMIT_MAX];
 	int limtype = -1;
 	struct rlimit *curlim;
-	rlim_t soft, hard;
-	bool sethard = false, setsoft = false;
 
-	blobmsg_for_each_attr(cur, msg, rem) {
-		blobmsg_for_each_attr(cure, cur, reme) {
-			if (!strcmp(blobmsg_name(cure), "type") && (blobmsg_type(cure) == BLOBMSG_TYPE_STRING)) {
-				limtype = resolve_rlimit(blobmsg_get_string(cure));
-			} else if (!strcmp(blobmsg_name(cure), "soft")) {
-				switch (blobmsg_type(cure)) {
-					case BLOBMSG_TYPE_INT32:
-						soft = blobmsg_get_u32(cure);
-						break;
-					case BLOBMSG_TYPE_INT64:
-						soft = blobmsg_get_u64(cure);
-						break;
-					default:
-						return EINVAL;
-				}
-				setsoft = true;
-			} else if (!strcmp(blobmsg_name(cure), "hard")) {
-				switch (blobmsg_type(cure)) {
-					case BLOBMSG_TYPE_INT32:
-						hard = blobmsg_get_u32(cure);
-						break;
-					case BLOBMSG_TYPE_INT64:
-						hard = blobmsg_get_u64(cure);
-						break;
-					default:
-						return EINVAL;
-				}
-				sethard = true;
-			} else {
-				return EINVAL;
-			}
-		}
+	blobmsg_parse(oci_process_rlimit_policy, __OCI_PROCESS_RLIMIT_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
-		if (limtype < 0)
-			return EINVAL;
+	if (!tb[OCI_PROCESS_RLIMIT_TYPE] ||
+	    !tb[OCI_PROCESS_RLIMIT_SOFT] ||
+	    !tb[OCI_PROCESS_RLIMIT_HARD])
+		return ENODATA;
 
-		if (opts.rlimits[limtype])
-			return ENOTUNIQ;
+	limtype = resolve_rlimit(blobmsg_get_string(tb[OCI_PROCESS_RLIMIT_TYPE]));
 
-		if (!sethard || !setsoft)
-			return ENODATA;
+	if (limtype < 0)
+		return EINVAL;
 
-		curlim = malloc(sizeof(struct rlimit));
-		curlim->rlim_cur = soft;
-		curlim->rlim_max = hard;
+	if (opts.rlimits[limtype])
+		return ENOTUNIQ;
 
-		opts.rlimits[limtype] = curlim;
-	}
+	curlim = malloc(sizeof(struct rlimit));
+	curlim->rlim_cur = blobmsg_cast_u64(tb[OCI_PROCESS_RLIMIT_SOFT]);
+	curlim->rlim_max = blobmsg_cast_u64(tb[OCI_PROCESS_RLIMIT_HARD]);
+
+	opts.rlimits[limtype] = curlim;
 
 	return 0;
 };
@@ -1653,8 +1635,8 @@ static const struct blobmsg_policy oci_process_policy[] = {
 
 static int parseOCIprocess(struct blob_attr *msg)
 {
-	struct blob_attr *tb[__OCI_PROCESS_MAX];
-	int res;
+	struct blob_attr *tb[__OCI_PROCESS_MAX], *cur;
+	int rem, res;
 
 	blobmsg_parse(oci_process_policy, __OCI_PROCESS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
@@ -1684,9 +1666,13 @@ static int parseOCIprocess(struct blob_attr *msg)
 	    (res = parseOCIcapabilities(&opts.capset, tb[OCI_PROCESS_CAPABILITIES])))
 		return res;
 
-	if (tb[OCI_PROCESS_RLIMITS] &&
-	    (res = parseOCIrlimits(tb[OCI_PROCESS_RLIMITS])))
-		return res;
+	if (tb[OCI_PROCESS_RLIMITS]) {
+		blobmsg_for_each_attr(cur, tb[OCI_PROCESS_RLIMITS], rem) {
+			res = parseOCIrlimit(cur);
+			if (res)
+				return res;
+		}
+	}
 
 	if (tb[OCI_PROCESS_OOMSCOREADJ]) {
 		opts.oom_score_adj = blobmsg_get_u32(tb[OCI_PROCESS_OOMSCOREADJ]);
