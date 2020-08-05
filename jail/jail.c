@@ -51,6 +51,7 @@
 #include "jail.h"
 #include "log.h"
 #include "seccomp-oci.h"
+#include "cgroups.h"
 
 #include <libubox/utils.h>
 #include <libubox/blobmsg.h>
@@ -238,11 +239,11 @@ static void free_rlimits(void) {
 		free(opts.rlimits[type]);
 }
 
-static void free_opts(bool child) {
+static void free_opts(bool parent) {
 	char **tmp;
 
 	/* we need to keep argv, envp and seccomp filter in child */
-	if (child) {
+	if (parent) {
 		if (opts.ociseccomp) {
 			free(opts.ociseccomp->filter);
 			free(opts.ociseccomp);
@@ -259,6 +260,7 @@ static void free_opts(bool child) {
 			free(*(tmp++));
 
 		free(opts.envp);
+		cgroups_free();
 	};
 
 	free_rlimits();
@@ -276,6 +278,7 @@ static void free_opts(bool child) {
 	free_hooklist(opts.hooks.poststart);
 	free_hooklist(opts.hooks.poststop);
 }
+
 static int mount_overlay(char *jail_root, char *overlaydir) {
 	char *upperdir, *workdir, *optsstr, *upperetc, *upperresolvconf;
 	const char mountoptsformat[] = "lowerdir=%s,upperdir=%s,workdir=%s";
@@ -1105,6 +1108,10 @@ static int exec_jail(void *arg)
 		ERROR("parent had an error, child exiting\n");
 		return EXIT_FAILURE;
 	}
+
+	if (opts.namespace & CLONE_NEWCGROUP)
+		unshare(CLONE_NEWCGROUP);
+
 	if ((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1)) {
 		if (setregid(0, 0) < 0) {
 			ERROR("setgid\n");
@@ -1950,33 +1957,6 @@ static int parseOCIdevices(struct blob_attr *msg)
 	return 0;
 }
 
-enum {
-	OCI_LINUX_RESOURCES,
-	OCI_LINUX_SECCOMP,
-	OCI_LINUX_SYSCTL,
-	OCI_LINUX_NAMESPACES,
-	OCI_LINUX_DEVICES,
-	OCI_LINUX_UIDMAPPINGS,
-	OCI_LINUX_GIDMAPPINGS,
-	OCI_LINUX_MASKEDPATHS,
-	OCI_LINUX_READONLYPATHS,
-	OCI_LINUX_ROOTFSPROPAGATION,
-	__OCI_LINUX_MAX,
-};
-
-static const struct blobmsg_policy oci_linux_policy[] = {
-	[OCI_LINUX_RESOURCES] = { "resources", BLOBMSG_TYPE_TABLE },
-	[OCI_LINUX_SECCOMP] = { "seccomp", BLOBMSG_TYPE_TABLE },
-	[OCI_LINUX_SYSCTL] = { "sysctl", BLOBMSG_TYPE_TABLE },
-	[OCI_LINUX_NAMESPACES] = { "namespaces", BLOBMSG_TYPE_ARRAY },
-	[OCI_LINUX_DEVICES] = { "devices", BLOBMSG_TYPE_ARRAY },
-	[OCI_LINUX_UIDMAPPINGS] = { "uidMappings", BLOBMSG_TYPE_ARRAY },
-	[OCI_LINUX_GIDMAPPINGS] = { "gidMappings", BLOBMSG_TYPE_ARRAY },
-	[OCI_LINUX_MASKEDPATHS] = { "maskedPaths", BLOBMSG_TYPE_ARRAY },
-	[OCI_LINUX_READONLYPATHS] = { "readonlyPaths", BLOBMSG_TYPE_ARRAY },
-	[OCI_LINUX_ROOTFSPROPAGATION] = { "rootfsPropagation", BLOBMSG_TYPE_STRING },
-};
-
 static int parseOCIsysctl(struct blob_attr *msg)
 {
 	struct blob_attr *cur;
@@ -2020,12 +2000,44 @@ static int parseOCIsysctl(struct blob_attr *msg)
 	return 0;
 }
 
+
+enum {
+	OCI_LINUX_CGROUPSPATH,
+	OCI_LINUX_RESOURCES,
+	OCI_LINUX_SECCOMP,
+	OCI_LINUX_SYSCTL,
+	OCI_LINUX_NAMESPACES,
+	OCI_LINUX_DEVICES,
+	OCI_LINUX_UIDMAPPINGS,
+	OCI_LINUX_GIDMAPPINGS,
+	OCI_LINUX_MASKEDPATHS,
+	OCI_LINUX_READONLYPATHS,
+	OCI_LINUX_ROOTFSPROPAGATION,
+	__OCI_LINUX_MAX,
+};
+
+static const struct blobmsg_policy oci_linux_policy[] = {
+	[OCI_LINUX_CGROUPSPATH] = { "cgroupsPath", BLOBMSG_TYPE_STRING },
+	[OCI_LINUX_RESOURCES] = { "resources", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_SECCOMP] = { "seccomp", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_SYSCTL] = { "sysctl", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_NAMESPACES] = { "namespaces", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_DEVICES] = { "devices", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_UIDMAPPINGS] = { "uidMappings", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_GIDMAPPINGS] = { "gidMappings", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_MASKEDPATHS] = { "maskedPaths", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_READONLYPATHS] = { "readonlyPaths", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_ROOTFSPROPAGATION] = { "rootfsPropagation", BLOBMSG_TYPE_STRING },
+};
+
 static int parseOCIlinux(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_MAX];
 	struct blob_attr *cur;
 	int rem;
 	int res = 0;
+	char *cgpath;
+	char cgfullpath[256] = "/sys/fs/cgroup";
 
 	blobmsg_parse(oci_linux_policy, __OCI_LINUX_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
@@ -2079,6 +2091,37 @@ static int parseOCIlinux(struct blob_attr *msg)
 
 	if (tb[OCI_LINUX_DEVICES]) {
 		res = parseOCIdevices(tb[OCI_LINUX_DEVICES]);
+		if (res)
+			return res;
+	}
+
+	if (tb[OCI_LINUX_CGROUPSPATH]) {
+		cgpath = blobmsg_get_string(tb[OCI_LINUX_CGROUPSPATH]);
+		if (cgpath[0] == '/') {
+			if (strlen(cgpath) >= (sizeof(cgfullpath) - strlen(cgfullpath)))
+				return E2BIG;
+
+			strcat(cgfullpath, cgpath);
+		} else {
+			strcat(cgfullpath, "/containers/");
+			strcat(cgfullpath, opts.name); /* should be container name rather than jail name */
+			strcat(cgfullpath, "/");
+			if (strlen(cgpath) >= (sizeof(cgfullpath) - strlen(cgfullpath)))
+				return E2BIG;
+
+			strcat(cgfullpath, cgpath);
+		}
+	} else {
+		strcat(cgfullpath, "/containers/");
+		strcat(cgfullpath, opts.name); /* should be container name rather than jail name */
+		strcat(cgfullpath, "/");
+		strcat(cgfullpath, opts.name); /* should be container instance name rather than jail name */
+	}
+
+	cgroups_init(cgfullpath);
+
+	if (tb[OCI_LINUX_RESOURCES]) {
+		res = parseOCIlinuxcgroups(tb[OCI_LINUX_RESOURCES]);
 		if (res)
 			return res;
 	}
@@ -2609,7 +2652,7 @@ static void post_main(struct uloop_timeout *t)
 		}
 #endif
 
-		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | opts.namespace, NULL);
+		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | (opts.namespace & (~CLONE_NEWCGROUP)), NULL);
 	} else {
 		jail_process.pid = fork();
 	}
@@ -2651,6 +2694,9 @@ static void post_main(struct uloop_timeout *t)
 		}
 		close(pipes[0]);
 		set_oom_score_adj();
+
+		if (opts.ocibundle)
+			cgroups_apply(jail_process.pid);
 
 		if (opts.namespace & CLONE_NEWUSER) {
 			if (write_setgroups(jail_process.pid, true)) {
