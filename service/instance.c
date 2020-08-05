@@ -37,6 +37,7 @@
 #include "instance.h"
 
 #define UJAIL_BIN_PATH "/sbin/ujail"
+#define CGROUP_BASEDIR "/sys/fs/cgroup/services"
 
 enum {
 	INSTANCE_ATTR_COMMAND,
@@ -459,6 +460,32 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 }
 
 static void
+instance_add_cgroup(const char *service, const char *instance)
+{
+	struct stat sb;
+	char cgnamebuf[256];
+	int fd;
+
+	if (stat("/sys/fs/cgroup/cgroup.subtree_control", &sb))
+		return;
+
+	mkdir(CGROUP_BASEDIR, 0700);
+
+	snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s", CGROUP_BASEDIR, service);
+	mkdir(cgnamebuf, 0700);
+	snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR, service, instance);
+	mkdir(cgnamebuf, 0700);
+	strcat(cgnamebuf, "/cgroup.procs");
+
+	fd = open(cgnamebuf, O_WRONLY);
+	if (fd == -1)
+		return;
+
+	dprintf(fd, "%d", getpid());
+	close(fd);
+}
+
+static void
 instance_free_stdio(struct service_instance *in)
 {
 	if (in->_stdout.fd.fd > -1) {
@@ -538,6 +565,7 @@ instance_start(struct service_instance *in)
 		uloop_done();
 		closefd(opipe[0]);
 		closefd(epipe[0]);
+		instance_add_cgroup(in->srv->name, in->name);
 		instance_run(in, opipe[1], epipe[1]);
 		return;
 	}
