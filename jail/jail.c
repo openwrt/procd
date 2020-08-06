@@ -260,7 +260,8 @@ static void free_opts(bool parent) {
 			free(*(tmp++));
 
 		free(opts.envp);
-		cgroups_free();
+		if (opts.ocibundle)
+			cgroups_free();
 	};
 
 	free_rlimits();
