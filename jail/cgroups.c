@@ -81,6 +81,7 @@ static void cgroups_set(const char *key, const char *val)
 void cgroups_free(void)
 {
 	struct cgval *valp, *tmp;
+
 	avl_for_each_element_safe(&cgvals, valp, avl, tmp) {
 		avl_delete(&cgvals, &valp->avl);
 		free((void *)(valp->avl.key));

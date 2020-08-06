@@ -243,7 +243,7 @@ static void free_opts(bool parent) {
 	char **tmp;
 
 	/* we need to keep argv, envp and seccomp filter in child */
-	if (parent) {
+	if (parent) { /* parent-only */
 		if (opts.ociseccomp) {
 			free(opts.ociseccomp->filter);
 			free(opts.ociseccomp);
@@ -260,9 +260,10 @@ static void free_opts(bool parent) {
 			free(*(tmp++));
 
 		free(opts.envp);
+	} else { /* child-only */
 		if (opts.ocibundle)
 			cgroups_free();
-	};
+	}
 
 	free_rlimits();
 	free_sysctl();
@@ -273,6 +274,7 @@ static void free_opts(bool parent) {
 	free(opts.uidmap);
 	free(opts.gidmap);
 	free(opts.annotations);
+	free(opts.ocibundle);
 	free_hooklist(opts.hooks.createRuntime);
 	free_hooklist(opts.hooks.createContainer);
 	free_hooklist(opts.hooks.startContainer);
