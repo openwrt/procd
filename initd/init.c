@@ -29,6 +29,10 @@
 #include <unistd.h>
 #include <stdio.h>
 
+#if defined(WITH_SELINUX)
+#include <selinux/selinux.h>
+#endif
+
 #include "../utils/utils.h"
 #include "init.h"
 #include "../watchdog.h"
@@ -67,6 +71,38 @@ cmdline(void)
 	}
 }
 
+#if defined(WITH_SELINUX)
+static int
+selinux(char **argv)
+{
+	int enforce = 0;
+	int ret;
+
+	/* SELinux already initialized */
+	if (getenv("SELINUX_INIT"))
+		return 0;
+
+	putenv("SELINUX_INIT=1");
+
+	ret = selinux_init_load_policy(&enforce);
+	if (ret == 0)
+		execv(argv[0], argv);
+
+	if (enforce > 0) {
+		fprintf(stderr, "Cannot load SELinux policy, but system in enforcing mode. Halting.\n");
+		return 1;
+	}
+
+	return 0;
+}
+#else
+static int
+selinux(char **argv)
+{
+	return 0;
+}
+#endif
+
 int
 main(int argc, char **argv)
 {
@@ -79,6 +115,8 @@ main(int argc, char **argv)
 	sigaction(SIGUSR2, &sa_shutdown, NULL);
 	sigaction(SIGPWR, &sa_shutdown, NULL);
 
+	if (selinux(argv))
+		exit(-1);
 	early();
 	cmdline();
 	watchdog_init(1);

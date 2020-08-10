@@ -46,6 +46,12 @@ IF(ZRAM_TMPFS)
   SET(SOURCES_ZRAM initd/zram.c)
 ENDIF()
 
+IF(SELINUX)
+  include(FindPkgConfig)
+  pkg_search_module(SELINUX REQUIRED libselinux)
+  add_compile_definitions(WITH_SELINUX)
+ENDIF()
+
 add_subdirectory(upgraded)
 
 ADD_EXECUTABLE(procd ${SOURCES})
@@ -62,7 +68,8 @@ ADD_DEFINITIONS(-DDISABLE_INIT)
 ELSE()
 ADD_EXECUTABLE(init initd/init.c initd/early.c initd/preinit.c initd/mkdev.c sysupgrade.c watchdog.c
 	utils/utils.c ${SOURCES_ZRAM})
-TARGET_LINK_LIBRARIES(init ${LIBS})
+TARGET_INCLUDE_DIRECTORIES(init PUBLIC ${SELINUX_INCLUDE_DIRS})
+TARGET_LINK_LIBRARIES(init ${LIBS} ${SELINUX_LIBRARIES})
 INSTALL(TARGETS init
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
