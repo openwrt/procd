@@ -628,8 +628,8 @@ static const struct blobmsg_policy oci_linux_cgroups_memory_policy[] = {
 	[OCI_LINUX_CGROUPS_MEMORY_LIMIT] = { "limit", BLOBMSG_CAST_INT64 }, /* signed int64! */
 	[OCI_LINUX_CGROUPS_MEMORY_RESERVATION] = { "reservation", BLOBMSG_CAST_INT64 }, /* signed int64! */
 	[OCI_LINUX_CGROUPS_MEMORY_SWAP] = { "swap", BLOBMSG_CAST_INT64 }, /* signed int64! */
-	[OCI_LINUX_CGROUPS_MEMORY_KERNEL] = { "kernel", BLOBMSG_CAST_INT64 }, /* signed int64! */
-	[OCI_LINUX_CGROUPS_MEMORY_KERNELTCP] = { "kernelTCP", BLOBMSG_CAST_INT64 }, /* signed int64! */
+	[OCI_LINUX_CGROUPS_MEMORY_KERNEL] = { "kernel", BLOBMSG_CAST_INT64 }, /* signed int64! ignored */
+	[OCI_LINUX_CGROUPS_MEMORY_KERNELTCP] = { "kernelTCP", BLOBMSG_CAST_INT64 }, /* signed int64! ignored */
 	[OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS] = { "swappiness", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER] = { "disableOOMKiller", BLOBMSG_TYPE_BOOL },
 	[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY] { "useHierarchy", BLOBMSG_TYPE_BOOL },
@@ -643,12 +643,20 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 
 	blobmsg_parse(oci_linux_cgroups_memory_policy, __OCI_LINUX_CGROUPS_MEMORY_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
-	if (tb[OCI_LINUX_CGROUPS_MEMORY_KERNEL] ||
-	    tb[OCI_LINUX_CGROUPS_MEMORY_KERNELTCP] ||
-	    tb[OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS] ||
+	/*
+	 * not all properties of the OCI memory section can be mapped to cgroup2
+	 * kernel memory accounting is always enabled and included in the set
+	 *   memory limit, hence these options can be ignored
+	 * disableOOMKiller could be emulated using oom_score_adj + seccomp eBPF
+	 *   preventing self-upgrade (but allow downgrade)
+	 *
+	 * see also https://github.com/opencontainers/runtime-spec/issues/1005
+	 */
+	if (tb[OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS] ||
 	    tb[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER] ||
 	    tb[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY])
-		return ENOTSUP; /* no equivalent in cgroup2 */
+		return ENOTSUP;
+
 
 	if (tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]) {
 		limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]);
@@ -671,13 +679,16 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 		cgroups_set("memory.low", tmp);
 	}
 
+	/* OCI 'swap' acounts for memory+swap */
 	if (tb[OCI_LINUX_CGROUPS_MEMORY_SWAP]) {
 		swap = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_SWAP]);
 
 		if (swap == -1)
 			strcpy(tmp, "max");
-		else
+		else if (limit == -1 || (limit < swap))
 			snprintf(tmp, sizeof(tmp), "%" PRId64, swap);
+		else
+			snprintf(tmp, sizeof(tmp), "%" PRId64, limit - swap);
 
 		cgroups_set("memory.swap_max", tmp);
 	}
