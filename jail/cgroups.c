@@ -721,6 +721,14 @@ static int parseOCIlinuxcgroups_unified(struct blob_attr *msg)
 		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING)
 			return EINVAL;
 
+		/* restrict keys */
+		if (strchr(blobmsg_name(cur), '/') ||
+		    !strcmp(blobmsg_name(cur), "cgroup.subtree_control") ||
+		    !strcmp(blobmsg_name(cur), "cgroup.procs") ||
+		    !strcmp(blobmsg_name(cur), "cgroup.threads") ||
+		    !strcmp(blobmsg_name(cur), "cgroup.freeze"))
+			return EINVAL;
+
 		cgroups_set(blobmsg_name(cur), blobmsg_get_string(cur));
 	}
 
