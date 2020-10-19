@@ -27,7 +27,7 @@ struct jail_capset {
 
 int parseOCIcapabilities(struct jail_capset *capset, struct blob_attr *msg);
 int parseOCIcapabilities_from_file(struct jail_capset *capset, const char *file);
-int applyOCIcapabilities(struct jail_capset capset);
+int applyOCIcapabilities(struct jail_capset capset, uint64_t retain);
 
 /* capget/capset syscall wrappers are provided by libc */
 extern int capget(cap_user_header_t header, cap_user_data_t data);

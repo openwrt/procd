@@ -42,6 +42,7 @@
 #include <linux/filter.h>
 #include <linux/limits.h>
 #include <linux/nsfs.h>
+#include <linux/securebits.h>
 #include <signal.h>
 #include <inttypes.h>
 
@@ -1172,15 +1173,20 @@ static void post_jail_fs(void)
 
 static void post_start_hook(void)
 {
-	if (applyOCIcapabilities(opts.capset))
+	int pw_uid, pw_gid, gr_gid;
+
+	if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
+		ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
+		exit(EXIT_FAILURE);
+	}
+
+	/* drop capabilities, retain those still needed to further setup jail */
+	if (applyOCIcapabilities(opts.capset, (1LLU << CAP_SETGID) | (1LLU << CAP_SETUID) | (1LLU << CAP_SETPCAP)))
 		exit(EXIT_FAILURE);
 
-	if (!(opts.namespace & CLONE_NEWUSER) && (opts.setns.user == -1)) {
-		int pw_uid, pw_gid, gr_gid;
-		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
-
-		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
-	}
+	/* use either cmdline-supplied user/group or uid/gid from OCI spec */
+	get_jail_user(&pw_uid, &pw_gid, &gr_gid);
+	set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
 
 	if (opts.additional_gids &&
 	    (setgroups(opts.num_additional_gids, opts.additional_gids) < 0)) {
@@ -1191,8 +1197,17 @@ static void post_start_hook(void)
 	if (opts.set_umask)
 		umask(opts.umask);
 
+	if (prctl(PR_SET_SECUREBITS, 0)) {
+		ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
+		exit(EXIT_FAILURE);
+	}
+
+	/* drop remaining capabilities to end up with specified sets */
+	if (applyOCIcapabilities(opts.capset, 0))
+		exit(EXIT_FAILURE);
+
 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
-                ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
+		ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
 		exit(EXIT_FAILURE);
 	}
 

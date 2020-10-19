@@ -117,7 +117,7 @@ int parseOCIcapabilities(struct jail_capset *capset, struct blob_attr *msg)
 }
 
 
-int applyOCIcapabilities(struct jail_capset ocicapset)
+int applyOCIcapabilities(struct jail_capset ocicapset, uint64_t retain)
 {
 	struct __user_cap_header_struct uh = {};
 	struct __user_cap_data_struct ud;
@@ -137,7 +137,7 @@ int applyOCIcapabilities(struct jail_capset ocicapset)
 
 				continue;
 			}
-			if ( (ocicapset.bounding & (1LLU << cap)) == 0) {
+			if ( ((ocicapset.bounding | retain) & (1LLU << cap)) == 0) {
 				DEBUG("dropping capability %s (%d) from bounding set\n", capabilities_names[cap], cap);
 				if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)) {
 					ERROR("prctl(PR_CAPBSET_DROP, %d) failed: %m\n", cap);
@@ -161,10 +161,10 @@ int applyOCIcapabilities(struct jail_capset ocicapset)
 	DEBUG("old capabilities: Pe=%08x Pp=%08x Pi=%08x\n", ud.effective, ud.permitted, ud.inheritable);
 
 	if (ocicapset.effective != JAIL_CAP_ALL)
-		ud.effective = ocicapset.effective;
+		ud.effective = ocicapset.effective | retain;
 
 	if (ocicapset.permitted != JAIL_CAP_ALL)
-		ud.permitted = ocicapset.permitted;
+		ud.permitted = ocicapset.permitted | retain;
 
 	if (ocicapset.inheritable != JAIL_CAP_ALL)
 		ud.inheritable = ocicapset.inheritable;
@@ -207,8 +207,6 @@ int parseOCIcapabilities_from_file(struct jail_capset *capset, const char *file)
 {
 	struct blob_buf b = { 0 };
 	int ret;
-
-	DEBUG("dropping capabilities\n");
 
 	blob_buf_init(&b, 0);
 	ret = !blobmsg_add_json_from_file(&b, file);
