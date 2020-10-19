@@ -1172,6 +1172,9 @@ static void post_jail_fs(void)
 
 static void post_start_hook(void)
 {
+	if (applyOCIcapabilities(opts.capset))
+		exit(EXIT_FAILURE);
+
 	if (!(opts.namespace & CLONE_NEWUSER) && (opts.setns.user == -1)) {
 		int pw_uid, pw_gid, gr_gid;
 		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
@@ -1187,12 +1190,6 @@ static void post_start_hook(void)
 
 	if (opts.set_umask)
 		umask(opts.umask);
-
-	if (applyOCIcapabilities(opts.capset))
-		exit(EXIT_FAILURE);
-
-	if (opts.capabilities && drop_capabilities(opts.capabilities))
-		exit(EXIT_FAILURE);
 
 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
                 ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
@@ -2482,6 +2479,11 @@ int main(int argc, char **argv)
 	opts.setns.time = -1;
 #endif
 
+	if (opts.capabilities && parseOCIcapabilities_from_file(&opts.capset, opts.capabilities)) {
+		ERROR("failed to read capabilities from file %s\n", opts.capabilities);
+		return -1;
+	}
+
 	if (opts.ocibundle) {
 		char *jsonfile;
 		int ocires;
@@ -2512,7 +2514,7 @@ int main(int argc, char **argv)
 	}
 	DEBUG("Using namespaces(0x%08x), capabilities(%d), seccomp(%d)\n",
 		opts.namespace,
-		opts.capabilities != 0 || opts.capset.apply,
+		opts.capset.apply,
 		opts.seccomp != 0 || opts.ociseccomp != 0);
 
 	uloop_init();

@@ -203,84 +203,23 @@ int applyOCIcapabilities(struct jail_capset ocicapset)
 	return 0;
 }
 
-int drop_capabilities(const char *file)
+int parseOCIcapabilities_from_file(struct jail_capset *capset, const char *file)
 {
-	enum {
-		CAP_KEEP,
-		CAP_DROP,
-		__CAP_MAX
-	};
-	static const struct blobmsg_policy policy[__CAP_MAX] = {
-		[CAP_KEEP] = { .name = "cap.keep", .type = BLOBMSG_TYPE_ARRAY },
-		[CAP_DROP] = { .name = "cap.drop", .type = BLOBMSG_TYPE_ARRAY },
-	};
 	struct blob_buf b = { 0 };
-	struct blob_attr *tb[__CAP_MAX];
-	struct blob_attr *cur;
-	int rem, cap;
-	char *name;
-	uint64_t capdrop = 0LLU;
+	int ret;
 
 	DEBUG("dropping capabilities\n");
 
 	blob_buf_init(&b, 0);
-	if (!blobmsg_add_json_from_file(&b, file)) {
+	ret = !blobmsg_add_json_from_file(&b, file);
+	if (ret) {
 		ERROR("failed to load %s\n", file);
-		return -1;
+		goto err;
 	}
 
-	blobmsg_parse(policy, __CAP_MAX, tb, blob_data(b.head), blob_len(b.head));
-	if (!tb[CAP_KEEP] && !tb[CAP_DROP]) {
-		ERROR("failed to parse %s\n", file);
-		return -1;
-	}
+	ret = parseOCIcapabilities(capset, b.head);
 
-	blobmsg_for_each_attr(cur, tb[CAP_KEEP], rem) {
-		name = blobmsg_get_string(cur);
-		if (!name) {
-			ERROR("invalid capability name in cap.keep\n");
-			return -1;
-		}
-		cap = find_capabilities(name);
-		if (cap == -1) {
-			ERROR("unknown capability %s in cap.keep\n", name);
-			return -1;
-		}
-		capdrop |= (1LLU << cap);
-	}
-
-	if (capdrop == 0LLU) {
-		DEBUG("cap.keep empty -> only dropping capabilities from cap.drop (blacklist)\n");
-		capdrop = JAIL_CAP_ALL;
-	} else {
-		DEBUG("cap.keep has at least one capability -> dropping every capabilities not in cap.keep (whitelist)\n");
-	}
-
-	blobmsg_for_each_attr(cur, tb[CAP_DROP], rem) {
-		name = blobmsg_get_string(cur);
-		if (!name) {
-			ERROR("invalid capability name in cap.drop\n");
-			return -1;
-		}
-		cap = find_capabilities(name);
-		if (cap == -1) {
-			ERROR("unknown capability %s in cap.drop\n", name);
-			return -1;
-		}
-		capdrop &= ~(1LLU << cap);
-	}
-
-	for (cap = 0; cap <= CAP_LAST_CAP; cap++) {
-		if ( (capdrop & (1LLU << cap)) == 0) {
-			DEBUG("dropping capability %s (%d)\n", capabilities_names[cap], cap);
-			if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)) {
-				ERROR("prctl(PR_CAPBSET_DROP, %d) failed: %m\n", cap);
-				return errno;
-			}
-		} else {
-			DEBUG("keeping capability %s (%d)\n", capabilities_names[cap], cap);
-		}
-	}
-
-	return 0;
+err:
+	blob_buf_free(&b);
+	return ret;
 }
