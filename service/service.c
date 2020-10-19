@@ -972,7 +972,7 @@ static struct ubus_object main_object = {
 };
 
 int
-service_start_early(char *name, char *cmdline)
+service_start_early(char *name, char *cmdline, char *user, char *group)
 {
 	void *instances, *instance, *command, *respawn;
 	char *t;
@@ -993,6 +993,11 @@ service_start_early(char *name, char *cmdline)
 	blobmsg_add_string(&b, NULL, "1");
 	blobmsg_add_string(&b, NULL, "0");
 	blobmsg_close_array(&b, respawn);
+	if (user)
+		blobmsg_add_string(&b, "user", user);
+	if (group)
+		blobmsg_add_string(&b, "group", group);
+
 	blobmsg_close_table(&b, instance);
 	blobmsg_close_table(&b, instances);
 

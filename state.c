@@ -13,6 +13,7 @@
  */
 
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/reboot.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,6 +126,7 @@ static void perform_halt()
 static void state_enter(void)
 {
 	char ubus_cmd[] = "/sbin/ubusd";
+	struct passwd *p;
 
 	switch (state) {
 	case STATE_EARLY:
@@ -139,8 +141,13 @@ static void state_enter(void)
 		watchdog_init(0);
 		set_stdio("console");
 		LOG("- ubus -\n");
+		p = getpwnam("ubus");
+		if (p) {
+			mkdir(p->pw_dir, 0755);
+			chown(p->pw_dir, p->pw_uid, p->pw_gid);
+		}
 		procd_connect_ubus();
-		service_start_early("ubus", ubus_cmd);
+		service_start_early("ubus", ubus_cmd, p?"ubus":NULL, p?"ubus":NULL);
 		break;
 
 	case STATE_INIT:
