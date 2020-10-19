@@ -2366,7 +2366,7 @@ int main(int argc, char **argv)
 {
 	uid_t uid = getuid();
 	const char log[] = "/dev/log";
-	const char ubus[] = "/var/run/ubus.sock";
+	const char ubus[] = "/var/run/ubus/ubus.sock";
 	int ch, ret;
 
 	if (uid) {
