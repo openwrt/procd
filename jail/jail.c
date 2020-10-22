@@ -2602,17 +2602,17 @@ static void post_main(struct uloop_timeout *t)
 	if (has_namespaces()) {
 		if (opts.namespace & CLONE_NEWNS) {
 			if (!opts.extroot && (opts.user || opts.group)) {
-				add_mount_bind("/etc/passwd", 0, -1);
-				add_mount_bind("/etc/group", 0, -1);
+				add_mount_bind("/etc/passwd", 1, -1);
+				add_mount_bind("/etc/group", 1, -1);
 			}
 
 #if defined(__GLIBC__)
 			if (!opts.extroot)
-				add_mount_bind("/etc/nsswitch.conf", 0, -1);
+				add_mount_bind("/etc/nsswitch.conf", 1, -1);
 #endif
 
 			if (!(opts.namespace & CLONE_NEWNET)) {
-				add_mount_bind("/etc/resolv.conf", 0, -1);
+				add_mount_bind("/etc/resolv.conf", 1, -1);
 			} else if (opts.setns.net == -1) {
 				char hostdir[PATH_MAX];
 
