@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <getopt.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <glob.h>
@@ -34,6 +35,7 @@
 
 #include "log.h"
 
+#define UXC_VERSION "0.1"
 #define OCI_VERSION_STRING "1.0.2"
 #define UXC_CONFDIR "/etc/uxc"
 #define UXC_RUNDIR "/var/run/uxc"
@@ -49,23 +51,46 @@ struct runtime_state {
 	struct blob_attr *ocistate;
 };
 
+enum uxc_cmd {
+	CMD_LIST,
+	CMD_BOOT,
+	CMD_START,
+	CMD_STATE,
+	CMD_KILL,
+	CMD_ENABLE,
+	CMD_DISABLE,
+	CMD_DELETE,
+	CMD_CREATE,
+	CMD_UNKNOWN
+};
+
+#define OPT_ARGS "ab:fp:vV"
+static struct option long_options[] = {
+	{"autostart",	no_argument,		0,	'a'	},
+	{"bundle",	required_argument,	0,	'b'	},
+	{"force",	no_argument,		0,	'f'	},
+	{"pid-file",	required_argument,	0,	'p'	},
+	{"verbose",	no_argument,		0,	'v'	},
+	{"version",	no_argument,		0,	'V'	},
+	{0,		0,			0,	0	}
+};
+
 AVL_TREE(runtime, avl_strcmp, false, NULL);
 static struct blob_buf conf;
 static struct blob_buf state;
-
 static struct ubus_context *ctx;
 
 static int usage(void) {
-	printf("syntax: uxc {command} [parameters ...]\n");
+	printf("syntax: uxc <command> [parameters ...]\n");
 	printf("commands:\n");
-	printf("\tlist\t\t\t\tlist all configured containers\n");
-	printf("\tcreate {conf} [path] [enabled]\tcreate {conf} for OCI bundle at {path}\n");
-	printf("\tstart {conf}\t\t\tstart container {conf}\n");
-	printf("\tstate {conf}\t\t\tget state of container {conf}\n");
-	printf("\tkill {conf} {signal}\t\tsend signal to container {conf}\n");
-	printf("\tenable {conf}\t\t\tstart container {conf} on boot\n");
-	printf("\tdisable {conf}\t\t\tdon't start container {conf} on boot\n");
-	printf("\tdelete {conf}\t\t\tdelete {conf}\n");
+	printf("\tlist\t\t\t\t\t\tlist all configured containers\n");
+	printf("\tcreate <conf> [--bundle <path>] [--autostart]\tcreate <conf> for OCI bundle at <path>\n");
+	printf("\tstart <conf>\t\t\t\t\tstart container <conf>\n");
+	printf("\tstate <conf>\t\t\t\t\tget state of container <conf>\n");
+	printf("\tkill <conf> [<signal>]\t\t\t\tsend signal to container <conf>\n");
+	printf("\tenable <conf>\t\t\t\t\tstart container <conf> on boot\n");
+	printf("\tdisable <conf>\t\t\t\t\tdon't start container <conf> on boot\n");
+	printf("\tdelete <conf> [--force]\t\t\t\tdelete <conf>\n");
 	return EINVAL;
 }
 
@@ -74,6 +99,7 @@ enum {
 	CONF_PATH,
 	CONF_JAIL,
 	CONF_AUTOSTART,
+	CONF_PIDFILE,
 	__CONF_MAX,
 };
 
@@ -82,6 +108,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_PATH] = { .name = "path", .type = BLOBMSG_TYPE_STRING },
 	[CONF_JAIL] = { .name = "jail", .type = BLOBMSG_TYPE_STRING },
 	[CONF_AUTOSTART] = { .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
+	[CONF_PIDFILE] = { .name = "pidfile", .type = BLOBMSG_TYPE_STRING },
 };
 
 static int conf_load(bool load_state)
@@ -400,7 +427,7 @@ static int uxc_create(char *name, bool immediately)
 	int rem, ret;
 	uint32_t id;
 	struct runtime_state *s = NULL;
-	char *path = NULL, *jailname = NULL;
+	char *path = NULL, *jailname = NULL, *pidfile = NULL;
 	void *in, *ins, *j;
 	bool found = false;
 
@@ -415,6 +442,8 @@ static int uxc_create(char *name, bool immediately)
 		found = true;
 		path = strdup(blobmsg_get_string(tb[CONF_PATH]));
 
+		if (tb[CONF_PIDFILE])
+			pidfile = strdup(blobmsg_get_string(tb[CONF_PIDFILE]));
 		break;
 	}
 
@@ -437,6 +466,9 @@ static int uxc_create(char *name, bool immediately)
 	j = blobmsg_open_table(&req, "jail");
 	blobmsg_add_string(&req, "name", jailname?:name);
 	blobmsg_add_u8(&req, "immediately", immediately);
+	if (pidfile)
+		blobmsg_add_string(&req, "pidfile", pidfile);
+
 	blobmsg_close_table(&req, j);
 	blobmsg_close_table(&req, in);
 	blobmsg_close_table(&req, ins);
@@ -513,7 +545,7 @@ static int uxc_kill(char *name, int signal)
 }
 
 
-static int uxc_set(char *name, char *path, bool autostart, bool add)
+static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfile)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -572,6 +604,8 @@ static int uxc_set(char *name, char *path, bool autostart, bool add)
 	blobmsg_add_string(&req, "name", name);
 	blobmsg_add_string(&req, "path", path?:keeppath);
 	blobmsg_add_u8(&req, "autostart", autostart);
+	if (pidfile)
+		blobmsg_add_string(&req, "pidfile", pidfile);
 
 	dprintf(f, "%s\n", blobmsg_format_json_indent(req.head, true, 0));
 
@@ -648,9 +682,18 @@ static void reload_conf(void)
 	conf_load(false);
 }
 
+
 int main(int argc, char **argv)
 {
+	enum uxc_cmd cmd = CMD_UNKNOWN;
 	int ret = EINVAL;
+	char *bundle = NULL;
+	char *pidfile = NULL;
+	bool autostart = false;
+	bool force = false;
+	bool verbose = false;
+	int signal = SIGTERM;
+	int c;
 
 	if (argc < 2)
 		return usage();
@@ -675,66 +718,132 @@ int main(int argc, char **argv)
 	if (ret)
 		goto state_out;
 
-	if (!strcmp("list", argv[1]))
-		ret = uxc_list();
-	else if (!strcmp("boot", argv[1]))
-		ret = uxc_boot();
-	else if(!strcmp("start", argv[1])) {
-		if (argc < 3)
-			goto usage_out;
+	while (true) {
+		int option_index = 0;
+		c = getopt_long(argc, argv, OPT_ARGS, long_options, &option_index);
+		if (c == -1)
+			break;
 
-		ret = uxc_start(argv[2]);
-	} else if(!strcmp("state", argv[1])) {
-		if (argc < 3)
-			goto usage_out;
-
-		ret = uxc_state(argv[2]);
-	} else if(!strcmp("kill", argv[1])) {
-		int signal = SIGTERM;
-		if (argc < 3)
-			goto usage_out;
-
-		if (argc == 4)
-			signal = atoi(argv[3]);
-
-		ret = uxc_kill(argv[2], signal);
-	} else if(!strcmp("enable", argv[1])) {
-		if (argc < 3)
-			goto usage_out;
-
-		ret = uxc_set(argv[2], NULL, true, false);
-	} else if(!strcmp("disable", argv[1])) {
-		if (argc < 3)
-			goto usage_out;
-
-		ret = uxc_set(argv[2], NULL, false, false);
-	} else if(!strcmp("delete", argv[1])) {
-		if (argc < 3)
-			goto usage_out;
-
-		ret = uxc_delete(argv[2]);
-	} else if(!strcmp("create", argv[1])) {
-		bool autostart = false;
-		if (argc < 3)
-			goto usage_out;
-
-		if (argc == 5) {
-			if (!strncmp("true", argv[4], 5))
+		switch (c) {
+			case 'a':
 				autostart = true;
-			else
-				autostart = atoi(argv[4]);
-		}
+				break;
 
-		if (argc >= 4) {
-			ret = uxc_set(argv[2], argv[3], autostart, true);
-			if (ret)
-				goto runtime_out;
+			case 'b':
+				bundle = optarg;
+				break;
 
-			reload_conf();
+			case 'f':
+				force = true;
+				break;
+
+			case 'p':
+				pidfile = optarg;
+				break;
+
+			case 'v':
+				verbose = true;
+				break;
+
+			case 'V':
+				printf("uxc %s\n", UXC_VERSION);
+				exit(0);
 		}
-		ret = uxc_create(argv[2], false);
-	} else
+	}
+
+	if (optind == argc)
 		goto usage_out;
+
+	if (!strcmp("list", argv[optind]))
+		cmd = CMD_LIST;
+	else if (!strcmp("boot", argv[optind]))
+		cmd = CMD_BOOT;
+	else if(!strcmp("start", argv[optind]))
+		cmd = CMD_START;
+	else if(!strcmp("state", argv[optind]))
+		cmd = CMD_STATE;
+	else if(!strcmp("kill", argv[optind]))
+		cmd = CMD_KILL;
+	else if(!strcmp("enable", argv[optind]))
+		cmd = CMD_ENABLE;
+	else if(!strcmp("disable", argv[optind]))
+		cmd = CMD_DISABLE;
+	else if(!strcmp("delete", argv[optind]))
+		cmd = CMD_DELETE;
+	else if(!strcmp("create", argv[optind]))
+		cmd = CMD_CREATE;
+
+	switch (cmd) {
+		case CMD_LIST:
+			ret = uxc_list();
+			break;
+
+		case CMD_BOOT:
+			ret = uxc_boot();
+			break;
+
+		case CMD_START:
+			if (optind != argc - 2)
+				goto usage_out;
+
+			ret = uxc_start(argv[optind + 1]);
+			break;
+
+		case CMD_STATE:
+			if (optind != argc - 2)
+				goto usage_out;
+
+			ret = uxc_state(argv[optind + 1]);
+			break;
+
+		case CMD_KILL:
+			if (optind == (argc - 3))
+				signal = atoi(argv[optind + 2]);
+			else if (optind > argc - 2)
+				goto usage_out;
+
+			ret = uxc_kill(argv[optind + 1], signal);
+			break;
+
+		case CMD_ENABLE:
+			if (optind != argc - 2)
+				goto usage_out;
+
+			ret = uxc_set(argv[optind + 1], NULL, true, false, NULL);
+			break;
+
+		case CMD_DISABLE:
+			if (optind != argc - 2)
+				goto usage_out;
+
+			ret = uxc_set(argv[optind + 1], NULL, false, false, NULL);
+			break;
+
+		case CMD_DELETE:
+			if (optind != argc - 2)
+				goto usage_out;
+
+			ret = uxc_delete(argv[optind + 1]);
+			break;
+
+		case CMD_CREATE:
+			if (optind != argc - 2)
+				goto usage_out;
+
+			if (bundle) {
+				ret = uxc_set(argv[optind + 1], bundle, autostart, true, pidfile);
+				if (ret)
+					goto runtime_out;
+
+				reload_conf();
+			}
+
+			ret = uxc_create(argv[optind + 1], false);
+			break;
+
+		default:
+			goto usage_out;
+	}
 
 	goto runtime_out;
 
