@@ -1323,7 +1323,8 @@ static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 
 	opts.extroot = rootpath;
 
-	opts.ronly = blobmsg_get_bool(tb[OCI_ROOT_READONLY]);
+	if (tb[OCI_ROOT_READONLY])
+		opts.ronly = blobmsg_get_bool(tb[OCI_ROOT_READONLY]);
 
 	return 0;
 }
@@ -1669,8 +1670,11 @@ static int parseOCIprocess(struct blob_attr *msg)
 	if (res)
 		return res;
 
-	opts.console = blobmsg_get_bool(tb[OCI_PROCESS_TERMINAL]);
-	opts.no_new_privs = blobmsg_get_bool(tb[OCI_PROCESS_NONEWPRIVILEGES]);
+	if (tb[OCI_PROCESS_TERMINAL])
+		opts.console = blobmsg_get_bool(tb[OCI_PROCESS_TERMINAL]);
+
+	if (tb[OCI_PROCESS_NONEWPRIVILEGES])
+		opts.no_new_privs = blobmsg_get_bool(tb[OCI_PROCESS_NONEWPRIVILEGES]);
 
 	if (tb[OCI_PROCESS_CWD])
 		opts.cwd = strdup(blobmsg_get_string(tb[OCI_PROCESS_CWD]));
