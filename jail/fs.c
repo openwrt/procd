@@ -46,6 +46,7 @@ struct mount {
 	const char *target;
 	const char *filesystemtype;
 	unsigned long mountflags;
+	unsigned long propflags;
 	const char *optstr;
 	int error;
 	bool inner;
@@ -79,7 +80,7 @@ int mkdir_p(char *dir, mode_t mask)
 }
 
 static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
-		    unsigned long orig_mountflags, const char *optstr, int error, bool inner)
+		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner)
 {
 	struct stat s;
 	char new[PATH_MAX];
@@ -161,6 +162,16 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	DEBUG("mount %s%s %s (%s)\n", (mountflags & MS_BIND)?"-B ":"", source, new,
 	      (mountflags & MS_RDONLY)?"ro":"rw");
 
+	if (propflags && mount(NULL, new, NULL, propflags, NULL)) {
+		if (error)
+			ERROR("failed to mount --make-... %s \n", new);
+
+		if (inner)
+			free(source);
+
+		return error;
+	}
+
 	if (inner)
 		free(source);
 
@@ -168,7 +179,8 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 }
 
 static int _add_mount(const char *source, const char *target, const char *filesystemtype,
-	      unsigned long mountflags, const char *optstr, int error, bool inner)
+		      unsigned long mountflags, unsigned long propflags, const char *optstr,
+		      int error, bool inner)
 {
 	assert(target != NULL);
 
@@ -192,6 +204,7 @@ static int _add_mount(const char *source, const char *target, const char *filesy
 		m->optstr = strdup(optstr);
 
 	m->mountflags = mountflags;
+	m->propflags = propflags;
 	m->error = error;
 	m->inner = inner;
 
@@ -203,15 +216,15 @@ static int _add_mount(const char *source, const char *target, const char *filesy
 }
 
 int add_mount(const char *source, const char *target, const char *filesystemtype,
-	      unsigned long mountflags, const char *optstr, int error)
+	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error)
 {
-	return _add_mount(source, target, filesystemtype, mountflags, optstr, error, false);
+	return _add_mount(source, target, filesystemtype, mountflags, propflags, optstr, error, false);
 }
 
 int add_mount_inner(const char *source, const char *target, const char *filesystemtype,
-	      unsigned long mountflags, const char *optstr, int error)
+	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error)
 {
-	return _add_mount(source, target, filesystemtype, mountflags, optstr, error, true);
+	return _add_mount(source, target, filesystemtype, mountflags, propflags, optstr, error, true);
 }
 
 int add_mount_bind(const char *path, int readonly, int error)
@@ -221,7 +234,7 @@ int add_mount_bind(const char *path, int readonly, int error)
 	if (readonly)
 		mountflags |= MS_RDONLY;
 
-	return add_mount(path, path, NULL, mountflags, NULL, error);
+	return add_mount(path, path, NULL, mountflags, 0, NULL, error);
 }
 
 enum {
@@ -248,11 +261,12 @@ struct mount_opt {
 #define MS_LAZYTIME (1 << 25)
 #endif
 
-static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, char **mount_data, int *error)
+static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, unsigned long *propagation_flags, char **mount_data, int *error)
 {
 	struct blob_attr *cur;
 	int rem;
 	unsigned long mf = 0;
+	unsigned long pf = 0;
 	char *tmp;
 	struct list_head fsopts = LIST_HEAD_INIT(fsopts);
 	size_t len = 0;
@@ -318,6 +332,24 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 			mf |= MS_NOSUID;
 		else if (!strcmp("remount", tmp))
 			mf |= MS_REMOUNT;
+		/* propagation flags */
+		else if (!strcmp("private", tmp))
+			pf |= MS_PRIVATE;
+		else if (!strcmp("rprivate", tmp))
+			pf |= MS_PRIVATE | MS_REC;
+		else if (!strcmp("slave", tmp))
+			pf |= MS_SLAVE;
+		else if (!strcmp("rslave", tmp))
+			pf |= MS_SLAVE | MS_REC;
+		else if (!strcmp("shared", tmp))
+			pf |= MS_SHARED;
+		else if (!strcmp("rshared", tmp))
+			pf |= MS_SHARED | MS_REC;
+		else if (!strcmp("unbindable", tmp))
+			pf |= MS_UNBINDABLE;
+		else if (!strcmp("runbindable", tmp))
+			pf |= MS_UNBINDABLE | MS_REC;
+		/* special case: 'nofail' */
 		else if(!strcmp("nofail", tmp))
 			*error = 0;
 		else if (!strcmp("auto", tmp) ||
@@ -335,6 +367,7 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 	};
 
 	*mount_flags = mf;
+	*propagation_flags = pf;
 
 	list_for_each_entry(opt, &fsopts, list) {
 		if (len)
@@ -343,25 +376,24 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 		len += strlen(opt->optstr);
 	};
 
-	if (!len)
-		return 0;
+	if (len) {
+		*mount_data = calloc(len + 1, sizeof(char));
+		if (!mount_data)
+			return ENOMEM;
 
-	*mount_data = calloc(len + 1, sizeof(char));
-	if (!mount_data)
-		return ENOMEM;
+		len = 0;
+		list_for_each_entry(opt, &fsopts, list) {
+			if (len)
+				strcat(*mount_data, ",");
 
-	len = 0;
-	list_for_each_entry(opt, &fsopts, list) {
-		if (len)
-			strcat(*mount_data, ",");
+			strcat(*mount_data, opt->optstr);
+			++len;
+		};
 
-		strcat(*mount_data, opt->optstr);
-		++len;
-	};
+		list_del(&fsopts);
+	}
 
-	list_del(&fsopts);
-
-	DEBUG("mount flags(%08lx) fsopts(\"%s\")\n", mf, *mount_data?:"");
+	DEBUG("mount flags(%08lx) propagation(%08lx) fsopts(\"%s\")\n", mf, pf, *mount_data?:"");
 
 	return 0;
 }
@@ -370,6 +402,7 @@ int parseOCImount(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_MOUNT_MAX];
 	unsigned long mount_flags = 0;
+	unsigned long propagation_flags = 0;
 	char *mount_data = NULL;
 	int ret, err = -1;
 
@@ -379,7 +412,7 @@ int parseOCImount(struct blob_attr *msg)
 		return EINVAL;
 
 	if (tb[OCI_MOUNT_OPTIONS]) {
-		ret = parseOCImountopts(tb[OCI_MOUNT_OPTIONS], &mount_flags, &mount_data, &err);
+		ret = parseOCImountopts(tb[OCI_MOUNT_OPTIONS], &mount_flags, &propagation_flags, &mount_data, &err);
 		if (ret)
 			return ret;
 	}
@@ -387,7 +420,7 @@ int parseOCImount(struct blob_attr *msg)
 	ret = add_mount(tb[OCI_MOUNT_SOURCE] ? blobmsg_get_string(tb[OCI_MOUNT_SOURCE]) : NULL,
 		  blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]),
 		  tb[OCI_MOUNT_TYPE] ? blobmsg_get_string(tb[OCI_MOUNT_TYPE]) : NULL,
-		  mount_flags, mount_data, err);
+		  mount_flags, propagation_flags, mount_data, err);
 
 	if (mount_data)
 		free(mount_data);
@@ -416,7 +449,8 @@ int mount_all(const char *jailroot) {
 		add_mount_bind(l->path, 1, -1);
 
 	avl_for_each_element(&mounts, m, avl)
-		if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags, m->optstr, m->error, m->inner))
+		if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags,
+			     m->propflags, m->optstr, m->error, m->inner))
 			return -1;
 
 	return 0;

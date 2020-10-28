@@ -2085,7 +2085,7 @@ static int parseOCIlinux(struct blob_attr *msg)
 
 	if (tb[OCI_LINUX_READONLYPATHS]) {
 		blobmsg_for_each_attr(cur, tb[OCI_LINUX_READONLYPATHS], rem) {
-			res = add_mount(NULL, blobmsg_get_string(cur), NULL, MS_BIND | MS_REC | MS_RDONLY, NULL, 0);
+			res = add_mount(NULL, blobmsg_get_string(cur), NULL, MS_BIND | MS_REC | MS_RDONLY, 0, NULL, 0);
 			if (res)
 				return res;
 		}
@@ -2093,7 +2093,7 @@ static int parseOCIlinux(struct blob_attr *msg)
 
 	if (tb[OCI_LINUX_MASKEDPATHS]) {
 		blobmsg_for_each_attr(cur, tb[OCI_LINUX_MASKEDPATHS], rem) {
-			res = add_mount((void *)(-1), blobmsg_get_string(cur), NULL, 0, NULL, 1);
+			res = add_mount((void *)(-1), blobmsg_get_string(cur), NULL, 0, 0, NULL, 1);
 			if (res)
 				return res;
 		}
@@ -2651,15 +2651,15 @@ static void post_main(struct uloop_timeout *t)
 
 				snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
 				mkdir_p(hostdir, 0755);
-				add_mount(hostdir, "/dev/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, NULL, -1);
+				add_mount(hostdir, "/dev/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, -1);
 			}
 
 			/* default mounts */
-			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "size=1M", -1);
-			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
+			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "size=1M", -1);
+			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
 
 			if (opts.procfs || opts.ocibundle) {
-				add_mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL, -1);
+				add_mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0, NULL, -1);
 
 				/*
 				 * hack to make /proc/sys/net read-write while the rest of /proc/sys is read-only
@@ -2677,17 +2677,17 @@ static void post_main(struct uloop_timeout *t)
 				 * move-mount of /proc/sys/net follows because 'e' preceeds 'y' in the ASCII
 				 * table (and in the alphabet).
 				 */
-				if (!add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, NULL, -1))
+				if (!add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, 0, NULL, -1))
 					if (opts.namespace & CLONE_NEWNET)
-						if (!add_mount_inner("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, NULL, -1))
-							add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, NULL, -1);
+						if (!add_mount_inner("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, 0, NULL, -1))
+							add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, 0, NULL, -1);
 
 			}
 			if (opts.sysfs || opts.ocibundle)
-				add_mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, NULL, -1);
+				add_mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
 
 			if (opts.ocibundle)
-				add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, "mode=1777", -1);
+				add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, "mode=1777", -1);
 
 		}
 
