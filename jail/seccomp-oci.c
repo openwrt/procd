@@ -221,7 +221,8 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 			sc = find_syscall(blobmsg_get_string(curn));
 			if (sc == -1) {
 				ERROR("unknown syscall '%s'\n", blobmsg_get_string(curn));
-				goto errout1;
+				/* TODO: support run.oci.seccomp_fail_unknown_syscall=1 annotation */
+				continue;
 			}
 
 			/* add rule to filter */
