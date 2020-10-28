@@ -149,7 +149,8 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 		mountflags |= MS_REMOUNT;
 	}
 
-	if (mount(source?:(is_bind?new:NULL), new, filesystemtype, mountflags, optstr)) {
+	const char *hack_fstype = ((!filesystemtype || strcmp(filesystemtype, "cgroup"))?filesystemtype:"cgroup2");
+	if (mount(source?:(is_bind?new:NULL), new, hack_fstype, mountflags, optstr)) {
 		if (error)
 			ERROR("failed to mount %s %s: %m\n", source, new);
 
