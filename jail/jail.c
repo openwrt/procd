@@ -67,7 +67,7 @@
 #endif
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:EyJ:i"
+#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:EyJ:iP:"
 
 #define OCI_VERSION_STRING "1.0.2"
 
@@ -108,6 +108,7 @@ static struct {
 	char **envp;
 	char *uidmap;
 	char *gidmap;
+	char *pidfile;
 	struct sysctl_val **sysctl;
 	int no_new_privs;
 	int namespace;
@@ -276,6 +277,7 @@ static void free_opts(bool parent) {
 	free(opts.gidmap);
 	free(opts.annotations);
 	free(opts.ocibundle);
+	free(opts.pidfile);
 	free_hooklist(opts.hooks.createRuntime);
 	free_hooklist(opts.hooks.createContainer);
 	free_hooklist(opts.hooks.startContainer);
@@ -958,6 +960,7 @@ static void usage(void)
 	fprintf(stderr, "  -y\t\tprovide jail console\n");
 	fprintf(stderr, "  -J <dir>\tcreate container from OCI bundle\n");
 	fprintf(stderr, "  -j\t\tstart container immediately\n");
+	fprintf(stderr, "  -P <pidfile>\tcreate <pidfile>\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -2353,6 +2356,29 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_UNKNOWN_ERROR;
 }
 
+static int
+jail_writepid(pid_t pid)
+{
+	FILE *_pidfile;
+
+	if (!opts.pidfile)
+		return 0;
+
+	_pidfile = fopen(opts.pidfile, "w");
+	if (_pidfile == NULL)
+		return errno;
+
+	if (fprintf(_pidfile, "%d\n", pid) < 0) {
+		fclose(_pidfile);
+		return errno;
+	}
+
+	if (fclose(_pidfile))
+		return errno;
+
+	return 0;
+}
+
 static struct ubus_method container_methods[] = {
 	UBUS_METHOD_NOARG("start", handle_start),
 	UBUS_METHOD_NOARG("state", handle_state),
@@ -2479,6 +2505,9 @@ int main(int argc, char **argv)
 			break;
 		case 'i':
 			opts.immediately = true;
+			break;
+		case 'P':
+			opts.pidfile = strdup(optarg);
 			break;
 		}
 	}
@@ -2750,6 +2779,10 @@ static void post_main(struct uloop_timeout *t)
 			}
 			netns_fd = ns_open_pid("net", jail_process.pid);
 			netns_updown(jail_process.pid, true);
+		}
+		if (jail_writepid(jail_process.pid)) {
+			ERROR("failed to write pidfile: %m\n");
+			exit(-1);
 		}
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
