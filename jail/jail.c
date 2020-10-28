@@ -1306,25 +1306,32 @@ static const struct blobmsg_policy oci_root_policy[] = {
 
 static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 {
-	static char rootpath[PATH_MAX] = { 0 };
+	static char extroot[PATH_MAX] = { 0 };
 	struct blob_attr *tb[__OCI_ROOT_MAX];
 	char *cur;
+	char *root_path;
 
 	blobmsg_parse(oci_root_policy, __OCI_ROOT_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
 	if (!tb[OCI_ROOT_PATH])
 		return ENODATA;
 
-	strncpy(rootpath, jsonfile, PATH_MAX);
-	cur = strrchr(rootpath, '/');
+	root_path = blobmsg_get_string(tb[OCI_ROOT_PATH]);
 
-	if (!cur)
-		return ENOTDIR;
+	/* prepend bundle directory in case of relative paths */
+	if (root_path[0] != '/') {
+		strncpy(extroot, jsonfile, PATH_MAX);
+		cur = strrchr(extroot, '/');
 
-	*(++cur) = '\0';
-	strncat(rootpath, blobmsg_get_string(tb[OCI_ROOT_PATH]), PATH_MAX - (strlen(rootpath) + 1));
+		if (!cur)
+			return ENOTDIR;
 
-	opts.extroot = rootpath;
+		*(++cur) = '\0';
+	}
+
+	strncat(extroot, root_path, PATH_MAX - (strlen(extroot) + 1));
+
+	opts.extroot = extroot;
 
 	if (tb[OCI_ROOT_READONLY])
 		opts.ronly = blobmsg_get_bool(tb[OCI_ROOT_READONLY]);
