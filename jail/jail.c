@@ -2100,7 +2100,7 @@ static int parseOCIlinux(struct blob_attr *msg)
 
 	if (tb[OCI_LINUX_MASKEDPATHS]) {
 		blobmsg_for_each_attr(cur, tb[OCI_LINUX_MASKEDPATHS], rem) {
-			res = add_mount((void *)(-1), blobmsg_get_string(cur), NULL, 0, 0, NULL, 1);
+			res = add_mount((void *)(-1), blobmsg_get_string(cur), NULL, 0, 0, NULL, 0);
 			if (res)
 				return res;
 		}
