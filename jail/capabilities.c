@@ -120,7 +120,7 @@ int parseOCIcapabilities(struct jail_capset *capset, struct blob_attr *msg)
 int applyOCIcapabilities(struct jail_capset ocicapset, uint64_t retain)
 {
 	struct __user_cap_header_struct uh = {};
-	struct __user_cap_data_struct ud;
+	struct __user_cap_data_struct ud[2];
 	int cap;
 	int is_set;
 
@@ -153,25 +153,37 @@ int applyOCIcapabilities(struct jail_capset ocicapset, uint64_t retain)
 	uh.version = _LINUX_CAPABILITY_VERSION_3;
 	uh.pid = getpid();
 
-	if (capget(&uh, &ud)) {
+	if (capget(&uh, ud)) {
 		ERROR("capget() failed\n");
 		return -1;
 	}
 
-	DEBUG("old capabilities: Pe=%08x Pp=%08x Pi=%08x\n", ud.effective, ud.permitted, ud.inheritable);
+	DEBUG("old capabilities: Pe=%016llx Pp=%016llx Pi=%016llx\n",
+		0LLU | ud[0].effective | (0LLU | ud[1].effective) << 32,
+		0LLU | ud[0].permitted | (0LLU | ud[1].permitted) << 32,
+		0LLU | ud[0].inheritable | (0LLU | ud[1].inheritable) << 32);
 
-	if (ocicapset.effective != JAIL_CAP_ALL)
-		ud.effective = ocicapset.effective | retain;
+	if (ocicapset.effective != JAIL_CAP_ALL) {
+		ud[0].effective = (ocicapset.effective | retain) & 0xFFFFFFFFU;
+		ud[1].effective = ((ocicapset.effective | retain) >> 32) & 0xFFFFFFFFU;
+	}
 
-	if (ocicapset.permitted != JAIL_CAP_ALL)
-		ud.permitted = ocicapset.permitted | retain;
+	if (ocicapset.permitted != JAIL_CAP_ALL) {
+		ud[0].permitted = (ocicapset.permitted | retain) & 0xFFFFFFFFU;
+		ud[1].permitted = ((ocicapset.permitted | retain) >> 32) & 0xFFFFFFFFU;
+	}
 
-	if (ocicapset.inheritable != JAIL_CAP_ALL)
-		ud.inheritable = ocicapset.inheritable;
+	if (ocicapset.inheritable != JAIL_CAP_ALL) {
+		ud[0].inheritable = (ocicapset.inheritable | retain) & 0xFFFFFFFFU;
+		ud[1].inheritable = ((ocicapset.inheritable | retain) >> 32) & 0xFFFFFFFFU;
+	}
 
-	DEBUG("new capabilities: Pe=%08x Pp=%08x Pi=%08x\n", ud.effective, ud.permitted, ud.inheritable);
+	DEBUG("new capabilities: Pe=%016llx Pp=%016llx Pi=%016llx\n",
+		0LLU | ud[0].effective | (0LLU | ud[1].effective) << 32,
+		0LLU | ud[0].permitted | (0LLU | ud[1].permitted) << 32,
+		0LLU | ud[0].inheritable | (0LLU | ud[1].inheritable) << 32);
 
-	if (capset(&uh, &ud)) {
+	if (capset(&uh, ud)) {
 		ERROR("capset() failed\n");
 		return -1;
 	}

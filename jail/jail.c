@@ -1178,9 +1178,15 @@ static void post_start_hook(void)
 {
 	int pw_uid, pw_gid, gr_gid;
 
-	if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
-		ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
-		exit(EXIT_FAILURE);
+	/*
+	 * make sure setuid/setgid won't drop capabilities in case capabilities
+	 * have been specified explicitely.
+	 */
+	if (opts.capset.apply) {
+		if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
+			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	/* drop capabilities, retain those still needed to further setup jail */
@@ -1200,9 +1206,12 @@ static void post_start_hook(void)
 	if (opts.set_umask)
 		umask(opts.umask);
 
-	if (prctl(PR_SET_SECUREBITS, 0)) {
-		ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
-		exit(EXIT_FAILURE);
+	/* restore securebits back to normal */
+	if (opts.capset.apply) {
+		if (prctl(PR_SET_SECUREBITS, 0)) {
+			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	/* drop remaining capabilities to end up with specified sets */
