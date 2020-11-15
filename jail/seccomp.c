@@ -18,30 +18,13 @@
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
 
-#include "seccomp-bpf.h"
 #include "seccomp.h"
-#include "../syscall-names.h"
-#include "seccomp-syscalls-helpers.h"
+#include "seccomp-oci.h"
 
 int install_syscall_filter(const char *argv, const char *file)
 {
-	enum {
-		SECCOMP_WHITELIST,
-		SECCOMP_POLICY,
-		__SECCOMP_MAX
-	};
-	static const struct blobmsg_policy policy[__SECCOMP_MAX] = {
-		[SECCOMP_WHITELIST] = { .name = "whitelist", .type = BLOBMSG_TYPE_ARRAY },
-		[SECCOMP_POLICY] = { .name = "policy", .type = BLOBMSG_TYPE_INT32 },
-	};
 	struct blob_buf b = { 0 };
-	struct blob_attr *tb[__SECCOMP_MAX];
-	struct blob_attr *cur;
-	int rem;
-
-	struct sock_filter *filter;
-	struct sock_fprog prog = { 0 };
-	int sz = 5, idx = 0, default_policy = 0;
+	struct sock_fprog *prog = NULL;
 
 	INFO("%s: setting up syscall filter\n", argv);
 
@@ -51,74 +34,11 @@ int install_syscall_filter(const char *argv, const char *file)
 		return -1;
 	}
 
-	blobmsg_parse(policy, __SECCOMP_MAX, tb, blob_data(b.head), blob_len(b.head));
-	if (!tb[SECCOMP_WHITELIST]) {
-		ERROR("%s: %s is missing the syscall table\n", argv, file);
+	prog = parseOCIlinuxseccomp(b.head);
+	if (!prog) {
+		ERROR("%s: failed to parse seccomp filter rules %s\n", argv, file);
 		return -1;
 	}
 
-	if (tb[SECCOMP_POLICY])
-		default_policy = blobmsg_get_u32(tb[SECCOMP_POLICY]);
-
-	blobmsg_for_each_attr(cur, tb[SECCOMP_WHITELIST], rem)
-		sz += 2;
-
-	filter = calloc(sz, sizeof(struct sock_filter));
-	if (!filter) {
-		ERROR("failed to allocate filter memory\n");
-		return -1;
-	}
-
-	/* validate arch */
-	set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, arch_nr);
-	set_filter(&filter[idx++], BPF_JMP + BPF_JEQ + BPF_K, 1, 0, ARCH_NR);
-	set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_KILL);
-
-	/* get syscall */
-	set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_nr);
-
-	blobmsg_for_each_attr(cur, tb[SECCOMP_WHITELIST], rem) {
-		char *name = blobmsg_get_string(cur);
-		int nr;
-
-		if (!name) {
-			INFO("%s: invalid syscall name\n", argv);
-			continue;
-		}
-
-		nr  = find_syscall(name);
-		if (nr == -1) {
-			INFO("%s: unknown syscall %s\n", argv, name);
-			continue;
-		}
-
-		/* add whitelist */
-		set_filter(&filter[idx++], BPF_JMP + BPF_JEQ + BPF_K, 0, 1, nr);
-		set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_ALLOW);
-	}
-
-	if (default_policy)
-		/* notify tracer; without tracer return -1 and set errno to ENOSYS */
-		set_filter(&filter[idx], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_TRACE);
-	else
-		/* kill the process */
-		set_filter(&filter[idx], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_KILL);
-
-	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
-		ERROR("%s: prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n", argv);
-		goto errout;
-	}
-
-	prog.len = (unsigned short) idx + 1;
-	prog.filter = filter;
-
-	if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) {
-		ERROR("%s: prctl(PR_SET_SECCOMP) failed: %m\n", argv);
-		goto errout;
-	}
-	return 0;
-
-errout:
-	free(filter);
-	return errno;
+	return applyOCIlinuxseccomp(prog);
 }

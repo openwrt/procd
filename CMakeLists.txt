@@ -102,16 +102,13 @@ ADD_CUSTOM_TARGET(capabilities-names-h DEPENDS capabilities-names.h)
 
 IF(SECCOMP_SUPPORT)
 ADD_DEFINITIONS(-DSECCOMP_SUPPORT)
-ADD_LIBRARY(preload-seccomp SHARED jail/preload.c jail/seccomp.c)
+ADD_LIBRARY(preload-seccomp SHARED jail/preload.c jail/seccomp.c jail/seccomp-oci.c)
 TARGET_LINK_LIBRARIES(preload-seccomp dl ${ubox} ${blobmsg_json})
 INSTALL(TARGETS preload-seccomp
 	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 ADD_DEPENDENCIES(preload-seccomp syscall-names-h)
-endif()
-
-IF(SECCOMP_SUPPORT)
-  SET(SOURCES_OCI_SECCOMP jail/seccomp-oci.c)
+SET(SOURCES_OCI_SECCOMP jail/seccomp-oci.c)
 ENDIF()
 
 IF(JAIL_SUPPORT)
