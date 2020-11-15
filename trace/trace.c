@@ -113,7 +113,7 @@ static int cmp_count(const void *a, const void *b)
 
 static void print_syscalls(int policy, const char *json)
 {
-	void *c;
+	void *c, *d, *e;
 	int i;
 
 	if (mode == UTRACE) {
@@ -134,7 +134,10 @@ static void print_syscalls(int policy, const char *json)
 	qsort(sorted, SYSCALL_COUNT, sizeof(sorted[0]), cmp_count);
 
 	blob_buf_init(&b, 0);
-	c = blobmsg_open_array(&b, "whitelist");
+	blobmsg_add_string(&b, "defaultAction", "SCMP_ACT_KILL_PROCESS");
+	c = blobmsg_open_array(&b, "syscalls");
+	d = blobmsg_open_table(&b, "");
+	e = blobmsg_open_array(&b, "names");
 
 	for (i = 0; i < SYSCALL_COUNT; i++) {
 		int sc = sorted[i].syscall;
@@ -149,12 +152,14 @@ static void print_syscalls(int policy, const char *json)
 			ULOG_ERR("no name found for syscall(%d)\n", sc);
 		}
 	}
+	blobmsg_close_array(&b, e);
+	blobmsg_add_string(&b, "action", "SCMP_ACT_ALLOW");
+	blobmsg_close_table(&b, d);
 	blobmsg_close_array(&b, c);
-	blobmsg_add_u32(&b, "policy", policy);
 	if (json) {
 		FILE *fp = fopen(json, "w");
 		if (fp) {
-			fprintf(fp, "%s", blobmsg_format_json_indent(b.head, true, 0));
+			fprintf(fp, "%s\n", blobmsg_format_json_indent(b.head, true, 0));
 			fclose(fp);
 			ULOG_INFO("saving syscall trace to %s\n", json);
 		} else {
