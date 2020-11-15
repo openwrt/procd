@@ -51,6 +51,9 @@ static uint32_t resolve_action(char *actname)
 
 static uint32_t resolve_architecture(char *archname)
 {
+	if (!archname)
+		return 0;
+
 	if (!strcmp(archname, "SCMP_ARCH_X86"))
 		return AUDIT_ARCH_I386;
 	else if (!strcmp(archname, "SCMP_ARCH_X86_64"))
@@ -154,6 +157,7 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	int sz = 5, idx = 0;
 	uint32_t default_policy = 0;
 	uint32_t seccomp_arch;
+	bool arch_matched;
 
 	blobmsg_parse(oci_linux_seccomp_policy, __OCI_LINUX_SECCOMP_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
@@ -165,16 +169,19 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	default_policy = resolve_action(blobmsg_get_string(tb[OCI_LINUX_SECCOMP_DEFAULTACTION]));
 
 	/* verify architecture while ignoring the x86_64 anomaly for now */
-	blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_ARCHITECTURES], rem) {
-		seccomp_arch = resolve_architecture(blobmsg_get_string(cur));
-		/* take the first useful arch for now */
-		if (seccomp_arch)
-			break;
-	}
-
-	if (ARCH_NR != seccomp_arch) {
-		ERROR("seccomp architecture doesn't match system\n");
-		return NULL;
+	if (tb[OCI_LINUX_SECCOMP_ARCHITECTURES]) {
+		arch_matched = false;
+		blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_ARCHITECTURES], rem) {
+			seccomp_arch = resolve_architecture(blobmsg_get_string(cur));
+			if (ARCH_NR == seccomp_arch) {
+				arch_matched = true;
+				break;
+			}
+		}
+		if (!arch_matched) {
+			ERROR("seccomp architecture doesn't match system\n");
+			return NULL;
+		}
 	}
 
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_SYSCALLS], rem) {
