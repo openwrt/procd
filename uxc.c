@@ -636,7 +636,7 @@ static int uxc_boot(void)
 	return ret;
 }
 
-static int uxc_delete(char *name)
+static int uxc_delete(char *name, bool force)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	int rem, ret = 0;
@@ -662,6 +662,18 @@ static int uxc_delete(char *name)
 
 	if (!found)
 		return ENOENT;
+
+	if (s && s->running) {
+		if (force) {
+			ret = uxc_kill(name, SIGKILL));
+			if (ret)
+				goto errout;
+
+		} else {
+			ret = EWOULDBLOCK;
+			goto errout;
+		}
+	}
 
 	if (stat(fname, &sb) == -1) {
 		ret=ENOENT;
@@ -823,7 +835,7 @@ int main(int argc, char **argv)
 			if (optind != argc - 2)
 				goto usage_out;
 
-			ret = uxc_delete(argv[optind + 1]);
+			ret = uxc_delete(argv[optind + 1], force);
 			break;
 
 		case CMD_CREATE:
