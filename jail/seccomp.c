@@ -21,6 +21,8 @@
 #include "seccomp.h"
 #include "seccomp-oci.h"
 
+int debug = 0;
+
 int install_syscall_filter(const char *argv, const char *file)
 {
 	struct blob_buf b = { 0 };
