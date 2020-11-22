@@ -639,6 +639,7 @@ static int uxc_boot(void)
 static int uxc_delete(char *name, bool force)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
+	struct runtime_state *s = NULL;
 	int rem, ret = 0;
 	bool found = false;
 	char *fname;
@@ -663,9 +664,11 @@ static int uxc_delete(char *name, bool force)
 	if (!found)
 		return ENOENT;
 
+	s = avl_find_element(&runtime, name, s, avl);
+
 	if (s && s->running) {
 		if (force) {
-			ret = uxc_kill(name, SIGKILL));
+			ret = uxc_kill(name, SIGKILL);
 			if (ret)
 				goto errout;
 
