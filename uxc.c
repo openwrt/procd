@@ -640,6 +640,8 @@ static int uxc_delete(char *name, bool force)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct runtime_state *s = NULL;
+	static struct blob_buf req;
+	uint32_t id;
 	int rem, ret = 0;
 	bool found = false;
 	char *fname;
@@ -674,6 +676,22 @@ static int uxc_delete(char *name, bool force)
 
 		} else {
 			ret = EWOULDBLOCK;
+			goto errout;
+		}
+	}
+
+	if (s) {
+		ret = ubus_lookup_id(ctx, "container", &id);
+		if (ret)
+			goto errout;
+
+		blob_buf_init(&req, 0);
+		blobmsg_add_string(&req, "name", s->container_name);
+		blobmsg_add_string(&req, "instance", s->instance_name);
+
+		if (ubus_invoke(ctx, id, "delete", req.head, NULL, NULL, 3000)) {
+			blob_buf_free(&req);
+			ret=EIO;
 			goto errout;
 		}
 	}
