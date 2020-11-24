@@ -180,28 +180,30 @@ return ((opts.setns.pid != -1) ||
 	opts.namespace);
 }
 
+static void free_oci_envp(char **p) {
+	char **tmp;
+
+	if (p) {
+		tmp = p;
+		while (*tmp)
+			free(*(tmp++));
+
+		free(p);
+	}
+}
+
 static void free_hooklist(struct hook_execvpe **hooklist)
 {
 	struct hook_execvpe *cur;
-	char **tmp;
 
 	if (!hooklist)
 		return;
 
 	cur = *hooklist;
 	while (cur) {
+		free_oci_envp(cur->argv);
+		free_oci_envp(cur->envp);
 		free(cur->file);
-		tmp = cur->argv;
-		while (tmp)
-			free(*(tmp++));
-
-		free(cur->argv);
-
-		tmp = cur->envp;
-		while (tmp)
-			free(*(tmp++));
-
-		free(cur->envp);
 		free(cur++);
 	}
 	free(hooklist);
@@ -242,7 +244,9 @@ static void free_rlimits(void) {
 }
 
 static void free_opts(bool parent) {
-	char **tmp;
+
+	free_library_search();
+	mount_free();
 
 	/* we need to keep argv, envp and seccomp filter in child */
 	if (parent) { /* parent-only */
@@ -251,17 +255,8 @@ static void free_opts(bool parent) {
 			free(opts.ociseccomp);
 		}
 
-		tmp = opts.jail_argv;
-		while(tmp)
-			free(*(tmp++));
-
-		free(opts.jail_argv);
-
-		tmp = opts.envp;
-		while (tmp)
-			free(*(tmp++));
-
-		free(opts.envp);
+		free_oci_envp(opts.jail_argv);
+		free_oci_envp(opts.envp);
 	} else { /* child-only */
 		if (opts.ocibundle)
 			cgroups_free();
@@ -272,12 +267,9 @@ static void free_opts(bool parent) {
 	free_devices();
 	free(opts.hostname);
 	free(opts.cwd);
-	free(opts.extroot);
 	free(opts.uidmap);
 	free(opts.gidmap);
 	free(opts.annotations);
-	free(opts.ocibundle);
-	free(opts.pidfile);
 	free_hooklist(opts.hooks.createRuntime);
 	free_hooklist(opts.hooks.createContainer);
 	free_hooklist(opts.hooks.startContainer);
@@ -719,6 +711,20 @@ static int build_jail_fs(void)
 	return 0;
 }
 
+static bool exit_from_child;
+static void free_and_exit(int ret)
+{
+	if (!exit_from_child && opts.ocibundle)
+		cgroups_free();
+
+	if (!exit_from_child && parent_ctx)
+		ubus_free(parent_ctx);
+
+	free_opts(!exit_from_child);
+
+	exit(ret);
+}
+
 static void post_jail_fs(void);
 static void enter_jail_fs(void)
 {
@@ -729,11 +735,11 @@ static void enter_jail_fs(void)
 
 	if (pivot_root(jail_root, dirbuf) == -1) {
 		ERROR("pivot_root(%s, %s) failed: %m\n", jail_root, dirbuf);
-		exit(-1);
+		free_and_exit(-1);
 	}
 	if (chdir("/")) {
 		ERROR("chdir(/) (after pivot_root) failed: %m\n");
-		exit(-1);
+		free_and_exit(-1);
 	}
 
 	snprintf(dirbuf, sizeof(dirbuf), "/old%s", jail_root);
@@ -751,7 +757,7 @@ static void enter_jail_fs(void)
 
 	if (create_devices()) {
 		ERROR("create_devices() failed\n");
-		exit(-1);
+		free_and_exit(-1);
 	}
 	if (opts.ronly)
 		mount(NULL, "/", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
@@ -778,7 +784,6 @@ static int write_uid_gid_map(pid_t child_pid, bool gidmap, char *mapstr)
 	}
 
 	close(map_file);
-	free(mapstr);
 	return 0;
 }
 
@@ -836,7 +841,7 @@ static void get_jail_user(int *user, int *user_gid, int *gr_gid)
 		if (!p) {
 			ERROR("failed to get uid/gid for user %s: %d (%s)\n",
 			      opts.user, errno, strerror(errno));
-			exit(EXIT_FAILURE);
+			free_and_exit(EXIT_FAILURE);
 		}
 		*user = p->pw_uid;
 		*user_gid = p->pw_gid;
@@ -849,7 +854,7 @@ static void get_jail_user(int *user, int *user_gid, int *gr_gid)
 		g = getgrnam(opts.group);
 		if (!g) {
 			ERROR("failed to get gid for group %s: %m\n", opts.group);
-			exit(EXIT_FAILURE);
+			free_and_exit(EXIT_FAILURE);
 		}
 		*gr_gid = g->gr_gid;
 	} else {
@@ -861,17 +866,17 @@ static void set_jail_user(int pw_uid, int user_gid, int gr_gid)
 {
 	if (opts.user && (user_gid != -1) && initgroups(opts.user, user_gid)) {
 		ERROR("failed to initgroups() for user %s: %m\n", opts.user);
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 
 	if ((gr_gid != -1) && setregid(gr_gid, gr_gid)) {
 		ERROR("failed to set group id %d: %m\n", gr_gid);
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 
 	if ((pw_uid != -1) && setreuid(pw_uid, pw_uid)) {
 		ERROR("failed to set user id %d: %m\n", pw_uid);
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 }
 
@@ -1089,6 +1094,7 @@ static int exec_jail(void *arg)
 {
 	char buf[1];
 
+	exit_from_child = true;
 	uloop_init();
 	signals_init();
 
@@ -1122,35 +1128,36 @@ static int exec_jail(void *arg)
 	if ((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1)) {
 		if (setregid(0, 0) < 0) {
 			ERROR("setgid\n");
-			exit(EXIT_FAILURE);
+			free_and_exit(EXIT_FAILURE);
 		}
 		if (setreuid(0, 0) < 0) {
 			ERROR("setuid\n");
-			exit(EXIT_FAILURE);
+			free_and_exit(EXIT_FAILURE);
 		}
 		if (setgroups(0, NULL) < 0) {
 			ERROR("setgroups\n");
-			exit(EXIT_FAILURE);
+			free_and_exit(EXIT_FAILURE);
 		}
 	}
 
 	if (opts.namespace && opts.hostname && strlen(opts.hostname) > 0
 			&& sethostname(opts.hostname, strlen(opts.hostname))) {
 		ERROR("sethostname(%s) failed: %m\n", opts.hostname);
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 
 	uloop_timeout_add(&pre_exec_timeout);
 	uloop_run();
 
-	exit(-1);
+	free_and_exit(-1);
+	return -1;
 }
 
 static void pre_exec_jail(struct uloop_timeout *t)
 {
 	if ((opts.namespace & CLONE_NEWNS) && build_jail_fs()) {
 		ERROR("failed to build jail fs\n");
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	} else {
 		run_hooks(opts.hooks.createContainer, post_jail_fs);
 	}
@@ -1163,11 +1170,11 @@ static void post_jail_fs(void)
 
 	if (read(pipes[2], buf, 1) < 1) {
 		ERROR("can't read from parent\n");
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 	if (buf[0] != '!') {
 		ERROR("parent had an error, child exiting\n");
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 	close(pipes[2]);
 
@@ -1185,13 +1192,13 @@ static void post_start_hook(void)
 	if (opts.capset.apply) {
 		if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
 			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
-			exit(EXIT_FAILURE);
+			free_and_exit(EXIT_FAILURE);
 		}
 	}
 
 	/* drop capabilities, retain those still needed to further setup jail */
 	if (applyOCIcapabilities(opts.capset, (1LLU << CAP_SETGID) | (1LLU << CAP_SETUID) | (1LLU << CAP_SETPCAP)))
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 
 	/* use either cmdline-supplied user/group or uid/gid from OCI spec */
 	get_jail_user(&pw_uid, &pw_gid, &gr_gid);
@@ -1200,7 +1207,7 @@ static void post_start_hook(void)
 	if (opts.additional_gids &&
 	    (setgroups(opts.num_additional_gids, opts.additional_gids) < 0)) {
 		ERROR("setgroups failed: %m\n");
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 
 	if (opts.set_umask)
@@ -1210,28 +1217,28 @@ static void post_start_hook(void)
 	if (opts.capset.apply) {
 		if (prctl(PR_SET_SECUREBITS, 0)) {
 			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
-			exit(EXIT_FAILURE);
+			free_and_exit(EXIT_FAILURE);
 		}
 	}
 
 	/* drop remaining capabilities to end up with specified sets */
 	if (applyOCIcapabilities(opts.capset, 0))
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 
 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
 		ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 
 	char **envp = build_envp(opts.seccomp, opts.envp);
 	if (!envp)
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 
 	if (opts.cwd && chdir(opts.cwd))
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 
 	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp))
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 
 	uloop_end();
 	free_opts(false);
@@ -2198,53 +2205,65 @@ static int parseOCI(const char *jsonfile)
 	int res;
 
 	blob_buf_init(&ocibuf, 0);
-	if (!blobmsg_add_json_from_file(&ocibuf, jsonfile))
-		return ENOENT;
+
+	if (!blobmsg_add_json_from_file(&ocibuf, jsonfile)) {
+		res=ENOENT;
+		goto errout;
+	}
 
 	blobmsg_parse(oci_policy, __OCI_MAX, tb, blob_data(ocibuf.head), blob_len(ocibuf.head));
 
-	if (!tb[OCI_VERSION])
-		return ENOMSG;
+	if (!tb[OCI_VERSION]) {
+		res=ENOMSG;
+		goto errout;
+	}
 
 	if (strncmp("1.0", blobmsg_get_string(tb[OCI_VERSION]), 3)) {
 		ERROR("unsupported ociVersion %s\n", blobmsg_get_string(tb[OCI_VERSION]));
-		return ENOTSUP;
+		res=ENOTSUP;
+		goto errout;
 	}
 
 	if (tb[OCI_HOSTNAME])
 		opts.hostname = strdup(blobmsg_get_string(tb[OCI_HOSTNAME]));
 
-	if (!tb[OCI_PROCESS])
-		return ENODATA;
+	if (!tb[OCI_PROCESS]) {
+		res=ENODATA;
+		goto errout;
+	}
 
 	if ((res = parseOCIprocess(tb[OCI_PROCESS])))
-		return res;
+		goto errout;
 
-	if (!tb[OCI_ROOT])
-		return ENODATA;
-
+	if (!tb[OCI_ROOT]) {
+		res=ENODATA;
+		goto errout;
+	}
 	if ((res = parseOCIroot(jsonfile, tb[OCI_ROOT])))
-		return res;
+		goto errout;
 
-	if (!tb[OCI_MOUNTS])
-		return ENODATA;
+	if (!tb[OCI_MOUNTS]) {
+		res=ENODATA;
+		goto errout;
+	}
 
 	blobmsg_for_each_attr(cur, tb[OCI_MOUNTS], rem)
 		if ((res = parseOCImount(cur)))
-			return res;
+			goto errout;
 
 	if (tb[OCI_LINUX] && (res = parseOCIlinux(tb[OCI_LINUX])))
-		return res;
+		goto errout;
 
 	if (tb[OCI_HOOKS] && (res = parseOCIhooks(tb[OCI_HOOKS])))
-		return res;
+		goto errout;
 
 	if (tb[OCI_ANNOTATIONS])
 		opts.annotations = blob_memdup(tb[OCI_ANNOTATIONS]);
 
+errout:
 	blob_buf_free(&ocibuf);
 
-	return 0;
+	return res;
 }
 
 static int set_oom_score_adj(void)
@@ -2435,6 +2454,8 @@ int main(int argc, char **argv)
 	umask(022);
 	mount_list_init();
 	init_library_search();
+	cgroups_prepare();
+	exit_from_child = false;
 
 	while ((ch = getopt(argc, argv, OPT_ARGS)) != -1) {
 		switch (ch) {
@@ -2456,7 +2477,7 @@ int main(int argc, char **argv)
 			opts.namespace |= CLONE_NEWCGROUP;
 			break;
 		case 'R':
-			opts.extroot = strdup(optarg);
+			opts.extroot = optarg;
 			break;
 		case 's':
 			opts.namespace |= CLONE_NEWNS;
@@ -2517,13 +2538,13 @@ int main(int argc, char **argv)
 			opts.console = 1;
 			break;
 		case 'J':
-			opts.ocibundle = strdup(optarg);
+			opts.ocibundle = optarg;
 			break;
 		case 'i':
 			opts.immediately = true;
 			break;
 		case 'P':
-			opts.pidfile = strdup(optarg);
+			opts.pidfile = optarg;
 			break;
 		}
 	}
@@ -2545,7 +2566,8 @@ int main(int argc, char **argv)
 
 	if (opts.capabilities && parseOCIcapabilities_from_file(&opts.capset, opts.capabilities)) {
 		ERROR("failed to read capabilities from file %s\n", opts.capabilities);
-		return -1;
+		ret=-1;
+		goto errout;
 	}
 
 	if (opts.ocibundle) {
@@ -2557,24 +2579,28 @@ int main(int argc, char **argv)
 		free(jsonfile);
 		if (ocires) {
 			ERROR("parsing of OCI JSON spec has failed: %s (%d)\n", strerror(ocires), ocires);
-			return ocires;
+			ret=ocires;
+			goto errout;
 		}
 	}
 
 	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
 		ERROR("size parameter too long: \"%s\"\n", opts.tmpoverlaysize);
-		return -1;
+		ret=-1;
+		goto errout;
 	}
 
 	/* no <binary> param found */
 	if (!opts.ocibundle && (argc - optind < 1)) {
 		usage();
-		return EXIT_FAILURE;
+		ret=EXIT_FAILURE;
+		goto errout;
 	}
 	if (!(opts.ocibundle||opts.namespace||opts.capabilities||opts.seccomp)) {
 		ERROR("Not using namespaces, capabilities or seccomp !!!\n\n");
 		usage();
-		return EXIT_FAILURE;
+		ret=EXIT_FAILURE;
+		goto errout;
 	}
 	DEBUG("Using namespaces(0x%08x), capabilities(%d), seccomp(%d)\n",
 		opts.namespace,
@@ -2589,14 +2615,17 @@ int main(int argc, char **argv)
 
 	if (opts.ocibundle) {
 		char *objname;
-		if (asprintf(&objname, "container.%s", opts.name) < 0)
-			exit(-ENOMEM);
+		if (asprintf(&objname, "container.%s", opts.name) < 0) {
+			ret=-ENOMEM;
+			goto errout;
+		}
 
 		container_object.name = objname;
 		ret = ubus_add_object(parent_ctx, &container_object);
 		if (ret) {
 			ERROR("Failed to add object: %s\n", ubus_strerror(ret));
-			exit(-1);
+			ret=-1;
+			goto errout;
 		}
 	}
 
@@ -2604,9 +2633,10 @@ int main(int argc, char **argv)
 	if (!opts.ocibundle) {
 		/* allocate NULL-terminated array for argv */
 		opts.jail_argv = calloc(1 + argc - optind, sizeof(char**));
-		if (!opts.jail_argv)
-			return EXIT_FAILURE;
-
+		if (!opts.jail_argv) {
+			ret=EXIT_FAILURE;
+			goto errout;
+		}
 		for (size_t s = optind; s < argc; s++)
 			opts.jail_argv[s - optind] = strdup(argv[s]);
 
@@ -2617,36 +2647,44 @@ int main(int argc, char **argv)
 	if (!opts.extroot) {
 		if (opts.namespace && add_path_and_deps(*opts.jail_argv, 1, -1, 0)) {
 			ERROR("failed to load dependencies\n");
-			return -1;
+			ret=-1;
+			goto errout;
 		}
 	}
 
 	if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
 		ERROR("failed to load libpreload-seccomp.so\n");
 		opts.seccomp = 0;
-		if (opts.require_jail)
-			return -1;
+		if (opts.require_jail) {
+			ret=-1;
+			goto errout;
+		}
 	}
 
 	uloop_timeout_add(&post_main_timeout);
 	uloop_run();
 
-	/* unreachable */
-	return 0;
+errout:
+	if (opts.ocibundle)
+		cgroups_free();
+
+	free_opts(true);
+
+	return ret;
 }
 
 static void post_main(struct uloop_timeout *t)
 {
 	if (apply_rlimits()) {
 		ERROR("error applying resource limits\n");
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 
 	if (opts.name)
 		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
 
 	if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
-		exit(-1);
+		free_and_exit(-1);
 
 	if (has_namespaces()) {
 		if (opts.namespace & CLONE_NEWNS) {
@@ -2759,7 +2797,7 @@ static void post_main(struct uloop_timeout *t)
 		close(pipes[2]);
 		if (read(pipes[0], sig_buf, 1) < 1) {
 			ERROR("can't read from child\n");
-			exit(-1);
+			free_and_exit(-1);
 		}
 		close(pipes[0]);
 		set_oom_score_adj();
@@ -2770,7 +2808,7 @@ static void post_main(struct uloop_timeout *t)
 		if (opts.namespace & CLONE_NEWUSER) {
 			if (write_setgroups(jail_process.pid, true)) {
 				ERROR("can't write setgroups\n");
-				exit(-1);
+				free_and_exit(-1);
 			}
 			if (!opts.uidmap) {
 				bool has_gr = (opts.gr_gid != -1);
@@ -2791,21 +2829,21 @@ static void post_main(struct uloop_timeout *t)
 		if (opts.namespace & CLONE_NEWNET) {
 			if (!opts.name) {
 				ERROR("netns needs a named jail\n");
-				exit(-1);
+				free_and_exit(-1);
 			}
 			netns_fd = ns_open_pid("net", jail_process.pid);
 			netns_updown(jail_process.pid, true);
 		}
 		if (jail_writepid(jail_process.pid)) {
 			ERROR("failed to write pidfile: %m\n");
-			exit(-1);
+			free_and_exit(-1);
 		}
 	} else if (jail_process.pid == 0) {
 		/* fork child process */
-		exit(exec_jail(NULL));
+		free_and_exit(exec_jail(NULL));
 	} else {
 		ERROR("failed to clone/fork: %m\n");
-		exit(EXIT_FAILURE);
+		free_and_exit(EXIT_FAILURE);
 	}
 	run_hooks(opts.hooks.createRuntime, post_create_runtime);
 }
@@ -2818,7 +2856,7 @@ static void post_create_runtime(void)
 	sig_buf[0] = 'O';
 	if (write(pipes[3], sig_buf, 1) < 0) {
 		ERROR("can't write to child\n");
-		exit(-1);
+		free_and_exit(-1);
 	}
 
 	jail_oci_state = OCI_STATE_CREATED;
@@ -2836,7 +2874,7 @@ static void pipe_send_start_container(struct uloop_timeout *t)
 	sig_buf[0] = '!';
 	if (write(pipes[3], sig_buf, 1) < 0) {
 		ERROR("can't write to child\n");
-		exit(-1);
+		free_and_exit(-1);
 	}
 	close(pipes[3]);
 

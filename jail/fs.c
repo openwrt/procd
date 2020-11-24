@@ -271,7 +271,7 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 	char *tmp;
 	struct list_head fsopts = LIST_HEAD_INIT(fsopts);
 	size_t len = 0;
-	struct mount_opt *opt;
+	struct mount_opt *opt, *tmpopt;
 
 	blobmsg_for_each_attr(cur, msg, rem) {
 		tmp = blobmsg_get_string(cur);
@@ -389,9 +389,12 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 
 			strcat(*mount_data, opt->optstr);
 			++len;
-		};
+		}
 
-		list_del(&fsopts);
+		list_for_each_entry_safe(opt, tmpopt, &fsopts, list) {
+			list_del(&opt->list);
+			free(opt);
+		}
 	}
 
 	DEBUG("mount flags(%08lx) propagation(%08lx) fsopts(\"%s\")\n", mf, pf, *mount_data?:"");
@@ -455,6 +458,19 @@ int mount_all(const char *jailroot) {
 			return -1;
 
 	return 0;
+}
+
+void mount_free(void) {
+	struct mount *m, *tmp;
+
+	avl_remove_all_elements(&mounts, m, avl, tmp) {
+		if (m->source != (void*)(-1))
+			free((void*)m->source);
+		free((void*)m->target);
+		free((void*)m->filesystemtype);
+		free((void*)m->optstr);
+		free(m);
+	}
 }
 
 void mount_list_init(void) {

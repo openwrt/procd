@@ -34,5 +34,6 @@ int elf_load_deps(const char *path, const char *map);
 const char* find_lib(const char *file);
 void init_library_search(void);
 int lib_open(char **fullpath, const char *file);
+void free_library_search(void);
 
 #endif

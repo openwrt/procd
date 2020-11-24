@@ -54,10 +54,16 @@ struct cgval {
 
 struct avl_tree cgvals;
 static char *cgroup_path;
+static bool initialized;
+
+void cgroups_prepare(void) {
+	initialized = false;
+}
 
 void cgroups_init(const char *p) {
 	avl_init(&cgvals, avl_strcmp, false, NULL);
 	cgroup_path = strdup(p);
+	initialized = true;
 }
 
 static void cgroups_set(const char *key, const char *val)
@@ -82,13 +88,14 @@ void cgroups_free(void)
 {
 	struct cgval *valp, *tmp;
 
-	avl_for_each_element_safe(&cgvals, valp, avl, tmp) {
-		avl_delete(&cgvals, &valp->avl);
-		free((void *)(valp->avl.key));
-		free(valp->val);
-		free(valp);
+	if (initialized) {
+		avl_remove_all_elements(&cgvals, valp, avl, tmp) {
+			free((void *)(valp->avl.key));
+			free(valp->val);
+			free(valp);
+		}
+		free(cgroup_path);
 	}
-	free(cgroup_path);
 }
 
 void cgroups_apply(pid_t pid)
@@ -197,8 +204,6 @@ void cgroups_apply(pid_t pid)
 	close(fd);
 
 	free(ent);
-
-	cgroups_free();
 }
 
 enum {

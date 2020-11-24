@@ -327,3 +327,15 @@ void init_library_search(void)
 	alloc_library_path("/usr/lib");
 	load_ldso_conf("/etc/ld.so.conf");
 }
+
+void free_library_search(void)
+{
+	struct library_path *p, *ptmp;
+	struct library *l, *tmp;
+
+	list_for_each_entry_safe(p, ptmp, &library_paths, list)
+		free(p);
+
+	avl_remove_all_elements(&libraries, l, avl, tmp)
+		free(l);
+}

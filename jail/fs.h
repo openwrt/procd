@@ -26,5 +26,6 @@ int parseOCImount(struct blob_attr *msg);
 int add_path_and_deps(const char *path, int readonly, int error, int lib);
 int mount_all(const char *jailroot);
 void mount_list_init(void);
+void mount_free(void);
 
 #endif

@@ -18,5 +18,6 @@ void cgroups_init(const char *p);
 int parseOCIlinuxcgroups(struct blob_attr *msg);
 void cgroups_apply(pid_t pid);
 void cgroups_free(void);
+void cgroups_prepare(void);
 
 #endif
