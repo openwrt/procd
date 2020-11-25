@@ -1880,7 +1880,7 @@ static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 	}
 
 	/* allocate combined mapping string */
-	map = calloc(1 + totallen, sizeof(char));
+	map = malloc(1 + totallen);
 	if (!map)
 		return ENOMEM;
 
@@ -2574,6 +2574,11 @@ int main(int argc, char **argv)
 		char *jsonfile;
 		int ocires;
 
+		if (!opts.name) {
+			ERROR("OCI bundle needs a named jail\n");
+			ret=-1;
+			goto errout;
+		}
 		asprintf(&jsonfile, "%s/config.json", opts.ocibundle);
 		ocires = parseOCI(jsonfile);
 		free(jsonfile);
@@ -2583,6 +2588,15 @@ int main(int argc, char **argv)
 			goto errout;
 		}
 	}
+
+	if (opts.namespace & CLONE_NEWNET) {
+		if (!opts.name) {
+			ERROR("netns needs a named jail\n");
+			ret=-1;
+			goto errout;
+		}
+	}
+
 
 	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
 		ERROR("size parameter too long: \"%s\"\n", opts.tmpoverlaysize);
@@ -2827,13 +2841,10 @@ static void post_main(struct uloop_timeout *t)
 		}
 
 		if (opts.namespace & CLONE_NEWNET) {
-			if (!opts.name) {
-				ERROR("netns needs a named jail\n");
-				free_and_exit(-1);
-			}
 			netns_fd = ns_open_pid("net", jail_process.pid);
 			netns_updown(jail_process.pid, true);
 		}
+
 		if (jail_writepid(jail_process.pid)) {
 			ERROR("failed to write pidfile: %m\n");
 			free_and_exit(-1);
