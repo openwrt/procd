@@ -31,6 +31,7 @@
 #define RLIM_NLIMITS 16
 #endif
 
+#include <assert.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
@@ -1835,30 +1836,12 @@ static const struct blobmsg_policy oci_linux_uidgidmap_policy[] = {
 
 static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 {
-	const char *map_format = "%d %d %d\n";
 	struct blob_attr *tb[__OCI_LINUX_UIDGIDMAP_MAX];
 	struct blob_attr *cur;
-	int rem, len;
-	char **mappings;
-	char *map, *curstr;
-	unsigned int cnt = 0;
-	size_t totallen = 0;
+	int rem;
+	char *map;
+	size_t len, pos, totallen = 0;
 
-	/* count number of mappings */
-	blobmsg_for_each_attr(cur, msg, rem)
-		cnt++;
-
-	if (!cnt)
-		return 0;
-
-	/* allocate array for mappings */
-	mappings = calloc(1 + cnt, sizeof(char*));
-	if (!mappings)
-		return ENOMEM;
-
-	mappings[cnt] = NULL;
-
-	cnt = 0;
 	blobmsg_for_each_attr(cur, msg, rem) {
 		blobmsg_parse(oci_linux_uidgidmap_policy, __OCI_LINUX_UIDGIDMAP_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
 
@@ -1867,32 +1850,32 @@ static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 		    !tb[OCI_LINUX_UIDGIDMAP_SIZE])
 			return EINVAL;
 
-		/* write mapping line into allocated string */
-		len = asprintf(&mappings[cnt++], map_format,
+		/* count length */
+		totallen += snprintf(NULL, 0, "%d %d %d\n",
 			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_CONTAINERID]),
 			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]),
 			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_SIZE]));
-
-		if (len < 0)
-			return ENOMEM;
-
-		totallen += len;
 	}
 
 	/* allocate combined mapping string */
-	map = malloc(1 + totallen);
+	map = malloc(totallen + 1);
 	if (!map)
 		return ENOMEM;
 
-	map[0] = '\0';
+	pos = 0;
+	blobmsg_for_each_attr(cur, msg, rem) {
+		blobmsg_parse(oci_linux_uidgidmap_policy, __OCI_LINUX_UIDGIDMAP_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
 
-	/* concatenate mapping strings into combined string */
-	curstr = mappings[0];
-	while (curstr) {
-		strcat(map, curstr);
-		free(curstr++);
+		/* write mapping line into pre-allocated string */
+		len = snprintf(&map[pos], totallen + 1, "%d %d %d\n",
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_CONTAINERID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_SIZE]));
+		pos += len;
+		totallen -= len;
 	}
-	free(mappings);
+
+	assert(totallen == 0);
 
 	if (is_gidmap)
 		opts.gidmap = map;
