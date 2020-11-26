@@ -2775,6 +2775,8 @@ static void post_main(struct uloop_timeout *t)
 		if (opts.setns.time != -1) {
 			timens_fd = ns_open_pid("time", getpid());
 			setns_open(CLONE_NEWTIME);
+		} else {
+			timens_fd = -1;
 		}
 #endif
 
