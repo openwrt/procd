@@ -389,7 +389,7 @@ static int create_dev_console(const char *jail_root)
 	snprintf(dev_console_path, sizeof(dev_console_path), "%s/dev/console", jail_root);
 	close(creat(dev_console_path, 0620));
 
-	if (mount(console_fname, dev_console_path, NULL, MS_BIND, NULL))
+	if (mount(console_fname, dev_console_path, "bind", MS_BIND, NULL))
 		goto no_console;
 
 	/* use PTY slave for stdio */
@@ -641,13 +641,13 @@ static int build_jail_fs(void)
 	}
 
 	/* oldroot can't be MS_SHARED else pivot_root() fails */
-	if (mount("none", "/", NULL, MS_REC|MS_PRIVATE, NULL)) {
+	if (mount("none", "/", "none", MS_REC|MS_PRIVATE, NULL)) {
 		ERROR("private mount failed %m\n");
 		return -1;
 	}
 
 	if (opts.extroot) {
-		if (mount(opts.extroot, jail_root, NULL, MS_BIND, NULL)) {
+		if (mount(opts.extroot, jail_root, "bind", MS_BIND, NULL)) {
 			ERROR("extroot mount failed %m\n");
 			return -1;
 		}
@@ -761,7 +761,7 @@ static void enter_jail_fs(void)
 		free_and_exit(-1);
 	}
 	if (opts.ronly)
-		mount(NULL, "/", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
+		mount(NULL, "/", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
 
 	umask(old_umask);
 	post_jail_fs();

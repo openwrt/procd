@@ -111,10 +111,10 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 				return error;
 		} else {
 			/* mount-bind 0-sized file having mode 000 */
-			if (mount(UJAIL_NOAFILE, new, NULL, MS_BIND, NULL))
+			if (mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL))
 				return error;
 
-			if (mount(UJAIL_NOAFILE, new, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_NOATIME, NULL))
+			if (mount(UJAIL_NOAFILE, new, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_NOATIME, NULL))
 				return error;
 		}
 
@@ -137,7 +137,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	}
 
 	if (is_bind) {
-		if (mount(source?:new, new, filesystemtype, MS_BIND | (mountflags & MS_REC), optstr)) {
+		if (mount(source?:new, new, filesystemtype?:"bind", MS_BIND | (mountflags & MS_REC), optstr)) {
 			if (error)
 				ERROR("failed to mount -B %s %s: %m\n", source, new);
 
@@ -150,7 +150,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	}
 
 	const char *hack_fstype = ((!filesystemtype || strcmp(filesystemtype, "cgroup"))?filesystemtype:"cgroup2");
-	if (mount(source?:(is_bind?new:NULL), new, hack_fstype, mountflags, optstr)) {
+	if (mount(source?:(is_bind?new:NULL), new, hack_fstype?:"none", mountflags, optstr)) {
 		if (error)
 			ERROR("failed to mount %s %s: %m\n", source, new);
 
@@ -163,7 +163,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	DEBUG("mount %s%s %s (%s)\n", (mountflags & MS_BIND)?"-B ":"", source, new,
 	      (mountflags & MS_RDONLY)?"ro":"rw");
 
-	if (propflags && mount(NULL, new, NULL, propflags, NULL)) {
+	if (propflags && mount("none", new, "none", propflags, NULL)) {
 		if (error)
 			ERROR("failed to mount --make-... %s \n", new);
 
