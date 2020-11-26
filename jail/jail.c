@@ -315,15 +315,15 @@ static int mount_overlay(char *jail_root, char *overlaydir) {
 
 	fd = creat(upperresolvconf, 0644);
 	if (fd == -1) {
-		ERROR("creat(%s) failed: %m\n", upperresolvconf);
-		goto upper_resolvconf_printf;
+		if (errno != EEXIST)
+			ERROR("creat(%s) failed: %m\n", upperresolvconf);
+	} else {
+		close(fd);
 	}
-	close(fd);
-
 	DEBUG("mount -t overlay %s %s (%s)\n", jail_root, jail_root, optsstr);
 
 	if (mount(jail_root, jail_root, "overlay", MS_NOATIME, optsstr))
-		goto opts_printf;
+		goto upper_resolvconf_printf;
 
 	ret = 0;
 
