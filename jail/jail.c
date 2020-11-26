@@ -2755,7 +2755,7 @@ static void post_main(struct uloop_timeout *t)
 
 			}
 			if (opts.sysfs || opts.ocibundle)
-				add_mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
+				add_mount("sysfs", "/sys", "sysfs", MS_RELATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
 
 			if (opts.ocibundle)
 				add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, "mode=1777", -1);
