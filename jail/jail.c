@@ -1129,6 +1129,8 @@ static int exec_jail(void *arg)
 	if (opts.namespace & CLONE_NEWCGROUP)
 		unshare(CLONE_NEWCGROUP);
 
+	setns_open(CLONE_NEWCGROUP);
+
 	if ((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1)) {
 		if (setregid(0, 0) < 0) {
 			ERROR("setgid\n");
