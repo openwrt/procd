@@ -132,6 +132,7 @@ static struct {
 	int pw_uid;
 	int pw_gid;
 	int gr_gid;
+	int root_map_uid;
 	gid_t *additional_gids;
 	size_t num_additional_gids;
 	mode_t umask;
@@ -1096,6 +1097,8 @@ static int exec_jail(void *arg)
 	char buf[1];
 
 	exit_from_child = true;
+	prctl(PR_SET_SECUREBITS, 0);
+
 	uloop_init();
 	signals_init();
 
@@ -1214,9 +1217,10 @@ static void post_start_hook(void)
 	if (opts.set_umask)
 		umask(opts.umask);
 
-	/* restore securebits back to normal */
+	/* restore securebits back to normal (and lock them if not in userns) */
 	if (opts.capset.apply) {
-		if (prctl(PR_SET_SECUREBITS, 0)) {
+		if (prctl(PR_SET_SECUREBITS, (opts.namespace & CLONE_NEWUSER)?0:
+		    SECBIT_KEEP_CAPS_LOCKED|SECBIT_NO_SETUID_FIXUP_LOCKED|SECBIT_NOROOT_LOCKED)) {
 			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
 			free_and_exit(EXIT_FAILURE);
 		}
@@ -1818,8 +1822,14 @@ static int parseOCIlinuxns(struct blob_attr *msg)
 	}
 
 	return 0;
-};
+}
 
+static void get_jail_root_user(bool is_gidmap, uint32_t container_id, uint32_t host_id, uint32_t size)
+{
+	if (container_id == 0 && size >= 1)
+		if (!is_gidmap)
+			opts.root_map_uid = host_id;
+}
 
 enum {
 	OCI_LINUX_UIDGIDMAP_CONTAINERID,
@@ -1865,6 +1875,10 @@ static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 	pos = 0;
 	blobmsg_for_each_attr(cur, msg, rem) {
 		blobmsg_parse(oci_linux_uidgidmap_policy, __OCI_LINUX_UIDGIDMAP_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+
+		get_jail_root_user(is_gidmap, blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_CONTAINERID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_SIZE]));
 
 		/* write mapping line into pre-allocated string */
 		len = snprintf(&map[pos], totallen + 1, "%d %d %d\n",
@@ -2547,6 +2561,12 @@ int main(int argc, char **argv)
 	opts.setns.time = -1;
 #endif
 
+	/*
+	 * uid in parent user namespace representing root user in new
+	 * user namespace, defaults to nobody unless specified in uidMappings
+	 */
+	opts.root_map_uid = 65534;
+
 	if (opts.capabilities && parseOCIcapabilities_from_file(&opts.capset, opts.capabilities)) {
 		ERROR("failed to read capabilities from file %s\n", opts.capabilities);
 		ret=-1;
@@ -2756,6 +2776,14 @@ static void post_main(struct uloop_timeout *t)
 		}
 #endif
 
+		if (opts.namespace & CLONE_NEWUSER) {
+			if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
+				ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
+				free_and_exit(EXIT_FAILURE);
+			}
+			seteuid(opts.root_map_uid);
+		}
+
 		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | (opts.namespace & (~CLONE_NEWCGROUP)), NULL);
 	} else {
 		jail_process.pid = fork();
@@ -2768,6 +2796,8 @@ static void post_main(struct uloop_timeout *t)
 		uloop_process_add(&jail_process);
 		jail_running = 1;
 		seteuid(0);
+		prctl(PR_SET_SECUREBITS, 0);
+
 		if (pidns_fd != -1) {
 			setns(pidns_fd, CLONE_NEWPID);
 			close(pidns_fd);
