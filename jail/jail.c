@@ -966,7 +966,7 @@ static void usage(void)
 	fprintf(stderr, "  -E\t\tfail if jail cannot be setup\n");
 	fprintf(stderr, "  -y\t\tprovide jail console\n");
 	fprintf(stderr, "  -J <dir>\tcreate container from OCI bundle\n");
-	fprintf(stderr, "  -j\t\tstart container immediately\n");
+	fprintf(stderr, "  -i\t\tstart container immediately\n");
 	fprintf(stderr, "  -P <pidfile>\tcreate <pidfile>\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
