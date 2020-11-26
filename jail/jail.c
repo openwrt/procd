@@ -2696,13 +2696,13 @@ static void post_main(struct uloop_timeout *t)
 #endif
 
 			if (!(opts.namespace & CLONE_NEWNET)) {
-				add_mount_bind("/etc/resolv.conf", 1, -1);
+				add_mount_bind("/etc/resolv.conf", 1, 0);
 			} else if (opts.setns.net == -1) {
 				char hostdir[PATH_MAX];
 
 				snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
 				mkdir_p(hostdir, 0755);
-				add_mount(hostdir, "/dev/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, -1);
+				add_mount(hostdir, "/dev/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, 0);
 			}
 
 			/* default mounts */
