@@ -249,6 +249,7 @@ static void free_opts(bool parent) {
 
 	free_library_search();
 	mount_free();
+	cgroups_free();
 
 	/* we need to keep argv, envp and seccomp filter in child */
 	if (parent) { /* parent-only */
@@ -259,9 +260,6 @@ static void free_opts(bool parent) {
 
 		free_oci_envp(opts.jail_argv);
 		free_oci_envp(opts.envp);
-	} else { /* child-only */
-		if (opts.ocibundle)
-			cgroups_free();
 	}
 
 	free_rlimits();
