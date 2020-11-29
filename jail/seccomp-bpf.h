@@ -62,6 +62,7 @@ struct seccomp_data {
 
 #define syscall_nr (offsetof(struct seccomp_data, nr))
 #define arch_nr (offsetof(struct seccomp_data, arch))
+#define syscall_arg(x) (offsetof(struct seccomp_data, args[x]))
 
 #if defined(__i386__)
 # define REG_SYSCALL	REG_EAX

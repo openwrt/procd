@@ -9,8 +9,19 @@
  *
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
+ *
+ * BPF control flow
+ *
+ * (check_arch)<t>---(check_syscall)<f>---+----[...]<f>---(return default_action)
+ *       |<f>                |<t>         |
+ *      KILL         (check_argument)<f>--+
+ *                           |<t>
+ *                         [...]
+ *                           |<t>
+ *                    (return action)
  */
 #define _GNU_SOURCE 1
+#include <assert.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -47,6 +58,46 @@ static uint32_t resolve_action(char *actname)
 		ERROR("unknown seccomp action %s\n", actname);
 		return SECCOMP_RET_KILL;
 	}
+}
+
+static uint8_t resolve_op_ins(const char *op)
+{
+	if (!strcmp(op, "SCMP_CMP_NE")) /* invert EQ */
+		return BPF_JEQ;
+	else if (!strcmp(op, "SCMP_CMP_LT")) /* invert GE */
+		return BPF_JGE;
+	else if (!strcmp(op, "SCMP_CMP_LE")) /* invert GT */
+		return BPF_JGT;
+	else if (!strcmp(op, "SCMP_CMP_EQ"))
+		return BPF_JEQ;
+	else if (!strcmp(op, "SCMP_CMP_GE"))
+		return BPF_JGE;
+	else if (!strcmp(op, "SCMP_CMP_GT"))
+		return BPF_JGT;
+	else if (!strcmp(op, "SCMP_CMP_MASKED_EQ"))
+		return BPF_JEQ;
+	else {
+		ERROR("unknown seccomp op %s\n", op);
+		return 0;
+	}
+}
+
+static bool resolve_op_is_masked(const char *op)
+{
+	if (!strcmp(op, "SCMP_CMP_MASKED_EQ"))
+		return true;
+
+	return false;
+}
+
+static bool resolve_op_inv(const char *op)
+{
+	if (!strcmp(op, "SCMP_CMP_NE") ||
+	    !strcmp(op, "SCMP_CMP_LT") ||
+	    !strcmp(op, "SCMP_CMP_LE"))
+		return true;
+
+	return false;
 }
 
 static uint32_t resolve_architecture(char *archname)
@@ -140,8 +191,8 @@ enum {
 
 static const struct blobmsg_policy oci_linux_seccomp_syscalls_args_policy[] = {
 	[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX] = { "index", BLOBMSG_TYPE_INT32 },
-	[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE] = { "value", BLOBMSG_TYPE_INT64 },
-	[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO] = { "valueTwo", BLOBMSG_TYPE_INT64 },
+	[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE] = { "value", BLOBMSG_CAST_INT64 },
+	[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO] = { "valueTwo", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP] = { "op", BLOBMSG_TYPE_STRING },
 };
 
@@ -154,10 +205,11 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	int rem, remn, remargs, sc;
 	struct sock_filter *filter;
 	struct sock_fprog *prog;
-	int sz = 5, idx = 0;
+	int sz = 4, idx = 0;
 	uint32_t default_policy = 0;
 	uint32_t seccomp_arch;
 	bool arch_matched;
+	char *op_str;
 
 	blobmsg_parse(oci_linux_seccomp_policy, __OCI_LINUX_SECCOMP_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
@@ -185,14 +237,44 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	}
 
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_SYSCALLS], rem) {
-		blobmsg_parse(oci_linux_seccomp_syscalls_policy, __OCI_LINUX_SECCOMP_SYSCALLS_MAX, tbn, blobmsg_data(cur), blobmsg_len(cur));
-		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_NAMES], remn)
-			sz += 2;
+		sz += 2; /* load and return */
 
-		if (tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS])
-			blobmsg_for_each_attr(curarg, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remargs)
-				sz++;
+		blobmsg_parse(oci_linux_seccomp_syscalls_policy, __OCI_LINUX_SECCOMP_SYSCALLS_MAX, tbn, blobmsg_data(cur), blobmsg_len(cur));
+		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_NAMES], remn) {
+			sc = find_syscall(blobmsg_get_string(curn));
+			if (sc == -1) {
+				DEBUG("unknown syscall '%s'\n", blobmsg_get_string(curn));
+				/* TODO: support run.oci.seccomp_fail_unknown_syscall=1 annotation */
+				continue;
+			}
+			++sz;
+		}
+
+		if (tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS]) {
+			blobmsg_for_each_attr(curarg, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remargs) {
+				sz += 2; /* load and compare */
+
+				blobmsg_parse(oci_linux_seccomp_syscalls_args_policy, __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX, tba, blobmsg_data(curarg), blobmsg_len(curarg));
+				if (!tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX] ||
+				    !tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE] ||
+				    !tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP])
+					return NULL;
+
+				if (blobmsg_get_u32(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX]) > 5)
+					return NULL;
+
+				op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
+				if (!resolve_op_ins(op_str))
+					return NULL;
+
+				if (resolve_op_is_masked(op_str))
+					++sz; /* SCMP_CMP_MASKED_EQ needs an extra BPF_AND op */
+			}
+		}
 	}
+
+	if (sz < 6)
+		return NULL;
 
 	prog = malloc(sizeof(struct sock_fprog));
 	if (!prog)
@@ -209,11 +291,15 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	set_filter(&filter[idx++], BPF_JMP + BPF_JEQ + BPF_K, 1, 0, ARCH_NR);
 	set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_KILL);
 
-	/* get syscall */
-	set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_nr);
-
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_SYSCALLS], rem) {
 		uint32_t action;
+		uint32_t op_idx;
+		uint8_t op_ins;
+		bool op_inv, op_masked;
+		uint64_t op_val, op_val2;
+		int start_rule_idx;
+		int next_rule_idx;
+
 		blobmsg_parse(oci_linux_seccomp_syscalls_policy, __OCI_LINUX_SECCOMP_SYSCALLS_MAX, tbn, blobmsg_data(cur), blobmsg_len(cur));
 		action = resolve_action(blobmsg_get_string(tbn[OCI_LINUX_SECCOMP_SYSCALLS_ACTION]));
 		if (tbn[OCI_LINUX_SECCOMP_SYSCALLS_ERRNORET]) {
@@ -224,28 +310,79 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 		} else if (action == SECCOMP_RET_ERRNO)
 			action = SECCOMP_RET_ERROR(EPERM);
 
+		/* load syscall */
+		set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_nr);
+
+		/* get number of syscall names */
+		next_rule_idx = idx;
 		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_NAMES], remn) {
-			sc = find_syscall(blobmsg_get_string(curn));
-			if (sc == -1) {
-				DEBUG("unknown syscall '%s'\n", blobmsg_get_string(curn));
-				/* TODO: support run.oci.seccomp_fail_unknown_syscall=1 annotation */
+			if (find_syscall(blobmsg_get_string(curn)) == -1)
 				continue;
-			}
 
-			/* add rule to filter */
-			set_filter(&filter[idx++], BPF_JMP + BPF_JEQ + BPF_K, 0, 1, sc);
-			set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, action);
-
+			++next_rule_idx;
 		}
+		start_rule_idx = next_rule_idx;
+
+		/* calculate length of argument filter rules */
 		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remn) {
 			blobmsg_parse(oci_linux_seccomp_syscalls_args_policy, __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX, tba, blobmsg_data(curn), blobmsg_len(curn));
-			/* ToDo: process args */
+			next_rule_idx += 2;
+			op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
+			if (resolve_op_is_masked(op_str))
+				++next_rule_idx;
 		}
+
+		++next_rule_idx; /* account for return action */
+
+		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_NAMES], remn) {
+			sc = find_syscall(blobmsg_get_string(curn));
+			if (sc == -1)
+				continue;
+			/* check syscall, skip other syscall checks if hit; if no match chain to next section */
+			set_filter(&filter[idx], BPF_JMP + BPF_JEQ + BPF_K, start_rule_idx - (idx + 1), ((idx + 1) == start_rule_idx)?(next_rule_idx - (idx + 1)):0, sc);
+			++idx;
+		}
+
+		assert(idx = start_rule_idx);
+
+		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remn) {
+			blobmsg_parse(oci_linux_seccomp_syscalls_args_policy, __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX, tba, blobmsg_data(curn), blobmsg_len(curn));
+
+			op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
+			op_ins = resolve_op_ins(op_str);
+			op_inv = resolve_op_inv(op_str);
+			op_masked = resolve_op_is_masked(op_str);
+			op_idx = blobmsg_get_u32(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX]);
+			op_val = blobmsg_cast_u64(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE]);
+			if (tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO])
+				op_val2 = blobmsg_cast_u64(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO]);
+			else
+				op_val2 = 0;
+
+			/* load argument */
+			set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_arg(op_idx));
+
+			/* apply mask */
+			if (op_masked)
+				set_filter(&filter[idx++], BPF_ALU + BPF_K + BPF_AND, 0, 0, op_val);
+
+			set_filter(&filter[idx], BPF_JMP + op_ins + BPF_K,
+				   op_inv?(next_rule_idx - (idx + 1)):0,
+				   op_inv?0:(next_rule_idx - (idx + 1)),
+				   op_masked?op_val2:op_val);
+			++idx;
+		}
+
+		set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, action);
+
+		assert(idx == next_rule_idx);
 	}
 
-	set_filter(&filter[idx], BPF_RET + BPF_K, 0, 0, default_policy);
+	set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, default_policy);
 
-	prog->len = (unsigned short) idx + 1;
+	assert(idx == sz);
+
+	prog->len = (unsigned short) idx;
 	prog->filter = filter;
 
 	return prog;
