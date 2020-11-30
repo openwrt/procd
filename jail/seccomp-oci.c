@@ -211,7 +211,8 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	bool arch_matched;
 	char *op_str;
 
-	blobmsg_parse(oci_linux_seccomp_policy, __OCI_LINUX_SECCOMP_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+	blobmsg_parse(oci_linux_seccomp_policy, __OCI_LINUX_SECCOMP_MAX,
+		      tb, blobmsg_data(msg), blobmsg_len(msg));
 
 	if (!tb[OCI_LINUX_SECCOMP_DEFAULTACTION]) {
 		ERROR("seccomp: no default action set\n");
@@ -239,7 +240,9 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_SYSCALLS], rem) {
 		sz += 2; /* load and return */
 
-		blobmsg_parse(oci_linux_seccomp_syscalls_policy, __OCI_LINUX_SECCOMP_SYSCALLS_MAX, tbn, blobmsg_data(cur), blobmsg_len(cur));
+		blobmsg_parse(oci_linux_seccomp_syscalls_policy,
+			      __OCI_LINUX_SECCOMP_SYSCALLS_MAX,
+			      tbn, blobmsg_data(cur), blobmsg_len(cur));
 		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_NAMES], remn) {
 			sc = find_syscall(blobmsg_get_string(curn));
 			if (sc == -1) {
@@ -254,7 +257,9 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 			blobmsg_for_each_attr(curarg, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remargs) {
 				sz += 2; /* load and compare */
 
-				blobmsg_parse(oci_linux_seccomp_syscalls_args_policy, __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX, tba, blobmsg_data(curarg), blobmsg_len(curarg));
+				blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
+					      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
+					      tba, blobmsg_data(curarg), blobmsg_len(curarg));
 				if (!tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX] ||
 				    !tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE] ||
 				    !tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP])
@@ -300,13 +305,17 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 		int start_rule_idx;
 		int next_rule_idx;
 
-		blobmsg_parse(oci_linux_seccomp_syscalls_policy, __OCI_LINUX_SECCOMP_SYSCALLS_MAX, tbn, blobmsg_data(cur), blobmsg_len(cur));
-		action = resolve_action(blobmsg_get_string(tbn[OCI_LINUX_SECCOMP_SYSCALLS_ACTION]));
+		blobmsg_parse(oci_linux_seccomp_syscalls_policy,
+			      __OCI_LINUX_SECCOMP_SYSCALLS_MAX,
+			      tbn, blobmsg_data(cur), blobmsg_len(cur));
+		action = resolve_action(blobmsg_get_string(
+				tbn[OCI_LINUX_SECCOMP_SYSCALLS_ACTION]));
 		if (tbn[OCI_LINUX_SECCOMP_SYSCALLS_ERRNORET]) {
 			if (action != SECCOMP_RET_ERRNO)
 				goto errout1;
 
-			action = SECCOMP_RET_ERROR(blobmsg_get_u32(tbn[OCI_LINUX_SECCOMP_SYSCALLS_ERRNORET]));
+			action = SECCOMP_RET_ERROR(blobmsg_get_u32(
+					tbn[OCI_LINUX_SECCOMP_SYSCALLS_ERRNORET]));
 		} else if (action == SECCOMP_RET_ERRNO)
 			action = SECCOMP_RET_ERROR(EPERM);
 
@@ -325,7 +334,9 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 
 		/* calculate length of argument filter rules */
 		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remn) {
-			blobmsg_parse(oci_linux_seccomp_syscalls_args_policy, __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX, tba, blobmsg_data(curn), blobmsg_len(curn));
+			blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
+				      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
+				      tba, blobmsg_data(curn), blobmsg_len(curn));
 			next_rule_idx += 2;
 			op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
 			if (resolve_op_is_masked(op_str))
@@ -338,15 +349,24 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 			sc = find_syscall(blobmsg_get_string(curn));
 			if (sc == -1)
 				continue;
-			/* check syscall, skip other syscall checks if hit; if no match chain to next section */
-			set_filter(&filter[idx], BPF_JMP + BPF_JEQ + BPF_K, start_rule_idx - (idx + 1), ((idx + 1) == start_rule_idx)?(next_rule_idx - (idx + 1)):0, sc);
+			/*
+			 * check syscall, skip other syscall checks if match is found.
+			 * if no match is found, jump to next section
+			 */
+			set_filter(&filter[idx], BPF_JMP + BPF_JEQ + BPF_K,
+				   start_rule_idx - (idx + 1),
+				   ((idx + 1) == start_rule_idx)?(next_rule_idx - (idx + 1)):0,
+				   sc);
 			++idx;
 		}
 
 		assert(idx = start_rule_idx);
 
+		/* generate argument filter rules */
 		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remn) {
-			blobmsg_parse(oci_linux_seccomp_syscalls_args_policy, __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX, tba, blobmsg_data(curn), blobmsg_len(curn));
+			blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
+				      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
+				      tba, blobmsg_data(curn), blobmsg_len(curn));
 
 			op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
 			op_ins = resolve_op_ins(op_str);
@@ -373,6 +393,7 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 			++idx;
 		}
 
+		/* if we have reached until here, all conditions were met and we can return */
 		set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, action);
 
 		assert(idx == next_rule_idx);
