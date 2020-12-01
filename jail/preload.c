@@ -18,24 +18,33 @@
 #include <string.h>
 #include <dlfcn.h>
 
+#include "log.h"
 #include "seccomp.h"
 #include "../preload.h"
 
 static main_t __main__;
+int debug;
 
 static int __preload_main__(int argc, char **argv, char **envp)
 {
 	char *env_file = getenv("SECCOMP_FILE");
+	char *env_debug = getenv("SECCOMP_DEBUG");
 
 	if (!env_file || !env_file[0]) {
 		ERROR("SECCOMP_FILE not specified\n");
 		return -1;
 	}
 
+	if (env_debug)
+		debug = atoi(env_debug);
+	else
+		debug = 0;
+
 	if (install_syscall_filter(*argv, env_file))
 		return -1;
 
 	unsetenv("LD_PRELOAD");
+	unsetenv("SECCOMP_DEBUG");
 	unsetenv("SECCOMP_FILE");
 
 	return (*__main__)(argc, argv, envp);

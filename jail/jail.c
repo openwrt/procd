@@ -896,12 +896,13 @@ static int apply_rlimits(void)
 	return 0;
 }
 
-#define MAX_ENVP	8
+#define MAX_ENVP	16
 static char** build_envp(const char *seccomp, char **ocienvp)
 {
 	static char *envp[MAX_ENVP];
 	static char preload_var[PATH_MAX];
 	static char seccomp_var[PATH_MAX];
+	static char seccomp_debug_var[20];
 	static char debug_var[] = "LD_DEBUG=all";
 	static char container_var[] = "container=ujail";
 	const char *preload_lib = find_lib("libpreload-seccomp.so");
@@ -916,6 +917,8 @@ static char** build_envp(const char *seccomp, char **ocienvp)
 	if (seccomp) {
 		snprintf(seccomp_var, sizeof(seccomp_var), "SECCOMP_FILE=%s", seccomp);
 		envp[count++] = seccomp_var;
+		snprintf(seccomp_debug_var, sizeof(seccomp_debug_var), "SECCOMP_DEBUG=%2d", debug);
+		envp[count++] = seccomp_debug_var;
 		snprintf(preload_var, sizeof(preload_var), "LD_PRELOAD=%s", preload_lib);
 		envp[count++] = preload_var;
 	}

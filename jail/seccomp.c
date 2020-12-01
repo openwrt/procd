@@ -18,17 +18,16 @@
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
 
+#include "log.h"
 #include "seccomp.h"
 #include "seccomp-oci.h"
-
-int debug = 0;
 
 int install_syscall_filter(const char *argv, const char *file)
 {
 	struct blob_buf b = { 0 };
 	struct sock_fprog *prog = NULL;
 
-	INFO("%s: setting up syscall filter\n", argv);
+	DEBUG("%s: setting up syscall filter\n", argv);
 
 	blob_buf_init(&b, 0);
 	if (!blobmsg_add_json_from_file(&b, file)) {
