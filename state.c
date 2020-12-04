@@ -140,12 +140,15 @@ static void state_enter(void)
 		// try to reopen incase the wdt was not available before coldplug
 		watchdog_init(0);
 		set_stdio("console");
-		LOG("- ubus -\n");
 		p = getpwnam("ubus");
 		if (p) {
+			LOG("- ubus -\n");
 			mkdir(p->pw_dir, 0755);
 			chown(p->pw_dir, p->pw_uid, p->pw_gid);
+		} else {
+			LOG("- ubus (running as root!) -\n");
 		}
+
 		procd_connect_ubus();
 		service_start_early("ubus", ubus_cmd, p?"ubus":NULL, p?"ubus":NULL);
 		break;
