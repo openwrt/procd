@@ -1008,8 +1008,7 @@ static int setns_open(unsigned long nstype)
 {
 	int *fd = get_namespace_fd(nstype);
 
-	if (!*fd)
-		return EFAULT;
+	assert(fd != NULL);
 
 	if (*fd == -1)
 		return 0;
