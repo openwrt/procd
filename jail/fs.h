@@ -16,7 +16,6 @@
 #include <sys/mount.h>
 #include <libubox/blobmsg.h>
 
-int mkdir_p(char *dir, mode_t mask);
 int add_mount(const char *source, const char *target, const char *filesystemtype,
 	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error);
 int add_mount_inner(const char *source, const char *target, const char *filesystemtype,

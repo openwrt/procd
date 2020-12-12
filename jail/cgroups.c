@@ -39,8 +39,8 @@
 #include <libubox/avl-cmp.h>
 #include <libubox/blobmsg.h>
 #include <libubox/list.h>
+#include <libubox/utils.h>
 
-#include "fs.h"
 #include "log.h"
 #include "cgroups.h"
 

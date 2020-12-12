@@ -32,6 +32,7 @@
 #include <libubox/avl-cmp.h>
 #include <libubox/blobmsg.h>
 #include <libubox/list.h>
+#include <libubox/utils.h>
 
 #include "elf.h"
 #include "fs.h"
@@ -53,31 +54,6 @@ struct mount {
 };
 
 struct avl_tree mounts;
-
-int mkdir_p(char *dir, mode_t mask)
-{
-	char *l = strrchr(dir, '/');
-	int ret;
-
-	if (!l)
-		return 0;
-
-	*l = '\0';
-
-	if (mkdir_p(dir, mask))
-		return -1;
-
-	*l = '/';
-
-	ret = mkdir(dir, mask);
-	if (ret && errno == EEXIST)
-		return 0;
-
-	if (ret)
-		ERROR("mkdir(%s, %d) failed: %m\n", dir, mask);
-
-	return ret;
-}
 
 static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
 		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner)

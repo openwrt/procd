@@ -55,12 +55,12 @@
 #include "seccomp-oci.h"
 #include "cgroups.h"
 
-#include <libubox/utils.h>
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
 #include <libubox/list.h>
 #include <libubox/vlist.h>
 #include <libubox/uloop.h>
+#include <libubox/utils.h>
 #include <libubus.h>
 
 #ifndef CLONE_NEWCGROUP
