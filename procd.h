@@ -30,6 +30,7 @@ extern char *ubus_socket;
 
 void procd_connect_ubus(void);
 void procd_reconnect_ubus(int reconnect);
+void ubus_init_hotplug(struct ubus_context *ctx);
 void ubus_init_service(struct ubus_context *ctx);
 void ubus_init_system(struct ubus_context *ctx);
 

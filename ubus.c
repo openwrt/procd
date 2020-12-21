@@ -68,6 +68,7 @@ ubus_connect_cb(struct uloop_timeout *timeout)
 	}
 
 	ctx->connection_lost = ubus_disconnect_cb;
+	ubus_init_hotplug(ctx);
 	ubus_init_service(ctx);
 	ubus_init_system(ctx);
 	watch_ubus(ctx);
