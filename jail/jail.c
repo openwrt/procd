@@ -465,9 +465,6 @@ static void run_hooklist(void)
 	if (!((unsigned long)s.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
 		hook_process_handler(&hook_process, EPERM);
 
-	if (!((unsigned long)s.st_mode & (S_IRUSR | S_IRGRP | S_IROTH)))
-		hook_process_handler(&hook_process, EPERM);
-
 	hook_running = 1;
 	hook_process.pid = fork();
 	if (hook_process.pid == 0) {
