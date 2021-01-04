@@ -407,14 +407,15 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	prog->filter = filter;
 
 	DEBUG("generated seccomp-bpf program:\n");
-	fprintf(stderr, " [idx]\tcode\t jt\t jf\tk\n");
-	if (debug)
+	if (debug) {
+		fprintf(stderr, " [idx]\tcode\t jt\t jf\tk\n");
 		for (idx=0; idx<sz; idx++)
 			fprintf(stderr, " [%03d]\t%04hx\t%3hhu\t%3hhu\t%08x\n", idx,
 				filter[idx].code,
 				filter[idx].jt,
 				filter[idx].jf,
 				filter[idx].k);
+	}
 
 	return prog;
 
