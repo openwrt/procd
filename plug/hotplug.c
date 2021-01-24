@@ -612,7 +612,7 @@ void hotplug(char *rules)
 
 	rule_file = strdup(rules);
 	nls.nl_family = AF_NETLINK;
-	nls.nl_pid = getpid();
+	nls.nl_pid = 0;
 	nls.nl_groups = -1;
 
 	if ((hotplug_fd.fd = socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT)) == -1) {
