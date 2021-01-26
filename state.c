@@ -142,9 +142,12 @@ static void state_enter(void)
 		set_stdio("console");
 		p = getpwnam("ubus");
 		if (p) {
+			int ret;
 			LOG("- ubus -\n");
 			mkdir(p->pw_dir, 0755);
-			chown(p->pw_dir, p->pw_uid, p->pw_gid);
+			ret = chown(p->pw_dir, p->pw_uid, p->pw_gid);
+			if (ret)
+				LOG("- ubus - failed to chown(%s)\n", p->pw_dir);
 		} else {
 			LOG("- ubus (running as root!) -\n");
 		}
