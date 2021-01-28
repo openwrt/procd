@@ -48,8 +48,16 @@
 #define _offsetof(a, b) __builtin_offsetof(a,b)
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-#ifdef __amd64__
+#if defined (__aarch64__)
+#include <linux/ptrace.h>
+#elif defined(__amd64__)
 #define reg_syscall_nr	_offsetof(struct user, regs.orig_rax)
+#elif defined(__arm__)
+#include <asm/ptrace.h>		/* for PTRACE_SET_SYSCALL */
+#define reg_syscall_nr	_offsetof(struct user, regs.uregs[7])
+# if defined(__ARM_EABI__)
+# define reg_retval_nr	_offsetof(struct user, regs.uregs[0])
+# endif
 #elif defined(__i386__)
 #define reg_syscall_nr	_offsetof(struct user, regs.orig_eax)
 #elif defined(__mips)
@@ -57,12 +65,6 @@
 # define EF_REG2	8
 # endif
 #define reg_syscall_nr	(EF_REG2 / 4)
-#elif defined(__arm__)
-#include <asm/ptrace.h>		/* for PTRACE_SET_SYSCALL */
-#define reg_syscall_nr	_offsetof(struct user, regs.uregs[7])
-# if defined(__ARM_EABI__)
-# define reg_retval_nr	_offsetof(struct user, regs.uregs[0])
-# endif
 #elif defined(__PPC__)
 #define reg_syscall_nr	_offsetof(struct user, regs.gpr[0])
 #define reg_retval_nr	_offsetof(struct user, regs.gpr[3])
@@ -208,7 +210,14 @@ static void tracer_cb(struct uloop_process *c, int ret)
 	if (WIFSTOPPED(ret) || (ret >> 16)) {
 		if (WSTOPSIG(ret) & 0x80) {
 			if (!tracee->in_syscall) {
+#ifdef __aarch64__
+				int syscall = -1;
+				struct ptrace_syscall_info ptsi = {.op=PTRACE_SYSCALL_INFO_ENTRY};
+				if (ptrace(PTRACE_GET_SYSCALL_INFO, c->pid, sizeof(ptsi), &ptsi) != -1)
+					syscall = ptsi.entry.nr;
+#else
 				int syscall = ptrace(PTRACE_PEEKUSER, c->pid, reg_syscall_nr);
+#endif
 				int i = syscall_index(syscall);
 				if (i >= 0) {
 					syscall_count[i]++;

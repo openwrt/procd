@@ -64,25 +64,28 @@ struct seccomp_data {
 #define arch_nr (offsetof(struct seccomp_data, arch))
 #define syscall_arg(x) (offsetof(struct seccomp_data, args[x]))
 
-#if defined(__i386__)
-# define REG_SYSCALL	REG_EAX
-# define ARCH_NR	AUDIT_ARCH_I386
-#elif defined(__x86_64__)
+#if defined(__aarch64__)
+# define REG_SYSCALL	regs.regs[8]
+# define ARCH_NR	AUDIT_ARCH_AARCH64
+#elif defined(__amd64__)
 # define REG_SYSCALL	REG_RAX
 # define ARCH_NR	AUDIT_ARCH_X86_64
-#elif defined(__mips__)
-# define REG_SYSCALL	regs[2]
-# if __BYTE_ORDER == __LITTLE_ENDIAN
-#  define ARCH_NR	AUDIT_ARCH_MIPSEL
-# else
-#  define ARCH_NR	AUDIT_ARCH_MIPS
-# endif
 #elif defined(__arm__) && (defined(__ARM_EABI__) || defined(__thumb__))
 # define REG_SYSCALL	regs.uregs[7]
 # if __BYTE_ORDER == __LITTLE_ENDIAN
 #  define ARCH_NR	AUDIT_ARCH_ARM
 # else
 #  define ARCH_NR	AUDIT_ARCH_ARMEB
+# endif
+#elif defined(__i386__)
+# define REG_SYSCALL	REG_EAX
+# define ARCH_NR	AUDIT_ARCH_I386
+#elif defined(__mips__)
+# define REG_SYSCALL	regs[2]
+# if __BYTE_ORDER == __LITTLE_ENDIAN
+#  define ARCH_NR	AUDIT_ARCH_MIPSEL
+# else
+#  define ARCH_NR	AUDIT_ARCH_MIPS
 # endif
 #elif defined(__PPC__)
 # define REG_SYSCALL	regs.gpr[0]
