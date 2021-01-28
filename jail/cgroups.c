@@ -644,7 +644,7 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MEMORY_MAX];
 	char tmp[32] = { 0 };
-	int64_t limit, swap, reservation;
+	int64_t limit = -1, swap, reservation;
 
 	blobmsg_parse(oci_linux_cgroups_memory_policy, __OCI_LINUX_CGROUPS_MEMORY_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
