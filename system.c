@@ -71,6 +71,13 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 			if (!key || !val)
 				continue;
 
+#ifdef __aarch64__
+			if (!strcasecmp(key, "CPU revision")) {
+				snprintf(line, sizeof(line), "ARMv8 Processor rev %lu", strtoul(val + 2, NULL, 16));
+				blobmsg_add_string(&b, "system", line);
+				break;
+			}
+#else
 			if (!strcasecmp(key, "system type") ||
 			    !strcasecmp(key, "processor") ||
 			    !strcasecmp(key, "cpu") ||
@@ -84,6 +91,7 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 					break;
 				}
 			}
+#endif
 		}
 
 		fclose(f);
