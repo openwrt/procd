@@ -97,7 +97,6 @@ spawn_procd(struct uloop_process *proc, int ret)
 	if (plugd_proc.pid > 0)
 		kill(plugd_proc.pid, SIGKILL);
 
-	unsetenv("INITRAMFS");
 	unsetenv("PREINIT");
 	unlink("/tmp/.preinit");
 

@@ -36,6 +36,7 @@
 static struct blob_buf b;
 static int notify;
 static struct ubus_context *_ctx;
+static int initramfs;
 
 enum vjson_state {
 	VJSON_ERROR,
@@ -54,6 +55,9 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 	FILE *f;
 
 	blob_buf_init(&b, 0);
+
+	if (initramfs)
+		blobmsg_add_u8(&b, "initramfs", 1);
 
 	if (uname(&utsname) >= 0)
 	{
@@ -759,6 +763,11 @@ void ubus_init_system(struct ubus_context *ctx)
 	int ret;
 
 	_ctx = ctx;
+
+	initramfs = !!getenv("INITRAMFS");
+	if (initramfs)
+		unsetenv("INITRAMFS");
+
 	ret = ubus_add_object(ctx, &system_object);
 	if (ret)
 		ERROR("Failed to add object: %s\n", ubus_strerror(ret));
