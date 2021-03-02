@@ -2804,7 +2804,7 @@ static void post_main(struct uloop_timeout *t)
 			close(pidns_fd);
 		}
 #ifdef CLONE_NEWTIME
-		if (timens_fd != -1)
+		if (timens_fd != -1) {
 			setns(timens_fd, CLONE_NEWTIME);
 			close(timens_fd);
 		}
