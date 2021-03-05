@@ -135,6 +135,28 @@ blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2)
 	return true;
 }
 
+char *get_active_console(char *out, int len)
+{
+	char line[CMDLINE_SIZE + 1];
+	int fd = open("/sys/class/tty/console/active", O_RDONLY);
+	ssize_t r = read(fd, line, sizeof(line) - 1);
+
+	close(fd);
+
+	if (r <= 0)
+		return NULL;
+
+	/* The active file is terminated by a newline which we need to strip */
+	char *newline = strtok(line, "\n");
+
+	if (newline != NULL) {
+		strncpy(out, newline, len);
+		return out;
+	}
+
+	return NULL;
+}
+
 char* get_cmdline_val(const char* name, char* out, int len)
 {
 	char line[CMDLINE_SIZE + 1], *c, *sptr;

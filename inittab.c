@@ -183,7 +183,15 @@ static void askconsole(struct init_action *a)
 	char line[256], *tty, *split;
 	int i;
 
+	/* First, try console= on the kernel command line,
+	 * then fallback to /sys/class/tty/console/active,
+	 * which should work when linux,stdout-path (or equivalent)
+	 * is in the device tree
+	 */
 	tty = get_cmdline_val("console", line, sizeof(line));
+	if (tty == NULL) {
+		tty = get_active_console(line, sizeof(line));
+	}
 	if (tty != NULL) {
 		split = strchr(tty, ',');
 		if (split != NULL)
