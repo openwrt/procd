@@ -244,12 +244,19 @@ static void tracer_cb(struct uloop_process *c, int ret)
 		} else if ((ret >> 16) == PTRACE_EVENT_STOP) {
 			/* Nothing special to do here */
 		} else if ((ret >> 8) == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) {
+#ifdef __aarch64__
+			int syscall = -1;
+			struct ptrace_syscall_info ptsi = {.op=PTRACE_SYSCALL_INFO_SECCOMP};
+			if (ptrace(PTRACE_GET_SYSCALL_INFO, c->pid, sizeof(ptsi), &ptsi) != -1)
+				syscall = ptsi.entry.nr;
+#else
 			int syscall = ptrace(PTRACE_PEEKUSER, c->pid, reg_syscall_nr);
 #if defined(__arm__)
 			ptrace(PTRACE_SET_SYSCALL, c->pid, 0, -1);
 			ptrace(PTRACE_POKEUSER, c->pid, reg_retval_nr, -ENOSYS);
 #else
 			ptrace(PTRACE_POKEUSER, c->pid, reg_syscall_nr, -1);
+#endif
 #endif
 			report_seccomp_vialation(c->pid, syscall);
 		} else {
