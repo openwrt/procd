@@ -21,7 +21,8 @@
 static inline bool is_container() {
 	struct stat s;
 	int r = stat("/.dockerenv", &s);
-	return !!getenv("container") || r == 0;
+	int pv_r = stat("/pantavisor", &s);
+	return !!getenv("container") || r == 0 || pv_r == 0;
 }
 
 #endif
