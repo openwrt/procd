@@ -190,7 +190,10 @@ static void askconsole(struct init_action *a)
 	 */
 	tty = get_cmdline_val("console", line, sizeof(line));
 	if (tty == NULL) {
-		tty = get_active_console(line, sizeof(line));
+		if (dev_exist("console"))
+			tty = "console";
+		else
+			tty = get_active_console(line, sizeof(line));
 	}
 	if (tty != NULL) {
 		split = strchr(tty, ',');
