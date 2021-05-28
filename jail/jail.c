@@ -514,8 +514,7 @@ static int apply_sysctl(const char *jail_root)
 	if (!opts.sysctl)
 		return 0;
 
-	asprintf(&procdir, "%s/proc", jail_root);
-	if (!procdir)
+	if (asprintf(&procdir, "%s/proc", jail_root) < 0)
 		return ENOMEM;
 
 	mkdir(procdir, 0700);
@@ -525,8 +524,7 @@ static int apply_sysctl(const char *jail_root)
 	cur = opts.sysctl;
 
 	while (*cur) {
-		asprintf(&fname, "%s/sys/%s", procdir, (*cur)->entry);
-		if (!fname)
+		if (asprintf(&fname, "%s/sys/%s", procdir, (*cur)->entry) < 0)
 			return ENOMEM;
 
 		DEBUG("sysctl: writing '%s' to %s\n", (*cur)->value, fname);
@@ -2581,7 +2579,10 @@ int main(int argc, char **argv)
 			ret=-1;
 			goto errout;
 		}
-		asprintf(&jsonfile, "%s/config.json", opts.ocibundle);
+		if (asprintf(&jsonfile, "%s/config.json", opts.ocibundle) < 0) {
+			ret=-ENOMEM;
+			goto errout;
+		}
 		ocires = parseOCI(jsonfile);
 		free(jsonfile);
 		if (ocires) {

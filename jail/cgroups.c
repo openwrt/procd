@@ -16,7 +16,6 @@
  * https://github.com/containers/crun/blob/0.14.1/crun.1.md#cgroup-v2
  *
  * ToDo:
- *  - convert cgroup1 devices to eBPF program
  *  - convert cgroup1 net_prio and net_cls to eBPF program
  *  - rdma (anyone?) intelrdt (anyone?)
  */
@@ -43,6 +42,7 @@
 
 #include "log.h"
 #include "cgroups.h"
+#include "cgroups-bpf.h"
 
 #define CGROUP_ROOT "/sys/fs/cgroup/"
 #define CGROUP_IO_WEIGHT_MAX 10000
@@ -197,11 +197,22 @@ void cgroups_apply(pid_t pid)
 		close(fd);
 	}
 
+	int dirfd = open(cgroup_path, O_DIRECTORY);
+	if (dirfd < 0) {
+		ERROR("can't open %s: %m\n", cgroup_path);
+	} else {
+		attach_cgroups_ebpf(dirfd);
+		close(dirfd);
+	}
+
 	snprintf(ent, maxlen, "%s/%s", cgroup_path, "cgroup.procs");
 	fd = open(ent, O_WRONLY);
-	assert(fd != -1);
-	dprintf(fd, "%d", pid);
-	close(fd);
+	if (fd < 0) {
+		ERROR("can't open %s: %m\n", cgroup_path);
+	} else {
+		dprintf(fd, "%d", pid);
+		close(fd);
+	}
 
 	free(ent);
 }
@@ -349,7 +360,8 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 	numweightstrs = 0;
 
 	if (weight > -1)
-		asprintf(&weightstrs[numweightstrs++], "default %d", weight);
+		if (asprintf(&weightstrs[numweightstrs++], "default %d", weight) < 0)
+			return ENOMEM;
 
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE], rem) {
 		uint64_t major, minor;
@@ -382,7 +394,8 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 		major = blobmsg_cast_u64(tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_MAJOR]);
 		minor = blobmsg_cast_u64(tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_MINOR]);
 
-		asprintf(&weightstrs[numweightstrs++], "%" PRIu64 ":%" PRIu64 " %u", major, minor, devweight);
+		if (asprintf(&weightstrs[numweightstrs++], "%" PRIu64 ":%" PRIu64 " %u", major, minor, devweight) < 0)
+			return ENOMEM;
 	}
 
 	if (numweightstrs) {
@@ -785,8 +798,7 @@ int parseOCIlinuxcgroups(struct blob_attr *msg)
 
 	blobmsg_parse(oci_linux_cgroups_policy, __OCI_LINUX_CGROUPS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
-	if (tb[OCI_LINUX_CGROUPS_DEVICES] ||
-	    tb[OCI_LINUX_CGROUPS_HUGEPAGELIMITS] ||
+	if (tb[OCI_LINUX_CGROUPS_HUGEPAGELIMITS] ||
 	    tb[OCI_LINUX_CGROUPS_INTELRDT] ||
 	    tb[OCI_LINUX_CGROUPS_NETWORK] ||
 	    tb[OCI_LINUX_CGROUPS_RDMA])
@@ -800,6 +812,12 @@ int parseOCIlinuxcgroups(struct blob_attr *msg)
 
 	if (tb[OCI_LINUX_CGROUPS_CPU]) {
 		ret = parseOCIlinuxcgroups_legacy_cpu(tb[OCI_LINUX_CGROUPS_CPU]);
+		if (ret)
+			return ret;
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_DEVICES]) {
+		ret = parseOCIlinuxcgroups_devices(tb[OCI_LINUX_CGROUPS_DEVICES]);
 		if (ret)
 			return ret;
 	}
