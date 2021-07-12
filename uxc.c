@@ -35,10 +35,11 @@
 
 #include "log.h"
 
-#define UXC_VERSION "0.1"
+#define UXC_VERSION "0.2"
 #define OCI_VERSION_STRING "1.0.2"
 #define UXC_CONFDIR "/etc/uxc"
-#define UXC_RUNDIR "/var/run/uxc"
+
+static bool verbose = false;
 
 struct runtime_state {
 	struct avl_node avl;
@@ -64,20 +65,21 @@ enum uxc_cmd {
 	CMD_UNKNOWN
 };
 
-#define OPT_ARGS "ab:fp:vV"
+#define OPT_ARGS "ab:fp:t:vVw:"
 static struct option long_options[] = {
-	{"autostart",	no_argument,		0,	'a'	},
-	{"bundle",	required_argument,	0,	'b'	},
-	{"force",	no_argument,		0,	'f'	},
-	{"pid-file",	required_argument,	0,	'p'	},
-	{"verbose",	no_argument,		0,	'v'	},
-	{"version",	no_argument,		0,	'V'	},
-	{0,		0,			0,	0	}
+	{"autostart",		no_argument,		0,	'a'	},
+	{"bundle",		required_argument,	0,	'b'	},
+	{"force",		no_argument,		0,	'f'	},
+	{"pid-file",		required_argument,	0,	'p'	},
+	{"temp-overlay-size",	required_argument,	0,	't'	},
+	{"write-overlay-path",	required_argument,	0,	'w'	},
+	{"verbose",		no_argument,		0,	'v'	},
+	{"version",		no_argument,		0,	'V'	},
+	{0,			0,			0,	0	}
 };
 
 AVL_TREE(runtime, avl_strcmp, false, NULL);
 static struct blob_buf conf;
-static struct blob_buf state;
 static struct ubus_context *ctx;
 
 static int usage(void) {
@@ -100,6 +102,8 @@ enum {
 	CONF_JAIL,
 	CONF_AUTOSTART,
 	CONF_PIDFILE,
+	CONF_TEMP_OVERLAY_SIZE,
+	CONF_WRITE_OVERLAY_PATH,
 	__CONF_MAX,
 };
 
@@ -109,22 +113,23 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_JAIL] = { .name = "jail", .type = BLOBMSG_TYPE_STRING },
 	[CONF_AUTOSTART] = { .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	[CONF_PIDFILE] = { .name = "pidfile", .type = BLOBMSG_TYPE_STRING },
+	[CONF_TEMP_OVERLAY_SIZE] = { .name = "temp-overlay-size", .type = BLOBMSG_TYPE_STRING },
+	[CONF_WRITE_OVERLAY_PATH] = { .name = "write-overlay-path", .type = BLOBMSG_TYPE_STRING },
 };
 
-static int conf_load(bool load_state)
+static int conf_load(void)
 {
 	int gl_flags = GLOB_NOESCAPE | GLOB_MARK;
 	int j, res;
 	glob_t gl;
 	char *globstr;
-	struct blob_buf *target = load_state?&state:&conf;
 	void *c, *o;
 
-	if (asprintf(&globstr, "%s/*.json", load_state?UXC_RUNDIR:UXC_CONFDIR) == -1)
+	if (asprintf(&globstr, "%s/*.json", UXC_CONFDIR) == -1)
 		return ENOMEM;
 
-	blob_buf_init(target, 0);
-	c = blobmsg_open_table(target, NULL);
+	blob_buf_init(&conf, 0);
+	c = blobmsg_open_table(&conf, NULL);
 
 	res = glob(globstr, gl_flags, NULL, &gl);
 	free(globstr);
@@ -132,14 +137,14 @@ static int conf_load(bool load_state)
 		return 0;
 
 	for (j = 0; j < gl.gl_pathc; j++) {
-		o = blobmsg_open_table(target, strdup(gl.gl_pathv[j]));
-		if (!blobmsg_add_json_from_file(target, gl.gl_pathv[j])) {
+		o = blobmsg_open_table(&conf, strdup(gl.gl_pathv[j]));
+		if (!blobmsg_add_json_from_file(&conf, gl.gl_pathv[j])) {
 			ERROR("uxc: failed to load %s\n", gl.gl_pathv[j]);
 			continue;
 		}
-		blobmsg_close_table(target, o);
+		blobmsg_close_table(&conf, o);
 	}
-	blobmsg_close_table(target, c);
+	blobmsg_close_table(&conf, c);
 	globfree(&gl);
 
 	return 0;
@@ -427,7 +432,8 @@ static int uxc_create(char *name, bool immediately)
 	int rem, ret;
 	uint32_t id;
 	struct runtime_state *s = NULL;
-	char *path = NULL, *jailname = NULL, *pidfile = NULL;
+	char *path = NULL, *jailname = NULL, *pidfile = NULL, *tmprwsize = NULL, *writepath = NULL;
+
 	void *in, *ins, *j;
 	bool found = false;
 
@@ -444,6 +450,13 @@ static int uxc_create(char *name, bool immediately)
 
 		if (tb[CONF_PIDFILE])
 			pidfile = strdup(blobmsg_get_string(tb[CONF_PIDFILE]));
+
+		if (tb[CONF_TEMP_OVERLAY_SIZE])
+			tmprwsize = strdup(blobmsg_get_string(tb[CONF_TEMP_OVERLAY_SIZE]));
+
+		if (tb[CONF_WRITE_OVERLAY_PATH])
+			writepath = strdup(blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]));
+
 		break;
 	}
 
@@ -466,12 +479,24 @@ static int uxc_create(char *name, bool immediately)
 	j = blobmsg_open_table(&req, "jail");
 	blobmsg_add_string(&req, "name", jailname?:name);
 	blobmsg_add_u8(&req, "immediately", immediately);
+
 	if (pidfile)
 		blobmsg_add_string(&req, "pidfile", pidfile);
 
 	blobmsg_close_table(&req, j);
+
+	if (writepath)
+		blobmsg_add_string(&req, "overlaydir", writepath);
+
+	if (tmprwsize)
+		blobmsg_add_string(&req, "tmpoverlaysize", tmprwsize);
+
 	blobmsg_close_table(&req, in);
 	blobmsg_close_table(&req, ins);
+
+	if (verbose)
+		fprintf(stderr, "adding container to procd:\n\t%s\n",
+			blobmsg_format_json_indent(req.head, true, 1));
 
 	ret = 0;
 	if (ubus_lookup_id(ctx, "container", &id) ||
@@ -545,7 +570,7 @@ static int uxc_kill(char *name, int signal)
 }
 
 
-static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfile)
+static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfile, char *_tmprwsize, char *_writepath)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -553,6 +578,9 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	bool found = false;
 	char *fname = NULL;
 	char *keeppath = NULL;
+	char *tmprwsize = _tmprwsize;
+	char *writepath = _writepath;
+
 	int f;
 	struct stat sb;
 
@@ -597,8 +625,14 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	if (f < 0)
 		return errno;
 
-	if (!add)
+	if (!add) {
 		keeppath = strdup(blobmsg_get_string(tb[CONF_PATH]));
+		if (tb[CONF_WRITE_OVERLAY_PATH])
+			writepath = strdup(blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]));
+
+		if (tb[CONF_TEMP_OVERLAY_SIZE])
+			tmprwsize = strdup(blobmsg_get_string(tb[CONF_TEMP_OVERLAY_SIZE]));
+	}
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", name);
@@ -606,6 +640,12 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	blobmsg_add_u8(&req, "autostart", autostart);
 	if (pidfile)
 		blobmsg_add_string(&req, "pidfile", pidfile);
+
+	if (tmprwsize)
+		blobmsg_add_string(&req, "temp-overlay-size", tmprwsize);
+
+	if (writepath)
+		blobmsg_add_string(&req, "write-overlay-path", writepath);
 
 	dprintf(f, "%s\n", blobmsg_format_json_indent(req.head, true, 0));
 
@@ -712,9 +752,8 @@ errout:
 static void reload_conf(void)
 {
 	blob_buf_free(&conf);
-	conf_load(false);
+	conf_load();
 }
-
 
 int main(int argc, char **argv)
 {
@@ -722,9 +761,10 @@ int main(int argc, char **argv)
 	int ret = EINVAL;
 	char *bundle = NULL;
 	char *pidfile = NULL;
+	char *tmprwsize = NULL;
+	char *writepath = NULL;
 	bool autostart = false;
 	bool force = false;
-	bool verbose = false;
 	int signal = SIGTERM;
 	int c;
 
@@ -735,21 +775,13 @@ int main(int argc, char **argv)
 	if (!ctx)
 		return ENODEV;
 
-	ret = conf_load(false);
+	ret = conf_load();
 	if (ret)
 		goto out;
 
-	ret = mkdir(UXC_RUNDIR, 0755);
-	if (ret && errno != EEXIST)
-		goto conf_out;
-
-	ret = conf_load(true);
-	if (ret)
-		goto conf_out;
-
 	ret = runtime_load();
 	if (ret)
-		goto state_out;
+		goto conf_out;
 
 	while (true) {
 		int option_index = 0;
@@ -774,6 +806,10 @@ int main(int argc, char **argv)
 				pidfile = optarg;
 				break;
 
+			case 't':
+				tmprwsize = optarg;
+				break;
+
 			case 'v':
 				verbose = true;
 				break;
@@ -781,6 +817,10 @@ int main(int argc, char **argv)
 			case 'V':
 				printf("uxc %s\n", UXC_VERSION);
 				exit(0);
+
+			case 'w':
+				writepath = optarg;
+				break;
 		}
 	}
 
@@ -842,14 +882,14 @@ int main(int argc, char **argv)
 			if (optind != argc - 2)
 				goto usage_out;
 
-			ret = uxc_set(argv[optind + 1], NULL, true, false, NULL);
+			ret = uxc_set(argv[optind + 1], NULL, true, false, NULL, NULL, NULL);
 			break;
 
 		case CMD_DISABLE:
 			if (optind != argc - 2)
 				goto usage_out;
 
-			ret = uxc_set(argv[optind + 1], NULL, false, false, NULL);
+			ret = uxc_set(argv[optind + 1], NULL, false, false, NULL, NULL, NULL);
 			break;
 
 		case CMD_DELETE:
@@ -864,7 +904,7 @@ int main(int argc, char **argv)
 				goto usage_out;
 
 			if (bundle) {
-				ret = uxc_set(argv[optind + 1], bundle, autostart, true, pidfile);
+				ret = uxc_set(argv[optind + 1], bundle, autostart, true, pidfile, tmprwsize, writepath);
 				if (ret)
 					goto runtime_out;
 
@@ -884,8 +924,6 @@ usage_out:
 	usage();
 runtime_out:
 	runtime_free();
-state_out:
-	blob_buf_free(&state);
 conf_out:
 	blob_buf_free(&conf);
 out:
