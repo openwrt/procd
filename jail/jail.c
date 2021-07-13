@@ -891,7 +891,7 @@ static int apply_rlimits(void)
 	return 0;
 }
 
-#define MAX_ENVP	16
+#define MAX_ENVP	64
 static char** build_envp(const char *seccomp, char **ocienvp)
 {
 	static char *envp[MAX_ENVP];
