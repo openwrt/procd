@@ -1325,6 +1325,8 @@ static const struct blobmsg_policy oci_root_policy[] = {
 static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 {
 	static char extroot[PATH_MAX] = { 0 };
+	char buf[PATH_MAX];
+	ssize_t len;
 	struct blob_attr *tb[__OCI_ROOT_MAX];
 	char *cur;
 	char *root_path;
@@ -1348,6 +1350,21 @@ static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 	}
 
 	strncat(extroot, root_path, PATH_MAX - (strlen(extroot) + 1));
+
+	/* follow symbolic link(s) */
+	while ((len = readlink(extroot, buf, sizeof(buf)-1)) != -1) {
+		buf[len] = '\0';
+		if (buf[0] != '/') {
+			cur = strrchr(extroot, '/');
+			if (!cur)
+				return ENOTDIR;
+
+			*(++cur) = '\0';
+			strncat(extroot, buf, sizeof(extroot)-1);
+		} else {
+			strncpy(extroot, buf, sizeof(extroot)-1);
+		}
+	}
 
 	opts.extroot = extroot;
 
