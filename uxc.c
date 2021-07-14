@@ -65,11 +65,12 @@ enum uxc_cmd {
 	CMD_UNKNOWN
 };
 
-#define OPT_ARGS "ab:fp:t:vVw:"
+#define OPT_ARGS "ab:fm:p:t:vVw:"
 static struct option long_options[] = {
 	{"autostart",		no_argument,		0,	'a'	},
 	{"bundle",		required_argument,	0,	'b'	},
 	{"force",		no_argument,		0,	'f'	},
+	{"mounts",		required_argument,	0,	'm'	},
 	{"pid-file",		required_argument,	0,	'p'	},
 	{"temp-overlay-size",	required_argument,	0,	't'	},
 	{"write-overlay-path",	required_argument,	0,	'w'	},
@@ -80,13 +81,19 @@ static struct option long_options[] = {
 
 AVL_TREE(runtime, avl_strcmp, false, NULL);
 static struct blob_buf conf;
+static struct blob_attr *blockinfo;
 static struct ubus_context *ctx;
 
 static int usage(void) {
 	printf("syntax: uxc <command> [parameters ...]\n");
 	printf("commands:\n");
 	printf("\tlist\t\t\t\t\t\tlist all configured containers\n");
-	printf("\tcreate <conf> [--bundle <path>] [--autostart]\tcreate <conf> for OCI bundle at <path>\n");
+	printf("\tcreate <conf>\t\t\t\t\t(re-)create <conf>\n");
+	printf("                [--bundle <path>]\t\t\tOCI bundle at <path>\n");
+	printf("                [--autostart]\t\t\t\tstart on boot\n");
+	printf("                [--temp-overlay-size size]\t\tuse tmpfs overlay with {size}\n");
+	printf("                [--write-overlay-path path]\t\tuse overlay on {path}\n");
+	printf("                [--volumes v1,v2,...,vN]\t\trequire volumes to be available\n");
 	printf("\tstart <conf>\t\t\t\t\tstart container <conf>\n");
 	printf("\tstate <conf>\t\t\t\t\tget state of container <conf>\n");
 	printf("\tkill <conf> [<signal>]\t\t\t\tsend signal to container <conf>\n");
@@ -104,6 +111,7 @@ enum {
 	CONF_PIDFILE,
 	CONF_TEMP_OVERLAY_SIZE,
 	CONF_WRITE_OVERLAY_PATH,
+	CONF_VOLUMES,
 	__CONF_MAX,
 };
 
@@ -115,6 +123,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_PIDFILE] = { .name = "pidfile", .type = BLOBMSG_TYPE_STRING },
 	[CONF_TEMP_OVERLAY_SIZE] = { .name = "temp-overlay-size", .type = BLOBMSG_TYPE_STRING },
 	[CONF_WRITE_OVERLAY_PATH] = { .name = "write-overlay-path", .type = BLOBMSG_TYPE_STRING },
+	[CONF_VOLUMES] = { .name = "volumes", .type = BLOBMSG_TYPE_ARRAY },
 };
 
 static int conf_load(void)
@@ -570,7 +579,7 @@ static int uxc_kill(char *name, int signal)
 }
 
 
-static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfile, char *_tmprwsize, char *_writepath)
+static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfile, char *_tmprwsize, char *_writepath, char *requiredmounts)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -580,7 +589,8 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	char *keeppath = NULL;
 	char *tmprwsize = _tmprwsize;
 	char *writepath = _writepath;
-
+	char *curvol, *tmp, *mnttok;
+	void *mntarr;
 	int f;
 	struct stat sb;
 
@@ -647,6 +657,21 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	if (writepath)
 		blobmsg_add_string(&req, "write-overlay-path", writepath);
 
+	if (!add && tb[CONF_VOLUMES])
+		blobmsg_add_blob(&req, tb[CONF_VOLUMES]);
+
+	if (add && requiredmounts) {
+		mntarr = blobmsg_open_array(&req, "volumes");
+		for (mnttok = requiredmounts; ; mnttok = NULL) {
+			curvol = strtok_r(mnttok, ",;", &tmp);
+			if (!curvol)
+				break;
+
+			blobmsg_add_string(&req, NULL, curvol);
+		}
+		blobmsg_close_array(&req, mntarr);
+	}
+
 	dprintf(f, "%s\n", blobmsg_format_json_indent(req.head, true, 0));
 
 	if (!add)
@@ -657,16 +682,87 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	return 0;
 }
 
+enum {
+	BLOCK_INFO_DEVICE,
+	BLOCK_INFO_UUID,
+	BLOCK_INFO_TARGET,
+	BLOCK_INFO_TYPE,
+	BLOCK_INFO_MOUNT,
+	__BLOCK_INFO_MAX,
+};
+
+static const struct blobmsg_policy block_info_policy[__BLOCK_INFO_MAX] = {
+	[BLOCK_INFO_DEVICE] = { .name = "device", .type = BLOBMSG_TYPE_STRING },
+	[BLOCK_INFO_UUID] = { .name = "uuid", .type = BLOBMSG_TYPE_STRING },
+	[BLOCK_INFO_TARGET] = { .name = "target", .type = BLOBMSG_TYPE_STRING },
+	[BLOCK_INFO_TYPE] = { .name = "type", .type = BLOBMSG_TYPE_STRING },
+	[BLOCK_INFO_MOUNT] = { .name = "mount", .type = BLOBMSG_TYPE_STRING },
+};
+
+
+/* check if device 'devname' is mounted according to blockd */
+static int checkblock(char *uuid)
+{
+	struct blob_attr *tb[__BLOCK_INFO_MAX];
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, blockinfo, rem) {
+		blobmsg_parse(block_info_policy, __BLOCK_INFO_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+
+		if (!tb[BLOCK_INFO_UUID] || !tb[BLOCK_INFO_MOUNT])
+			continue;
+
+		if (!strcmp(uuid, blobmsg_get_string(tb[BLOCK_INFO_UUID])))
+			return 0;
+	}
+
+	return 1;
+}
+
+/* check status of each required volume */
+static int checkvolumes(struct blob_attr *volumes)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, volumes, rem) {
+		if (checkblock(blobmsg_get_string(cur)))
+			return 1;
+	}
+
+	return 0;
+}
+
+static void block_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	blockinfo = blob_memdup(blobmsg_data(msg));
+}
+
 static int uxc_boot(void)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	int rem, ret = 0;
 	char *name;
+	unsigned int id;
+
+	ret = ubus_lookup_id(ctx, "block", &id);
+	if (ret)
+		return ENOENT;
+
+	ret = ubus_invoke(ctx, id, "info", NULL, block_cb, NULL, 3000);
+	if (ret)
+		return ENXIO;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
 		if (!tb[CONF_NAME] || !tb[CONF_PATH] || !tb[CONF_AUTOSTART] || !blobmsg_get_bool(tb[CONF_AUTOSTART]))
 			continue;
+
+		/* make sure all volumes are ready before starting */
+		if (tb[CONF_VOLUMES])
+			if (checkvolumes(tb[CONF_VOLUMES]))
+				continue;
 
 		name = strdup(blobmsg_get_string(tb[CONF_NAME]));
 		ret += uxc_create(name, true);
@@ -763,6 +859,7 @@ int main(int argc, char **argv)
 	char *pidfile = NULL;
 	char *tmprwsize = NULL;
 	char *writepath = NULL;
+	char *requiredmounts = NULL;
 	bool autostart = false;
 	bool force = false;
 	int signal = SIGTERM;
@@ -820,6 +917,10 @@ int main(int argc, char **argv)
 
 			case 'w':
 				writepath = optarg;
+				break;
+
+			case 'm':
+				requiredmounts = optarg;
 				break;
 		}
 	}
@@ -882,14 +983,14 @@ int main(int argc, char **argv)
 			if (optind != argc - 2)
 				goto usage_out;
 
-			ret = uxc_set(argv[optind + 1], NULL, true, false, NULL, NULL, NULL);
+			ret = uxc_set(argv[optind + 1], NULL, true, false, NULL, NULL, NULL, NULL);
 			break;
 
 		case CMD_DISABLE:
 			if (optind != argc - 2)
 				goto usage_out;
 
-			ret = uxc_set(argv[optind + 1], NULL, false, false, NULL, NULL, NULL);
+			ret = uxc_set(argv[optind + 1], NULL, false, false, NULL, NULL, NULL, NULL);
 			break;
 
 		case CMD_DELETE:
@@ -904,7 +1005,7 @@ int main(int argc, char **argv)
 				goto usage_out;
 
 			if (bundle) {
-				ret = uxc_set(argv[optind + 1], bundle, autostart, true, pidfile, tmprwsize, writepath);
+				ret = uxc_set(argv[optind + 1], bundle, autostart, true, pidfile, tmprwsize, writepath, requiredmounts);
 				if (ret)
 					goto runtime_out;
 
