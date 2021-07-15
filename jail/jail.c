@@ -641,6 +641,14 @@ static int build_jail_fs(void)
 	}
 
 	if (opts.extroot) {
+		/* use stat to trigger autofs mount */
+		DEBUG("mounting extroot from %s\n", opts.extroot);
+		int rootdirfd = open(opts.extroot, O_RDONLY | O_DIRECTORY);
+		if (rootdirfd == -1) {
+			ERROR("extroot %s open failed %m\n", opts.extroot);
+			return -1;
+		}
+		close(rootdirfd);
 		if (mount(opts.extroot, jail_root, "bind", MS_BIND, NULL)) {
 			ERROR("extroot mount failed %m\n");
 			return -1;
