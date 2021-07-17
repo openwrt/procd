@@ -621,6 +621,7 @@ static void enter_jail_fs(void);
 static int build_jail_fs(void)
 {
 	char *overlaydir = NULL;
+	int ret;
 
 	old_umask = umask(0);
 
@@ -641,7 +642,7 @@ static int build_jail_fs(void)
 	}
 
 	if (opts.extroot) {
-		/* use stat to trigger autofs mount */
+		/* use open() to trigger autofs mount */
 		DEBUG("mounting extroot from %s\n", opts.extroot);
 		int rootdirfd = open(opts.extroot, O_RDONLY | O_DIRECTORY);
 		if (rootdirfd == -1) {
@@ -674,14 +675,23 @@ static int build_jail_fs(void)
 			ERROR("failed to mount tmpfs for overlay (size=%s)\n", opts.tmpoverlaysize);
 			return -1;
 		}
-		overlaydir = tmpovdir;
+		overlaydir = strdup(tmpovdir);
+		if (!overlaydir)
+			return -1;
 	}
 
-	if (opts.overlaydir)
-		overlaydir = opts.overlaydir;
+	if (opts.overlaydir) {
+		overlaydir = realpath(opts.overlaydir, NULL);
+		if (!overlaydir)
+			return errno;
+	}
 
-	if (overlaydir)
-		mount_overlay(jail_root, overlaydir);
+	if (overlaydir) {
+		ret = mount_overlay(jail_root, overlaydir);
+		free(overlaydir);
+		if (ret)
+			return ret;
+	}
 
 	if (chdir(jail_root)) {
 		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
@@ -1332,9 +1342,7 @@ static const struct blobmsg_policy oci_root_policy[] = {
 
 static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 {
-	static char extroot[PATH_MAX] = { 0 };
-	char buf[PATH_MAX];
-	ssize_t len;
+	char extroot[PATH_MAX] = { 0 };
 	struct blob_attr *tb[__OCI_ROOT_MAX];
 	char *cur;
 	char *root_path;
@@ -1360,21 +1368,9 @@ static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 	strncat(extroot, root_path, PATH_MAX - (strlen(extroot) + 1));
 
 	/* follow symbolic link(s) */
-	while ((len = readlink(extroot, buf, sizeof(buf)-1)) != -1) {
-		buf[len] = '\0';
-		if (buf[0] != '/') {
-			cur = strrchr(extroot, '/');
-			if (!cur)
-				return ENOTDIR;
-
-			*(++cur) = '\0';
-			strncat(extroot, buf, sizeof(extroot)-1);
-		} else {
-			strncpy(extroot, buf, sizeof(extroot)-1);
-		}
-	}
-
-	opts.extroot = extroot;
+	opts.extroot = realpath(extroot, NULL);
+	if (!opts.extroot)
+		return errno;
 
 	if (tb[OCI_ROOT_READONLY])
 		opts.ronly = blobmsg_get_bool(tb[OCI_ROOT_READONLY]);
