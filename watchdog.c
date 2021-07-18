@@ -93,6 +93,35 @@ static int watchdog_set_drv_timeout(void)
 	return ioctl(wdt_fd, WDIOC_SETTIMEOUT, &wdt_drv_timeout);
 }
 
+static void watchdog_print_status(void)
+{
+	struct watchdog_info wdt_info;
+	int bootstatus;
+
+	if (wdt_fd < 0)
+		return;
+
+	if (ioctl(wdt_fd, WDIOC_GETSUPPORT, &wdt_info)) {
+		DEBUG(2, "Watchdog GETSUPPORT failed\n");
+		return;
+	}
+
+	if (!(wdt_info.options & WDIOF_CARDRESET)) {
+		DEBUG(2, "Watchdog does not have CARDRESET support\n");
+		return;
+	}
+
+	if (ioctl(wdt_fd, WDIOC_GETBOOTSTATUS, &bootstatus)) {
+		DEBUG(2, "Watchdog GETBOOTSTATUS failed\n");
+		return;
+	}
+
+	if (bootstatus & WDIOF_CARDRESET)
+		LOG("Watchdog has previously reset the system\n");
+	else
+		DEBUG(2, "Watchdog did not previously reset the system\n");
+}
+
 void watchdog_set_magicclose(bool val)
 {
 	wdt_magicclose = val;
@@ -170,6 +199,8 @@ void watchdog_init(int preinit)
 	watchdog_timeout_cb(&wdt_timeout);
 
 	DEBUG(4, "Opened watchdog with timeout %ds\n", watchdog_timeout(0));
+
+	watchdog_print_status();
 }
 
 
