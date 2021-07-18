@@ -270,6 +270,8 @@ static void free_opts(bool parent) {
 	free(opts.uidmap);
 	free(opts.gidmap);
 	free(opts.annotations);
+	free(opts.extroot);
+	free(opts.overlaydir);
 	free_hooklist(opts.hooks.createRuntime);
 	free_hooklist(opts.hooks.createContainer);
 	free_hooklist(opts.hooks.startContainer);
@@ -642,14 +644,6 @@ static int build_jail_fs(void)
 	}
 
 	if (opts.extroot) {
-		/* use open() to trigger autofs mount */
-		DEBUG("mounting extroot from %s\n", opts.extroot);
-		int rootdirfd = open(opts.extroot, O_RDONLY | O_DIRECTORY);
-		if (rootdirfd == -1) {
-			ERROR("extroot %s open failed %m\n", opts.extroot);
-			return -1;
-		}
-		close(rootdirfd);
 		if (mount(opts.extroot, jail_root, "bind", MS_BIND, NULL)) {
 			ERROR("extroot mount failed %m\n");
 			return -1;
@@ -675,20 +669,14 @@ static int build_jail_fs(void)
 			ERROR("failed to mount tmpfs for overlay (size=%s)\n", opts.tmpoverlaysize);
 			return -1;
 		}
-		overlaydir = strdup(tmpovdir);
-		if (!overlaydir)
-			return -1;
+		overlaydir = tmpovdir;
 	}
 
-	if (opts.overlaydir) {
-		overlaydir = realpath(opts.overlaydir, NULL);
-		if (!overlaydir)
-			return errno;
-	}
+	if (opts.overlaydir)
+		overlaydir = opts.overlaydir;
 
 	if (overlaydir) {
 		ret = mount_overlay(jail_root, overlaydir);
-		free(overlaydir);
 		if (ret)
 			return ret;
 	}
@@ -2429,6 +2417,18 @@ jail_writepid(pid_t pid)
 	return 0;
 }
 
+static int checkpath(const char *path)
+{
+	int dirfd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (dirfd == -1) {
+		ERROR("path %s open failed %m\n", path);
+		return -1;
+	}
+	close(dirfd);
+
+	return 0;
+}
+
 static struct ubus_method container_methods[] = {
 	UBUS_METHOD_NOARG("start", handle_start),
 	UBUS_METHOD_NOARG("state", handle_state),
@@ -2492,7 +2492,7 @@ int main(int argc, char **argv)
 			opts.namespace |= CLONE_NEWCGROUP;
 			break;
 		case 'R':
-			opts.extroot = optarg;
+			opts.extroot = realpath(optarg, NULL);
 			break;
 		case 's':
 			opts.namespace |= CLONE_NEWNS;
@@ -2541,7 +2541,7 @@ int main(int argc, char **argv)
 			opts.group = optarg;
 			break;
 		case 'O':
-			opts.overlaydir = optarg;
+			opts.overlaydir = realpath(optarg, NULL);
 			break;
 		case 'T':
 			opts.tmpoverlaysize = optarg;
@@ -2624,6 +2624,18 @@ int main(int argc, char **argv)
 
 	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
 		ERROR("size parameter too long: \"%s\"\n", opts.tmpoverlaysize);
+		ret=-1;
+		goto errout;
+	}
+
+	if (opts.extroot && checkpath(opts.extroot)) {
+		ERROR("invalid rootfs path '%s'", opts.extroot);
+		ret=-1;
+		goto errout;
+	}
+
+	if (opts.overlaydir && checkpath(opts.overlaydir)) {
+		ERROR("invalid rootfs overlay path '%s'", opts.overlaydir);
 		ret=-1;
 		goto errout;
 	}
