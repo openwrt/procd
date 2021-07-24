@@ -742,6 +742,7 @@ static void block_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 static int uxc_boot(void)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
+	struct runtime_state *s;
 	int rem, ret = 0;
 	char *name;
 	unsigned int id;
@@ -757,6 +758,10 @@ static int uxc_boot(void)
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
 		if (!tb[CONF_NAME] || !tb[CONF_PATH] || !tb[CONF_AUTOSTART] || !blobmsg_get_bool(tb[CONF_AUTOSTART]))
+			continue;
+
+		s = avl_find_element(&runtime, blobmsg_get_string(tb[CONF_NAME]), s, avl);
+		if (s)
 			continue;
 
 		/* make sure all volumes are ready before starting */
