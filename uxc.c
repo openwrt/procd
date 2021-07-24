@@ -82,6 +82,7 @@ static struct option long_options[] = {
 AVL_TREE(runtime, avl_strcmp, false, NULL);
 static struct blob_buf conf;
 static struct blob_attr *blockinfo;
+static struct blob_attr *fstabinfo;
 static struct ubus_context *ctx;
 
 static int usage(void) {
@@ -701,7 +702,7 @@ static const struct blobmsg_policy block_info_policy[__BLOCK_INFO_MAX] = {
 
 
 /* check if device 'devname' is mounted according to blockd */
-static int checkblock(char *uuid)
+static int checkblock(const char *uuid)
 {
 	struct blob_attr *tb[__BLOCK_INFO_MAX];
 	struct blob_attr *cur;
@@ -720,6 +721,52 @@ static int checkblock(char *uuid)
 	return 1;
 }
 
+enum {
+	UCI_FSTAB_UUID,
+	UCI_FSTAB_ANONYMOUS,
+	__UCI_FSTAB_MAX,
+};
+
+static const struct blobmsg_policy uci_fstab_policy[__UCI_FSTAB_MAX] = {
+	[UCI_FSTAB_UUID] = { .name = "uuid", .type = BLOBMSG_TYPE_STRING },
+	[UCI_FSTAB_ANONYMOUS] = { .name = ".anonymous", .type = BLOBMSG_TYPE_BOOL },
+};
+
+static const char *resolveuuid(const char *volname)
+{
+	struct blob_attr *tb[__UCI_FSTAB_MAX];
+	struct blob_attr *cur;
+	const char *mntname;
+	char *tmpvolname, *replc;
+	int rem, res;
+
+	blobmsg_for_each_attr(cur, fstabinfo, rem) {
+		blobmsg_parse(uci_fstab_policy, __UCI_FSTAB_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+
+		if (!tb[UCI_FSTAB_UUID])
+			continue;
+
+		if (tb[UCI_FSTAB_ANONYMOUS] && blobmsg_get_bool(tb[UCI_FSTAB_ANONYMOUS]))
+			continue;
+
+		mntname = blobmsg_name(cur);
+		if (!mntname)
+			continue;
+
+		tmpvolname = strdup(volname);
+		while ((replc = strchr(tmpvolname, '-')))
+			*replc = '_';
+
+		res = strcmp(tmpvolname, mntname);
+		free(tmpvolname);
+
+		if (!res)
+			return blobmsg_get_string(tb[UCI_FSTAB_UUID]);
+	};
+
+	return volname;
+};
+
 /* check status of each required volume */
 static int checkvolumes(struct blob_attr *volumes)
 {
@@ -727,7 +774,7 @@ static int checkvolumes(struct blob_attr *volumes)
 	int rem;
 
 	blobmsg_for_each_attr(cur, volumes, rem) {
-		if (checkblock(blobmsg_get_string(cur)))
+		if (checkblock(resolveuuid(blobmsg_get_string(cur))))
 			return 1;
 	}
 
@@ -739,10 +786,16 @@ static void block_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 	blockinfo = blob_memdup(blobmsg_data(msg));
 }
 
+static void fstab_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	fstabinfo = blob_memdup(blobmsg_data(msg));
+}
+
 static int uxc_boot(void)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct runtime_state *s;
+	static struct blob_buf req;
 	int rem, ret = 0;
 	char *name;
 	unsigned int id;
@@ -752,6 +805,18 @@ static int uxc_boot(void)
 		return ENOENT;
 
 	ret = ubus_invoke(ctx, id, "info", NULL, block_cb, NULL, 3000);
+	if (ret)
+		return ENXIO;
+
+	ret = ubus_lookup_id(ctx, "uci", &id);
+	if (ret)
+		return ENOENT;
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "config", "fstab");
+	blobmsg_add_string(&req, "type", "mount");
+
+	ret = ubus_invoke(ctx, id, "get", req.head, fstab_cb, NULL, 3000);
 	if (ret)
 		return ENXIO;
 
