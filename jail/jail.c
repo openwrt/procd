@@ -536,7 +536,10 @@ static int apply_sysctl(const char *jail_root)
 			ERROR("sysctl: can't open %s\n", fname);
 			return errno;
 		}
-		write(f, (*cur)->value, strlen((*cur)->value));
+		if (write(f, (*cur)->value, strlen((*cur)->value)) < 0) {
+			ERROR("sysctl: write to %s\n", fname);
+			return errno;
+		}
 
 		free(fname);
 		close(f);
