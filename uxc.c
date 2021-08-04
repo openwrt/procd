@@ -248,7 +248,9 @@ static void get_ocistate(struct blob_attr **ocistate, const char *name)
 	int ret;
 	*ocistate = NULL;
 
-	asprintf(&objname, "container.%s", name);
+	if (asprintf(&objname, "container.%s", name) == -1)
+		exit(ENOMEM);
+
 	ret = ubus_lookup_id(ctx, objname, &id);
 	free(objname);
 	if (ret)
@@ -526,7 +528,9 @@ static int uxc_start(const char *name)
 	char *objname;
 	unsigned int id;
 
-	asprintf(&objname, "container.%s", name);
+	if (asprintf(&objname, "container.%s", name) == -1)
+		return ENOMEM;
+
 	if (ubus_lookup_id(ctx, objname, &id))
 		return ENOENT;
 
@@ -567,7 +571,9 @@ static int uxc_kill(char *name, int signal)
 	blobmsg_add_u32(&req, "signal", signal);
 	blobmsg_add_string(&req, "name", name);
 
-	asprintf(&objname, "container.%s", name);
+	if (asprintf(&objname, "container.%s", name) == -1)
+		return ENOMEM;
+
 	ret = ubus_lookup_id(ctx, objname, &id);
 	free(objname);
 	if (ret)
@@ -629,7 +635,7 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	if (ret && errno != EEXIST)
 		return ret;
 
-	if (asprintf(&fname, "%s/%s.json", UXC_CONFDIR, name) < 1)
+	if (asprintf(&fname, "%s/%s.json", UXC_CONFDIR, name) == -1)
 		return ENOMEM;
 
 	f = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
