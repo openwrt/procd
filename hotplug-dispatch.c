@@ -123,6 +123,7 @@ static void hotplug_exec(struct uloop_timeout *t)
 		exit(execve(exec_argv[0], exec_argv, pc->envp));
 	} else if (pc->process.pid < 0) {
 		/* fork error */
+		free(script);
 		hotplug_free(pc);
 		return;
 	}
@@ -187,6 +188,7 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 	size_t envz = 0;
 	struct hotplug_process *pc;
 	bool async = true;
+	int err = UBUS_STATUS_UNKNOWN_ERROR;
 
 	blobmsg_parse(hotplug_policy, __HOTPLUG_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
@@ -208,6 +210,7 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 		}
 		envle->avl.key = envle->env;
 		if (avl_insert(&env, &envle->avl) == -1) {
+			free(envle->env);
 			free(envle);
 			goto err_envle;
 		}
@@ -261,6 +264,12 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 		}
 	}
 
+	/* synchronous calls are unsupported for now */
+	if (!async) {
+		err = UBUS_STATUS_NOT_SUPPORTED;
+		goto err_envle;
+	}
+
 	/* allocating new environment */
 	avl_for_each_element(&env, envle, avl)
 		++envz;
@@ -277,18 +286,6 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 		free(envle);
 	}
 
-	/* glob'ing for hotplug scripts */
-	if (asprintf(&globstr, "%s/%s/*", HOTPLUG_BASEDIR, subsys) == -1) {
-		env_free(envp);
-		return UBUS_STATUS_UNKNOWN_ERROR;
-	}
-
-	/* synchronous calls are unsupported for now */
-	if (!async) {
-		env_free(envp);
-		return UBUS_STATUS_NOT_SUPPORTED;
-	}
-
 	pc = calloc(1, sizeof(struct hotplug_process));
 	if (!pc) {
 		env_free(envp);
@@ -298,6 +295,12 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 	pc->envp = envp;
 	pc->cnt = 0;
 	pc->ubus = obj;
+
+	/* glob'ing for hotplug scripts */
+	if (asprintf(&globstr, "%s/%s/*", HOTPLUG_BASEDIR, subsys) == -1) {
+		env_free(envp);
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	}
 
 	if (glob(globstr, GLOB_DOOFFS, NULL, &pc->globbuf)) {
 		free(globstr);
@@ -321,7 +324,7 @@ err_envle:
 		free(envle);
 	}
 
-	return UBUS_STATUS_UNKNOWN_ERROR;
+	return err;
 }
 
 static const struct ubus_method hotplug_methods[] = {
