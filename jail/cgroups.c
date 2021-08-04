@@ -22,7 +22,6 @@
 
 #define _GNU_SOURCE
 
-#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -73,7 +72,9 @@ static void cgroups_set(const char *key, const char *val)
 	valp = avl_find_element(&cgvals, key, valp, avl);
 	if (!valp) {
 		valp = malloc(sizeof(struct cgval));
-		assert(valp != NULL);
+		if (!valp)
+			exit(ENOMEM);
+
 		valp->avl.key = strdup(key);
 		avl_insert(&cgvals, &valp->avl);
 	} else {
@@ -168,7 +169,8 @@ void cgroups_apply(pid_t pid)
 	*ent = '\0';
 
 	ent = malloc(maxlen);
-	assert(ent != 0);
+	if (!ent)
+		exit(ENOMEM);
 
 	DEBUG("recursively applying cgroup.subtree_control = \"%s\"\n", subtree_control);
 	cdir = &cgroup_path[strlen(CGROUP_ROOT) - 2];
@@ -176,9 +178,16 @@ void cgroups_apply(pid_t pid)
 		*cdir = '\0';
 		snprintf(ent, maxlen, "%s/cgroup.subtree_control", cgroup_path);
 		DEBUG(" * %s\n", ent);
-		fd = open(ent, O_WRONLY);
-		assert(fd != -1);
-		write(fd, subtree_control, strlen(subtree_control));
+		if ((fd = open(ent, O_WRONLY)) == -1) {
+			ERROR("can't open %s: %m\n", ent);
+			continue;
+		}
+
+		if (write(fd, subtree_control, strlen(subtree_control)) == -1) {
+			ERROR("can't write to %s: %m\n", ent);
+			continue;
+		}
+
 		close(fd);
 		*cdir = '/';
 	}
@@ -308,7 +317,9 @@ static struct iomax_line *get_iomax_line(struct avl_tree *iomax, uint64_t major,
 	l = avl_find_element(iomax, &d, l, avl);
 	if (!l) {
 		l = malloc(sizeof(struct iomax_line));
-		assert(l != NULL);
+		if (!l)
+			exit(ENOMEM);
+
 		l->dev.major = d.major;
 		l->dev.minor = d.minor;
 		l->avl.key = &l->dev;
@@ -356,7 +367,9 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 		++numweightstrs;
 
 	weightstrs = calloc(numweightstrs + 1, sizeof(char *));
-	assert(weightstrs != 0);
+	if (!weightstrs)
+		exit(ENOMEM);
+
 	numweightstrs = 0;
 
 	if (weight > -1)
@@ -404,7 +417,8 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 			strtotlen += strlen(*(curstr++)) + 1;
 
 		weightstr = calloc(strtotlen, sizeof(char));
-		assert(weightstr != 0);
+		if (!weightstr)
+			exit(ENOMEM);
 
 		curstr = weightstrs;
 		while (*curstr) {
@@ -496,7 +510,9 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 		return 0;
 
 	iomaxstrs = calloc(numiomaxstrs + 1, sizeof(char *));
-	assert(iomaxstrs != 0);
+	if (!iomaxstrs)
+		exit(ENOMEM);
+
 	numiomaxstrs = 0;
 
 	avl_for_each_element(&iomax, curiomax, avl) {
@@ -537,7 +553,9 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 			strtotlen += strlen(*(curstr++)) + 1; /* +1 accounts for \n at end of line */
 
 		iomaxstr = calloc(strtotlen, sizeof(char));
-		assert(iomaxstr != 0);
+		if (!iomaxstr)
+			exit(ENOMEM);
+
 		curstr = iomaxstrs;
 
 		while (*curstr) {

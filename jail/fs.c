@@ -166,7 +166,9 @@ static int _add_mount(const char *source, const char *target, const char *filesy
 
 	struct mount *m;
 	m = calloc(1, sizeof(struct mount));
-	assert(m != NULL);
+	if (!m)
+		return ENOMEM;
+
 	m->avl.key = m->target = strdup(target);
 	if (source) {
 		if (source != (void*)(-1))
