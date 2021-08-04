@@ -607,11 +607,11 @@ only_default_devices:
 	}
 
 	/* Dev symbolic links as defined in OCI spec */
-	symlink("/dev/pts/ptmx", "/dev/ptmx");
-	symlink("/proc/self/fd", "/dev/fd");
-	symlink("/proc/self/fd/0", "/dev/stdin");
-	symlink("/proc/self/fd/1", "/dev/stdout");
-	symlink("/proc/self/fd/2", "/dev/stderr");
+	(void) symlink("/dev/pts/ptmx", "/dev/ptmx");
+	(void) symlink("/proc/self/fd", "/dev/fd");
+	(void) symlink("/proc/self/fd/0", "/dev/stdin");
+	(void) symlink("/proc/self/fd/1", "/dev/stdout");
+	(void) symlink("/proc/self/fd/2", "/dev/stderr");
 
 	return 0;
 }
@@ -704,7 +704,7 @@ static int build_jail_fs(void)
 		if (overlaydir)
 			unlink(jaillink);
 
-		symlink("../dev/resolv.conf.d/resolv.conf.auto", jaillink);
+		(void) symlink("../dev/resolv.conf.d/resolv.conf.auto", jaillink);
 	}
 
 	run_hooks(opts.hooks.createContainer, enter_jail_fs);
