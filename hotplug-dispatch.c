@@ -16,7 +16,6 @@
 #include <sys/inotify.h>
 #include <sys/types.h>
 
-#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <glob.h>
@@ -199,10 +198,20 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 	/* first adding existing environment to avl_tree */
 	while (*tmpenv) {
 		envle = calloc(1, sizeof(struct envlist));
-		assert(envle != NULL);
+		if (!envle)
+			goto err_envle;
+
 		envle->env = strdup(*tmpenv);
+		if (!envle->env) {
+			free(envle);
+			goto err_envle;
+		}
 		envle->avl.key = envle->env;
-		avl_insert(&env, &envle->avl);
+		if (avl_insert(&env, &envle->avl) == -1) {
+			free(envle);
+			goto err_envle;
+		}
+
 		++tmpenv;
 	}
 
@@ -236,14 +245,20 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 			async = false;
 
 		envle = calloc(1, sizeof(struct envlist));
-		assert(envle != NULL);
+		if (!envle)
+			goto err_envle;
+
 		envle->env = strdup(enve);
+		if (!envle->env) {
+			free(envle);
+			goto err_envle;
+		}
 		envle->avl.key = envle->env;
 		if (avl_insert(&env, &envle->avl)) {
+			/* do not override existing env values, just skip */
 			free((void*)envle->env);
 			free(envle);
 		}
-		++tmpenv;
 	}
 
 	/* allocating new environment */
@@ -251,7 +266,8 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 		++envz;
 
 	envp = calloc(envz + 1, sizeof(char *));
-	assert(envp != NULL);
+	if (!envp)
+		goto err_envle;
 
 	/* populating new environment */
 	envz = 0;
@@ -274,7 +290,10 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 	}
 
 	pc = calloc(1, sizeof(struct hotplug_process));
-	assert(pc != NULL);
+	if (!pc) {
+		env_free(envp);
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	}
 	pc->timeout.cb = hotplug_exec;
 	pc->envp = envp;
 	pc->cnt = 0;
@@ -292,6 +311,17 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 	uloop_timeout_set(&pc->timeout, 50);
 
 	return UBUS_STATUS_OK;
+
+err_envle:
+	avl_for_each_element_safe(&env, envle, avl, p) {
+		if (envle->env)
+			free(envle->env);
+
+		avl_delete(&env, &envle->avl);
+		free(envle);
+	}
+
+	return UBUS_STATUS_UNKNOWN_ERROR;
 }
 
 static const struct ubus_method hotplug_methods[] = {
@@ -408,10 +438,18 @@ void ubus_init_hotplug(struct ubus_context *newctx)
 	}
 	fd_inotify_read.fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	fd_inotify_read.cb = inotify_read_handler;
-	assert(fd_inotify_read.fd != -1);
+	if (fd_inotify_read.fd == -1) {
+		printf("failed to initialize inotify handler for %s\n", HOTPLUG_BASEDIR);
+		return;
+	}
 
 	inotify_buffer = calloc(1, INOTIFY_SZ);
-	assert(inotify_buffer != NULL);
-	inotify_add_watch(fd_inotify_read.fd, HOTPLUG_BASEDIR, IN_CREATE | IN_MOVED_TO | IN_DELETE | IN_MOVED_FROM | IN_ONLYDIR);
+	if (!inotify_buffer)
+		return;
+
+	if (inotify_add_watch(fd_inotify_read.fd, HOTPLUG_BASEDIR,
+		IN_CREATE | IN_MOVED_TO | IN_DELETE | IN_MOVED_FROM | IN_ONLYDIR) == -1)
+		return;
+
 	uloop_fd_add(&fd_inotify_read, ULOOP_READ);
 }
