@@ -105,7 +105,11 @@ static void hotplug_exec(struct uloop_timeout *t)
 		return;
 	}
 
-	asprintf(&script, ". /lib/functions.sh\n. %s\n", pc->globbuf.gl_pathv[pc->cnt++]);
+	if (asprintf(&script, ". /lib/functions.sh\n. %s\n", pc->globbuf.gl_pathv[pc->cnt++]) == -1) {
+		pc->ret = ENOMEM;
+		return;
+	}
+
 	/* prepare for execve() */
 	exec_argv[0] = "/bin/sh";
 	exec_argv[1] = "-c";
@@ -302,7 +306,8 @@ static void add_subsystem(int nlen, char *newname)
 	struct hotplug_subsys *nh = calloc(1, sizeof(struct hotplug_subsys));
 	char *name;
 
-	asprintf(&name, "%s%.*s", HOTPLUG_OBJECT_PREFIX, nlen, newname);
+	if (asprintf(&name, "%s%.*s", HOTPLUG_OBJECT_PREFIX, nlen, newname) == -1)
+		exit(ENOMEM);
 
 	/* prepare and add ubus object */
 	nh->ubus.name = name;
