@@ -19,8 +19,9 @@
 
 #include <assert.h>
 #include <linux/bpf.h>
+#ifdef __GLIBC__
 #include <sys/cdefs.h>
-#ifndef __GLIBC__
+#else
 #include <sys/reg.h>
 #endif
 #include <sys/syscall.h>
