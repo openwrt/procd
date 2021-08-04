@@ -2816,7 +2816,10 @@ static void post_main(struct uloop_timeout *t)
 				ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
 				free_and_exit(EXIT_FAILURE);
 			}
-			seteuid(opts.root_map_uid);
+			if (seteuid(opts.root_map_uid)) {
+				ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
+				free_and_exit(EXIT_FAILURE);
+			}
 		}
 
 		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | (opts.namespace & (~CLONE_NEWCGROUP)), NULL);
@@ -2830,7 +2833,11 @@ static void post_main(struct uloop_timeout *t)
 
 		uloop_process_add(&jail_process);
 		jail_running = 1;
-		seteuid(0);
+		if (seteuid(0)) {
+			ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
+			free_and_exit(EXIT_FAILURE);
+		}
+
 		prctl(PR_SET_SECUREBITS, 0);
 
 		if (pidns_fd != -1) {
