@@ -19,7 +19,10 @@
 
 #include <assert.h>
 #include <linux/bpf.h>
+#include <sys/cdefs.h>
+#ifndef __GLIBC__
 #include <sys/reg.h>
+#endif
 #include <sys/syscall.h>
 
 #include <libubox/blobmsg.h>
