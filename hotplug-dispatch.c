@@ -298,7 +298,7 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 
 	/* glob'ing for hotplug scripts */
 	if (asprintf(&globstr, "%s/%s/*", HOTPLUG_BASEDIR, subsys) == -1) {
-		env_free(envp);
+		hotplug_free(pc);
 		return UBUS_STATUS_UNKNOWN_ERROR;
 	}
 
