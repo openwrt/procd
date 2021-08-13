@@ -163,9 +163,16 @@ int main(int argc, char **argv)
 		ubus_free(ctx);
 		return -1;
 	}
-
 	setup_tios(server_fd, &oldtermios);
+
 	tty_fd = open("/dev/tty", O_RDWR);
+	if (tty_fd < 0) {
+		fprintf(stderr, "can't open local console!\n");
+		close(server_fd);
+		close(client_fd);
+		ubus_free(ctx);
+		return -1;
+	}
 	setup_tios(tty_fd, &oldtermios);
 
 	/* register server-side with procd */
