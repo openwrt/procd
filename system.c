@@ -44,6 +44,74 @@ enum vjson_state {
 	VJSON_SUCCESS,
 };
 
+static const char *system_rootfs_type(void) {
+	const char proc_mounts[] = "/proc/self/mounts";
+	static char fstype[16] = { 0 };
+	char *mountstr = NULL, *mp = "/", *pos, *tmp;
+	FILE *mounts;
+	ssize_t nread;
+	size_t len = 0;
+	bool found;
+
+	if (initramfs)
+		return "initramfs";
+
+	if (fstype[0])
+		return fstype;
+
+	mounts = fopen(proc_mounts, "r");
+	while ((nread = getline(&mountstr, &len, mounts)) != -1) {
+		found = false;
+
+		pos = strchr(mountstr, ' ');
+		if (!pos)
+			continue;
+
+		tmp = pos + 1;
+		pos = strchr(tmp, ' ');
+		if (!pos)
+			continue;
+
+		*pos = '\0';
+		if (strcmp(tmp, mp))
+			continue;
+
+		tmp = pos + 1;
+		pos = strchr(tmp, ' ');
+		if (!pos)
+			continue;
+
+		*pos = '\0';
+
+		if (!strcmp(tmp, "overlay")) {
+			/*
+			 * there is no point in parsing overlay option string for
+			 * lowerdir, as that can point to "/" being a previous
+			 * overlay mount (after firstboot or sysuprade config
+			 * restore). Hence just assume the lowerdir is "/rom" and
+			 * restart searching for that instead.
+			 */
+			mp = "/rom";
+			fseek(mounts, 0, SEEK_SET);
+			continue;
+		}
+
+		found = true;
+		break;
+	}
+
+	if (found)
+		strncpy(fstype, tmp, sizeof(fstype));
+
+	free(mountstr);
+	fclose(mounts);
+
+	if (found)
+		return fstype;
+	else
+		return NULL;
+}
+
 static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
                  struct ubus_request_data *req, const char *method,
                  struct blob_attr *msg)
@@ -51,13 +119,11 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 	void *c;
 	char line[256];
 	char *key, *val, *next;
+	const char *rootfs_type = system_rootfs_type();
 	struct utsname utsname;
 	FILE *f;
 
 	blob_buf_init(&b, 0);
-
-	if (initramfs)
-		blobmsg_add_u8(&b, "initramfs", 1);
 
 	if (uname(&utsname) >= 0)
 	{
@@ -168,6 +234,9 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 
 		fclose(f);
 	}
+
+	if (rootfs_type)
+		blobmsg_add_string(&b, "rootfs_type", rootfs_type);
 
 	if ((f = fopen("/etc/openwrt_release", "r")) != NULL)
 	{
