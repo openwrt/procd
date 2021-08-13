@@ -105,7 +105,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 		mkdir_p(dirname(new), 0755);
 		snprintf(new, sizeof(new), "%s%s", root, target?target:source);
 		fd = creat(new, 0644);
-		if (fd == -1) {
+		if (fd < 0) {
 			ERROR("creat(%s) failed: %m\n", new);
 			return error;
 		}
@@ -414,7 +414,7 @@ static void build_noafile(void) {
 	int fd;
 
 	fd = creat(UJAIL_NOAFILE, 0000);
-	if (fd == -1)
+	if (fd < 0)
 		return;
 
 	close(fd);
@@ -493,7 +493,7 @@ int add_path_and_deps(const char *path, int readonly, int error, int lib)
 		if (avl_find(&mounts, path))
 			return 0;
 		fd = open(path, O_RDONLY|O_CLOEXEC);
-		if (fd == -1)
+		if (fd < 0)
 			return error;
 		add_mount_bind(path, readonly, error);
 	} else {
@@ -501,7 +501,7 @@ int add_path_and_deps(const char *path, int readonly, int error, int lib)
 			return 0;
 		char *fullpath;
 		fd = lib_open(&fullpath, path);
-		if (fd == -1)
+		if (fd < 0)
 			return error;
 		if (fullpath) {
 			alloc_library(fullpath, path);

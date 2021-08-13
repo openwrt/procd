@@ -178,13 +178,14 @@ void cgroups_apply(pid_t pid)
 		*cdir = '\0';
 		snprintf(ent, maxlen, "%s/cgroup.subtree_control", cgroup_path);
 		DEBUG(" * %s\n", ent);
-		if ((fd = open(ent, O_WRONLY)) == -1) {
+		if ((fd = open(ent, O_WRONLY)) < 0) {
 			ERROR("can't open %s: %m\n", ent);
 			continue;
 		}
 
 		if (write(fd, subtree_control, strlen(subtree_control)) == -1) {
 			ERROR("can't write to %s: %m\n", ent);
+			close(fd);
 			continue;
 		}
 
@@ -196,7 +197,7 @@ void cgroups_apply(pid_t pid)
 		DEBUG("applying cgroup2 %s=\"%s\"\n", (char *)valp->avl.key, valp->val);
 		snprintf(ent, maxlen, "%s/%s", cgroup_path, (char *)valp->avl.key);
 		fd = open(ent, O_WRONLY);
-		if (fd == -1) {
+		if (fd < 0) {
 			ERROR("can't open %s: %m\n", ent);
 			continue;
 		}

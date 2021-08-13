@@ -315,7 +315,7 @@ static int mount_overlay(char *jail_root, char *overlaydir) {
 		goto upper_etc_printf;
 
 	fd = creat(upperresolvconf, 0644);
-	if (fd == -1) {
+	if (fd < 0) {
 		if (errno != EEXIST)
 			ERROR("creat(%s) failed: %m\n", upperresolvconf);
 	} else {
@@ -372,7 +372,7 @@ static int create_dev_console(const char *jail_root)
 
 	/* Open UNIX/98 virtual console */
 	console_fd = posix_openpt(O_RDWR | O_NOCTTY);
-	if (console_fd == -1)
+	if (console_fd < 0)
 		return -1;
 
 	console_fname = ptsname(console_fd);
@@ -532,12 +532,15 @@ static int apply_sysctl(const char *jail_root)
 		DEBUG("sysctl: writing '%s' to %s\n", (*cur)->value, fname);
 
 		f = open(fname, O_WRONLY);
-		if (f == -1) {
+		if (f < 0) {
 			ERROR("sysctl: can't open %s\n", fname);
+			free(fname);
 			return errno;
 		}
 		if (write(f, (*cur)->value, strlen((*cur)->value)) < 0) {
 			ERROR("sysctl: write to %s\n", fname);
+			free(fname);
+			close(f);
 			return errno;
 		}
 
@@ -779,7 +782,7 @@ static int write_uid_gid_map(pid_t child_pid, bool gidmap, char *mapstr)
 		child_pid, gidmap?"gid_map":"uid_map") < 0)
 		return -1;
 
-	if ((map_file = open(map_path, O_WRONLY)) == -1)
+	if ((map_file = open(map_path, O_WRONLY)) < 0)
 		return -1;
 
 	if (dprintf(map_file, "%s", mapstr)) {
@@ -800,10 +803,10 @@ static int write_single_uid_gid_map(pid_t child_pid, bool gidmap, int id)
 		child_pid, gidmap?"gid_map":"uid_map") < 0)
 		return -1;
 
-	if ((map_file = open(map_path, O_WRONLY)) == -1)
+	if ((map_file = open(map_path, O_WRONLY)) < 0)
 		return -1;
 
-	if (dprintf(map_file, map_format, 0, id, 1) == -1) {
+	if (dprintf(map_file, map_format, 0, id, 1) < 0) {
 		close(map_file);
 		return -1;
 	}
@@ -822,7 +825,7 @@ static int write_setgroups(pid_t child_pid, bool allow)
 		return -1;
 	}
 
-	if ((setgroups_file = open(setgroups_path, O_WRONLY)) == -1) {
+	if ((setgroups_file = open(setgroups_path, O_WRONLY)) < 0) {
 		return -1;
 	}
 
@@ -1014,7 +1017,7 @@ static int setns_open(unsigned long nstype)
 
 	assert(fd != NULL);
 
-	if (*fd == -1)
+	if (*fd < 0)
 		return 0;
 
 	if (setns(*fd, nstype) == -1) {
@@ -1347,7 +1350,8 @@ static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 
 	/* prepend bundle directory in case of relative paths */
 	if (root_path[0] != '/') {
-		strncpy(extroot, jsonfile, PATH_MAX);
+		strncpy(extroot, jsonfile, PATH_MAX - 1);
+
 		cur = strrchr(extroot, '/');
 
 		if (!cur)
@@ -1815,11 +1819,13 @@ static int parseOCIlinuxns(struct blob_attr *msg)
 			blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_PATH]));
 
 		fd = open(blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_PATH]), O_RDONLY);
-		if (fd == -1)
+		if (fd < 0)
 			return errno?:ESTALE;
 
-		if (ioctl(fd, NS_GET_NSTYPE) != nstype)
+		if (ioctl(fd, NS_GET_NSTYPE) != nstype) {
+			close(fd);
 			return EINVAL;
+		}
 
 		DEBUG("opened existing %s namespace got filehandler %u\n",
 			blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_TYPE]),
@@ -1967,20 +1973,26 @@ static int parseOCIdevices(struct blob_attr *msg)
 			return ENOMEM;
 
 		tmp->mode = resolve_devtype(blobmsg_get_string(tb[OCI_DEVICES_TYPE]));
-		if (!tmp->mode)
+		if (!tmp->mode) {
+			free(tmp);
 			return EINVAL;
+		}
 
 		if (tmp->mode != S_IFIFO) {
-			if (!tb[OCI_DEVICES_MAJOR] || !tb[OCI_DEVICES_MINOR])
+			if (!tb[OCI_DEVICES_MAJOR] || !tb[OCI_DEVICES_MINOR]) {
+				free(tmp);
 				return ENODATA;
+			}
 
 			tmp->dev = makedev(blobmsg_get_u32(tb[OCI_DEVICES_MAJOR]),
 					   blobmsg_get_u32(tb[OCI_DEVICES_MINOR]));
 		}
 
 		if (tb[OCI_DEVICES_FILEMODE]) {
-			if (~(S_IRWXU|S_IRWXG|S_IRWXO) & blobmsg_get_u32(tb[OCI_DEVICES_FILEMODE]))
+			if (~(S_IRWXU|S_IRWXG|S_IRWXO) & blobmsg_get_u32(tb[OCI_DEVICES_FILEMODE])) {
+				free(tmp);
 				return EINVAL;
+			}
 
 			tmp->mode |= blobmsg_get_u32(tb[OCI_DEVICES_FILEMODE]);
 		} else {
@@ -2282,7 +2294,7 @@ static int set_oom_score_adj(void)
 
 	snprintf(fname, sizeof(fname), "/proc/%u/oom_score_adj", jail_process.pid);
 	f = open(fname, O_WRONLY | O_TRUNC);
-	if (f == -1)
+	if (f < 0)
 		return errno;
 
 	dprintf(f, "%d", opts.oom_score_adj);
@@ -2423,7 +2435,7 @@ jail_writepid(pid_t pid)
 static int checkpath(const char *path)
 {
 	int dirfd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	if (dirfd == -1) {
+	if (dirfd < 0) {
 		ERROR("path %s open failed %m\n", path);
 		return -1;
 	}
@@ -2462,7 +2474,8 @@ int main(int argc, char **argv)
 	uid_t uid = getuid();
 	const char log[] = "/dev/log";
 	const char ubus[] = "/var/run/ubus/ubus.sock";
-	int ch, ret;
+	int ret = EXIT_FAILURE;
+	int ch;
 
 	if (uid) {
 		ERROR("not root, aborting: %m\n");
@@ -2753,7 +2766,8 @@ static void post_main(struct uloop_timeout *t)
 
 			if (!(opts.namespace & CLONE_NEWNET)) {
 				add_mount_bind("/etc/resolv.conf", 1, 0);
-			} else if (opts.setns.net == -1) {
+			} else if (opts.setns.ns == -1) {
+				/* new mount namespace to provide /dev/resolv.conf.d */
 				char hostdir[PATH_MAX];
 
 				snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
