@@ -37,9 +37,11 @@
 
 #define UXC_VERSION "0.2"
 #define OCI_VERSION_STRING "1.0.2"
-#define UXC_CONFDIR "/etc/uxc"
+#define UXC_ETC_CONFDIR "/etc/uxc"
+#define UXC_VOL_CONFDIR "/var/state/uxc"
 
 static bool verbose = false;
+static char *confdir = UXC_ETC_CONFDIR;
 
 struct runtime_state {
 	struct avl_node avl;
@@ -134,8 +136,14 @@ static int conf_load(void)
 	glob_t gl;
 	char *globstr;
 	void *c, *o;
+	struct stat sb;
 
-	if (asprintf(&globstr, "%s/*.json", UXC_CONFDIR) == -1)
+	if (!stat(UXC_VOL_CONFDIR, &sb)) {
+		if (sb.st_mode & S_IFDIR)
+			confdir = UXC_VOL_CONFDIR;
+	}
+
+	if (asprintf(&globstr, "%s/*.json", confdir) == -1)
 		return ENOMEM;
 
 	blob_buf_init(&conf, 0);
@@ -642,12 +650,12 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 			return ENOTDIR;
 	}
 
-	ret = mkdir(UXC_CONFDIR, 0755);
+	ret = mkdir(confdir, 0755);
 
 	if (ret && errno != EEXIST)
 		return ret;
 
-	if (asprintf(&fname, "%s/%s.json", UXC_CONFDIR, name) == -1)
+	if (asprintf(&fname, "%s/%s.json", confdir, name) == -1)
 		return ENOMEM;
 
 	f = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
