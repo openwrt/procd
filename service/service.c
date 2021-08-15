@@ -324,6 +324,9 @@ static void put_cgroups(struct blob_buf *b)
 		return;
 
 	ret = read(fd, &buf, sizeof(buf));
+	/* make sure buffer is NULL-terminated */
+	buf[sizeof(buf)-1] = '\0';
+
 	close(fd);
 
 	if (ret < 2)
