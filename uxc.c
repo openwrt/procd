@@ -352,13 +352,19 @@ static int uxc_state(char *name)
 	int rem;
 	char *bundle = NULL;
 	char *jail_name = NULL;
+	char *state = NULL;
 	static struct blob_buf buf;
 
 	if (s)
 		ocistate = s->ocistate;
 
 	if (ocistate) {
-		printf("%s\n", blobmsg_format_json_indent(ocistate, true, 0));
+		state = blobmsg_format_json_indent(ocistate, true, 0);
+		if (!state)
+			return 1;
+
+		printf("%s\n", state);
+		free(state);
 		return 0;
 	}
 
@@ -449,6 +455,11 @@ static int uxc_create(char *name, bool immediately)
 	void *in, *ins, *j;
 	bool found = false;
 
+	s = avl_find_element(&runtime, name, s, avl);
+
+	if (s && (s->running))
+		return EEXIST;
+
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
 		if (!tb[CONF_NAME] || !tb[CONF_PATH])
@@ -458,30 +469,25 @@ static int uxc_create(char *name, bool immediately)
 			continue;
 
 		found = true;
-		path = strdup(blobmsg_get_string(tb[CONF_PATH]));
-
-		if (tb[CONF_PIDFILE])
-			pidfile = strdup(blobmsg_get_string(tb[CONF_PIDFILE]));
-
-		if (tb[CONF_TEMP_OVERLAY_SIZE])
-			tmprwsize = strdup(blobmsg_get_string(tb[CONF_TEMP_OVERLAY_SIZE]));
-
-		if (tb[CONF_WRITE_OVERLAY_PATH])
-			writepath = strdup(blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]));
-
-		break;
 	}
 
 	if (!found)
 		return ENOENT;
 
-	s = avl_find_element(&runtime, name, s, avl);
+	path = blobmsg_get_string(tb[CONF_PATH]);
 
-	if (s && (s->running))
-		return EEXIST;
+	if (tb[CONF_PIDFILE])
+		pidfile = blobmsg_get_string(tb[CONF_PIDFILE]);
+
+	if (tb[CONF_TEMP_OVERLAY_SIZE])
+		tmprwsize = blobmsg_get_string(tb[CONF_TEMP_OVERLAY_SIZE]);
+
+	if (tb[CONF_WRITE_OVERLAY_PATH])
+		writepath = blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]);
+
 
 	if (tb[CONF_JAIL])
-		jailname = strdup(blobmsg_get_string(tb[CONF_JAIL]));
+		jailname = blobmsg_get_string(tb[CONF_JAIL]);
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", name);
@@ -506,9 +512,15 @@ static int uxc_create(char *name, bool immediately)
 	blobmsg_close_table(&req, in);
 	blobmsg_close_table(&req, ins);
 
-	if (verbose)
-		fprintf(stderr, "adding container to procd:\n\t%s\n",
-			blobmsg_format_json_indent(req.head, true, 1));
+	if (verbose) {
+		char *tmp;
+		tmp = blobmsg_format_json_indent(req.head, true, 1);
+		if (!tmp)
+			return ENOMEM;
+
+		fprintf(stderr, "adding container to procd:\n\t%s\n", tmp);
+		free(tmp);
+	}
 
 	ret = 0;
 	if (ubus_lookup_id(ctx, "container", &id) ||
@@ -643,12 +655,12 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 		return errno;
 
 	if (!add) {
-		keeppath = strdup(blobmsg_get_string(tb[CONF_PATH]));
+		keeppath = blobmsg_get_string(tb[CONF_PATH]);
 		if (tb[CONF_WRITE_OVERLAY_PATH])
-			writepath = strdup(blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]));
+			writepath = blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]);
 
 		if (tb[CONF_TEMP_OVERLAY_SIZE])
-			tmprwsize = strdup(blobmsg_get_string(tb[CONF_TEMP_OVERLAY_SIZE]));
+			tmprwsize = blobmsg_get_string(tb[CONF_TEMP_OVERLAY_SIZE]);
 	}
 
 	blob_buf_init(&req, 0);
@@ -678,11 +690,11 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 		}
 		blobmsg_close_array(&req, mntarr);
 	}
-
-	dprintf(f, "%s\n", blobmsg_format_json_indent(req.head, true, 0));
-
-	if (!add)
-		free(keeppath);
+	tmp = blobmsg_format_json_indent(req.head, true, 0);
+	if (tmp) {
+		dprintf(f, "%s\n", tmp);
+		free(tmp);
+	}
 
 	blob_buf_free(&req);
 
