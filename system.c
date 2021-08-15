@@ -60,6 +60,9 @@ static const char *system_rootfs_type(void) {
 		return fstype;
 
 	mounts = fopen(proc_mounts, "r");
+	if (!mounts)
+		return NULL;
+
 	while ((nread = getline(&mountstr, &len, mounts)) != -1) {
 		found = false;
 
@@ -101,8 +104,9 @@ static const char *system_rootfs_type(void) {
 	}
 
 	if (found)
-		strncpy(fstype, tmp, sizeof(fstype));
+		strncpy(fstype, tmp, sizeof(fstype) - 1);
 
+	fstype[sizeof(fstype) - 1]= '\0';
 	free(mountstr);
 	fclose(mounts);
 
