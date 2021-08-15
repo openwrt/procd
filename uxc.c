@@ -94,7 +94,7 @@ static int usage(void) {
 	printf("                [--autostart]\t\t\t\tstart on boot\n");
 	printf("                [--temp-overlay-size size]\t\tuse tmpfs overlay with {size}\n");
 	printf("                [--write-overlay-path path]\t\tuse overlay on {path}\n");
-	printf("                [--volumes v1,v2,...,vN]\t\trequire volumes to be available\n");
+	printf("                [--mounts v1,v2,...,vN]\t\trequire filesystems to be available\n");
 	printf("\tstart <conf>\t\t\t\t\tstart container <conf>\n");
 	printf("\tstate <conf>\t\t\t\t\tget state of container <conf>\n");
 	printf("\tkill <conf> [<signal>]\t\t\t\tsend signal to container <conf>\n");
