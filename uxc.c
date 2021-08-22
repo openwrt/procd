@@ -705,6 +705,7 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	}
 
 	blob_buf_free(&req);
+	close(f);
 
 	return 0;
 }
