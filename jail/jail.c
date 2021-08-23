@@ -2186,21 +2186,24 @@ static int parseOCIlinux(struct blob_attr *msg)
 	if (tb[OCI_LINUX_CGROUPSPATH]) {
 		cgpath = blobmsg_get_string(tb[OCI_LINUX_CGROUPSPATH]);
 		if (cgpath[0] == '/') {
-			if (strlen(cgpath) >= (sizeof(cgfullpath) - strlen(cgfullpath)))
+			if (strlen(cgpath) + 1 >= (sizeof(cgfullpath) - strlen(cgfullpath)))
 				return E2BIG;
 
 			strcat(cgfullpath, cgpath);
 		} else {
 			strcat(cgfullpath, "/containers/");
-			strcat(cgfullpath, opts.name); /* should be container name rather than jail name */
-			strcat(cgfullpath, "/");
-			if (strlen(cgpath) >= (sizeof(cgfullpath) - strlen(cgfullpath)))
+			if (strlen(opts.name) + strlen(cgpath) + 2 >= (sizeof(cgfullpath) - strlen(cgfullpath)))
 				return E2BIG;
 
+			strcat(cgfullpath, opts.name); /* should be container name rather than jail name */
+			strcat(cgfullpath, "/");
 			strcat(cgfullpath, cgpath);
 		}
 	} else {
 		strcat(cgfullpath, "/containers/");
+		if (2 * strlen(opts.name) + 2 >= (sizeof(cgfullpath) - strlen(cgfullpath)))
+			return E2BIG;
+
 		strcat(cgfullpath, opts.name); /* should be container name rather than jail name */
 		strcat(cgfullpath, "/");
 		strcat(cgfullpath, opts.name); /* should be container instance name rather than jail name */
