@@ -117,6 +117,7 @@ static void print_syscalls(int policy, const char *json)
 {
 	void *c, *d, *e;
 	int i;
+	char *tmp;
 
 	if (mode == UTRACE) {
 		set_syscall("rt_sigaction", 1);
@@ -168,8 +169,12 @@ static void print_syscalls(int policy, const char *json)
 			ULOG_ERR("failed to open %s\n", json);
 		}
 	} else {
-		printf("%s\n",
-			blobmsg_format_json_indent(b.head, true, 0));
+		tmp = blobmsg_format_json_indent(b.head, true, 0);
+		if (!tmp)
+			return;
+
+		printf("%s\n", tmp);
+		free(tmp);
 	}
 
 }
