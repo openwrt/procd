@@ -184,7 +184,12 @@ static void report_seccomp_vialation(pid_t pid, unsigned syscall)
 	char buf[200];
 	snprintf(buf, sizeof(buf), "/proc/%d/cmdline", pid);
 	int f = open(buf, O_RDONLY);
+	if (f < 0)
+		return;
+
 	int r = read(f, buf, sizeof(buf) - 1);
+	buf[sizeof(buf) - 1] = '\0';
+
 	if (r >= 0)
 		buf[r] = 0;
 	else
