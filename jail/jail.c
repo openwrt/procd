@@ -395,6 +395,9 @@ static int create_dev_console(const char *jail_root)
 
 	/* use PTY slave for stdio */
 	slave_console_fd = open(console_fname, O_RDWR); /* | O_NOCTTY */
+	if (slave_console_fd < 0)
+		goto no_console;
+
 	dup2(slave_console_fd, 0);
 	dup2(slave_console_fd, 1);
 	dup2(slave_console_fd, 2);
