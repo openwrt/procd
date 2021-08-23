@@ -2723,7 +2723,7 @@ int main(int argc, char **argv)
 	/* deliberately not using 'else' on unrelated conditional branches */
 	if (!opts.ocibundle) {
 		/* allocate NULL-terminated array for argv */
-		opts.jail_argv = calloc(1 + argc - optind, sizeof(char**));
+		opts.jail_argv = calloc(1 + argc - optind, sizeof(void *));
 		if (!opts.jail_argv) {
 			ret=EXIT_FAILURE;
 			goto errout;
