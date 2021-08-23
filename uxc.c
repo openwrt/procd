@@ -361,6 +361,7 @@ static int uxc_state(char *name)
 	char *bundle = NULL;
 	char *jail_name = NULL;
 	char *state = NULL;
+	char *tmp;
 	static struct blob_buf buf;
 
 	if (s)
@@ -401,7 +402,15 @@ static int uxc_state(char *name)
 	blobmsg_add_string(&buf, "status", s?"stopped":"uninitialized");
 	blobmsg_add_string(&buf, "bundle", bundle);
 
-	printf("%s\n", blobmsg_format_json_indent(buf.head, true, 0));
+	tmp = blobmsg_format_json_indent(buf.head, true, 0);
+	if (!tmp) {
+		blob_buf_free(&buf);
+		return ENOMEM;
+	}
+
+	printf("%s\n", tmp);
+	free(tmp);
+
 	blob_buf_free(&buf);
 
 	return 0;
