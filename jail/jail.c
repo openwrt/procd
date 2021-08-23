@@ -457,7 +457,7 @@ static void run_hooklist(void)
 	struct stat s;
 
 	if (!hook)
-		hook_return_cb();
+		return hook_return_cb();
 
 	DEBUG("executing hook %s\n", hook->file);
 
