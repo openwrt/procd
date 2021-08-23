@@ -579,6 +579,7 @@ static struct mknod_args default_devices[] = {
 static int create_devices(void)
 {
 	struct mknod_args **cur, *curdef;
+	char *path, *tmp;
 
 	if (!opts.devices)
 		goto only_default_devices;
@@ -586,12 +587,33 @@ static int create_devices(void)
 	cur = opts.devices;
 
 	while (*cur) {
-		DEBUG("creating %s (mode=%08o)\n", (*cur)->path, (*cur)->mode);
-		if (mknod((*cur)->path, (*cur)->mode, (*cur)->dev))
+		path = (*cur)->path;
+		/* don't allow devices outside of /dev */
+		if (strncmp(path, "/dev", 4))
+			return EPERM;
+
+		/* make sure parent folder exists */
+		tmp = strrchr(path, '/');
+		if (!tmp)
+			return EINVAL;
+
+		*tmp = '\0';
+		if (strcmp(path, "/dev")) {
+			DEBUG("creating directory %s\n", path);
+
+			mkdir_p(path, 0755);
+		}
+		*tmp = '/';
+
+		DEBUG("creating %s (mode=%08o)\n", path, (*cur)->mode);
+
+		/* create device */
+		if (mknod(path, (*cur)->mode, (*cur)->dev))
 			return errno;
 
+		/* change owner, if needed */
 		if (((*cur)->uid || (*cur)->gid) &&
-		    chown((*cur)->path, (*cur)->uid, (*cur)->gid))
+		    chown(path, (*cur)->uid, (*cur)->gid))
 			return errno;
 
 		++cur;
