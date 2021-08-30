@@ -357,7 +357,7 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 
 	if (len) {
 		*mount_data = calloc(len + 1, sizeof(char));
-		if (!mount_data)
+		if (!(*mount_data))
 			return ENOMEM;
 
 		len = 0;
