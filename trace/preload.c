@@ -49,9 +49,10 @@ int __libc_start_main(main_t main,
 	start_main_t __start_main__;
 
 	__start_main__ = dlsym(RTLD_NEXT, "__libc_start_main");
-	if (!__start_main__)
+	if (!__start_main__) {
 		ERROR("failed to find __libc_start_main %s\n", dlerror());
-
+		return -1;
+	}
 	__main__ = main;
 
 	return (*__start_main__)(__preload_main__, argc, argv, auxvec,
@@ -69,8 +70,10 @@ void __uClibc_main(main_t main,
 	uClibc_main __start_main__;
 
 	__start_main__ = dlsym(RTLD_NEXT, "__uClibc_main");
-	if (!__start_main__)
+	if (!__start_main__) {
 		ERROR("failed to find __uClibc_main %s\n", dlerror());
+		return;
+	}
 
 	__main__ = main;
 
