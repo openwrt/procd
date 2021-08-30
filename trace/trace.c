@@ -162,7 +162,12 @@ static void print_syscalls(int policy, const char *json)
 	if (json) {
 		FILE *fp = fopen(json, "w");
 		if (fp) {
-			fprintf(fp, "%s\n", blobmsg_format_json_indent(b.head, true, 0));
+			tmp = blobmsg_format_json_indent(b.head, true, 0);
+			if (!tmp)
+				return;
+
+			free(tmp);
+			fprintf(fp, "%s\n", tmp);
 			fclose(fp);
 			ULOG_INFO("saving syscall trace to %s\n", json);
 		} else {
@@ -176,7 +181,6 @@ static void print_syscalls(int policy, const char *json)
 		printf("%s\n", tmp);
 		free(tmp);
 	}
-
 }
 
 static void report_seccomp_vialation(pid_t pid, unsigned syscall)
