@@ -139,7 +139,12 @@ char *get_active_console(char *out, int len)
 {
 	char line[CMDLINE_SIZE + 1];
 	int fd = open("/sys/class/tty/console/active", O_RDONLY);
-	ssize_t r = read(fd, line, sizeof(line) - 1);
+	ssize_t r;
+
+	if (fd < 0)
+		return NULL;
+
+	r = read(fd, line, sizeof(line) - 1);
 	line[CMDLINE_SIZE] = '\0';
 
 	close(fd);
