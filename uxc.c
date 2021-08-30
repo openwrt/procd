@@ -38,7 +38,7 @@
 #define UXC_VERSION "0.2"
 #define OCI_VERSION_STRING "1.0.2"
 #define UXC_ETC_CONFDIR "/etc/uxc"
-#define UXC_VOL_CONFDIR "/var/state/uxc"
+#define UXC_VOL_CONFDIR "/var/run/uxc"
 
 static bool verbose = false;
 static char *confdir = UXC_ETC_CONFDIR;
