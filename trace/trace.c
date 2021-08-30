@@ -166,8 +166,8 @@ static void print_syscalls(int policy, const char *json)
 			if (!tmp)
 				return;
 
-			free(tmp);
 			fprintf(fp, "%s\n", tmp);
+			free(tmp);
 			fclose(fp);
 			ULOG_INFO("saving syscall trace to %s\n", json);
 		} else {
