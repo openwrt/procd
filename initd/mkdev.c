@@ -86,7 +86,7 @@ static void find_devs(bool block)
 		if (len <= 0)
 			continue;
 
-		buf[len] = 0;
+		buf[sizeof(buf) - 1] = '\0';
 		if (!find_pattern(buf))
 			continue;
 
