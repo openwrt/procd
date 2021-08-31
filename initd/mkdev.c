@@ -82,7 +82,7 @@ static void find_devs(bool block)
 			continue;
 
 		strcpy(path, dp->d_name);
-		len = readlink(buf2, buf, sizeof(buf));
+		len = readlink(buf2, buf, sizeof(buf) - 1);
 		if (len <= 0)
 			continue;
 
