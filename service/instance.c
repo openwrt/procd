@@ -120,6 +120,7 @@ enum {
 	JAIL_ATTR_REQUIREJAIL,
 	JAIL_ATTR_IMMEDIATELY,
 	JAIL_ATTR_PIDFILE,
+	JAIL_ATTR_SETNS,
 	__JAIL_ATTR_MAX,
 };
 
@@ -139,6 +140,18 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_REQUIREJAIL] = { "requirejail", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_IMMEDIATELY] = { "immediately", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
+	[JAIL_ATTR_SETNS] = { "setns", BLOBMSG_TYPE_ARRAY },
+};
+
+enum {
+	JAIL_SETNS_ATTR_PID,
+	JAIL_SETNS_ATTR_NS,
+	__JAIL_SETNS_ATTR_MAX,
+};
+
+static const struct blobmsg_policy jail_setns_attr[__JAIL_SETNS_ATTR_MAX] = {
+	[JAIL_SETNS_ATTR_PID] = { "pid", BLOBMSG_TYPE_INT32 },
+	[JAIL_SETNS_ATTR_NS] = { "namespaces", BLOBMSG_TYPE_ARRAY },
 };
 
 struct instance_netdev {
@@ -224,6 +237,52 @@ instance_limits(const char *limit, const char *value)
 		setrlimit(rlimit_names[i].resource, &rlim);
 		return;
 	}
+}
+
+static char *
+instance_gen_setns_argstr(struct blob_attr *attr)
+{
+	struct blob_attr *tb[__JAIL_SETNS_ATTR_MAX];
+	struct blob_attr *cur;
+	int rem, len, total;
+	char *ret;
+
+	blobmsg_parse(jail_setns_attr, __JAIL_SETNS_ATTR_MAX, tb,
+		blobmsg_data(attr), blobmsg_data_len(attr));
+
+	if (!tb[JAIL_SETNS_ATTR_PID] || !tb[JAIL_SETNS_ATTR_NS])
+		return NULL;
+
+	len = snprintf(NULL, 0, "%d:", blobmsg_get_u32(tb[JAIL_SETNS_ATTR_PID]));
+
+	blobmsg_for_each_attr(cur, tb[JAIL_SETNS_ATTR_NS], rem) {
+		char *tmp;
+
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING)
+			return NULL;
+
+		tmp = blobmsg_get_string(cur);
+		if (!tmp)
+			return NULL;
+
+		len += strlen(tmp) + 1;
+	}
+
+	total = len;
+	ret = malloc(total);
+	if (!ret)
+		return NULL;
+
+	len = snprintf(ret, total, "%d:", blobmsg_get_u32(tb[JAIL_SETNS_ATTR_PID]));
+
+	blobmsg_for_each_attr(cur, tb[JAIL_SETNS_ATTR_NS], rem) {
+		strncpy(&ret[len], blobmsg_get_string(cur), total - len);
+		len += strlen(blobmsg_get_string(cur));
+		ret[len++] = ',';
+	}
+	ret[total - 1] = '\0';
+
+	return ret;
 }
 
 static inline int
@@ -334,6 +393,15 @@ jail_run(struct service_instance *in, char **argv)
 		else
 			argv[argc++] = "-r";
 		argv[argc++] = (char *) blobmsg_name(var->data);
+	}
+
+	blobmsg_list_for_each(&jail->setns, var) {
+		char *setns_arg = instance_gen_setns_argstr(var->data);
+
+		if (setns_arg) {
+			argv[argc++] = "-j";
+			argv[argc++] = setns_arg;
+		}
 	}
 
 	argv[argc++] = "--";
@@ -911,6 +979,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (!blobmsg_list_equal(&in->jail.mount, &in_new->jail.mount))
 		return true;
 
+	if (!blobmsg_list_equal(&in->jail.setns, &in_new->jail.setns))
+		return true;
+
 	if (!blobmsg_list_equal(&in->errors, &in_new->errors))
 		return true;
 
@@ -963,9 +1034,6 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 
 	if (in->jail.console != in_new->jail.console)
-		return true;
-
-	if (!blobmsg_list_equal(&in->jail.mount, &in_new->jail.mount))
 		return true;
 
 	if (in->watchdog.mode != in_new->watchdog.mode)
@@ -1132,6 +1200,16 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->argc += 2;
 	}
 
+	if (tb[JAIL_ATTR_SETNS]) {
+		struct blob_attr *cur;
+		int rem;
+
+		blobmsg_for_each_attr(cur, tb[JAIL_ATTR_SETNS], rem)
+			jail->argc += 2;
+		blobmsg_list_fill(&jail->setns, blobmsg_data(tb[JAIL_ATTR_SETNS]),
+				  blobmsg_data_len(tb[JAIL_ATTR_SETNS]), true);
+	}
+
 	if (tb[JAIL_ATTR_MOUNT]) {
 		struct blob_attr *cur;
 		int rem;
@@ -1140,6 +1218,7 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 			jail->argc += 2;
 		instance_fill_array(&jail->mount, tb[JAIL_ATTR_MOUNT], NULL, false);
 	}
+
 	if (in->seccomp)
 		jail->argc += 2;
 
@@ -1389,6 +1468,7 @@ instance_config_cleanup(struct service_instance *in)
 	blobmsg_list_free(&in->limits);
 	blobmsg_list_free(&in->errors);
 	blobmsg_list_free(&in->jail.mount);
+	blobmsg_list_free(&in->jail.setns);
 }
 
 static void
@@ -1416,6 +1496,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	blobmsg_list_move(&in->limits, &in_src->limits);
 	blobmsg_list_move(&in->errors, &in_src->errors);
 	blobmsg_list_move(&in->jail.mount, &in_src->jail.mount);
+	blobmsg_list_move(&in->jail.setns, &in_src->jail.setns);
 	in->trigger = in_src->trigger;
 	in->command = in_src->command;
 	in->respawn = in_src->respawn;
@@ -1550,6 +1631,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	blobmsg_list_simple_init(&in->limits);
 	blobmsg_list_simple_init(&in->errors);
 	blobmsg_list_simple_init(&in->jail.mount);
+	blobmsg_list_simple_init(&in->jail.setns);
 
 	in->watchdog.timeout.cb = instance_watchdog;
 
@@ -1669,6 +1751,14 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 			blobmsg_list_for_each(&in->jail.mount, var)
 				blobmsg_add_string(b, blobmsg_name(var->data), blobmsg_data(var->data));
 			blobmsg_close_table(b, e);
+		}
+
+		if (!avl_is_empty(&in->jail.setns.avl)) {
+			struct blobmsg_list_node *var;
+			void *s = blobmsg_open_array(b, "setns");
+			blobmsg_list_for_each(&in->jail.setns, var)
+				blobmsg_add_blob(b, var->data);
+			blobmsg_close_array(b, s);
 		}
 	}
 
