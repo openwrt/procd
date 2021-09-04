@@ -68,7 +68,7 @@
 #endif
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"S:C:n:h:r:w:d:psulocU:G:NR:fFO:T:EyJ:iP:"
+#define OPT_ARGS	"cC:d:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:T:y"
 
 #define OCI_VERSION_STRING "1.0.2"
 
@@ -1793,6 +1793,8 @@ static int resolve_nstype(char *type) {
 		return CLONE_NEWPID;
 	else if (!strcmp("network", type))
 		return CLONE_NEWNET;
+	else if (!strcmp("net", type))
+		return CLONE_NEWNET;
 	else if (!strcmp("mount", type))
 		return CLONE_NEWNS;
 	else if (!strcmp("ipc", type))
@@ -1860,6 +1862,67 @@ static int parseOCIlinuxns(struct blob_attr *msg)
 	} else {
 		opts.namespace |= nstype;
 	}
+
+	return 0;
+}
+
+/*
+ * join namespace of existing PID
+ * The string argument is the reference PID followed by ':' and a
+ * ',' separated list of namespaces to to join.
+ */
+static int jail_join_ns(char *arg)
+{
+	pid_t pid;
+	int fd;
+	int nstype;
+	char *tmp, *etmp, *nspath;
+	int *setns;
+
+	tmp = strchr(arg, ':');
+	if (!tmp)
+		return EINVAL;
+
+	*tmp = '\0';
+	pid = atoi(arg);
+
+	do {
+		++tmp;
+		etmp = strchr(tmp, ',');
+		if (etmp)
+			*etmp = '\0';
+
+		nstype = resolve_nstype(tmp);
+		if (!nstype)
+			return EINVAL;
+
+		if (opts.namespace & nstype)
+			return ENOTUNIQ;
+
+		setns = get_namespace_fd(nstype);
+
+		if (!setns)
+			return EFAULT;
+
+		if (*setns != -1)
+			return ENOTUNIQ;
+
+		if (asprintf(&nspath, "/proc/%d/ns/%s", pid, tmp) < 0)
+			return ENOMEM;
+
+		fd = open(nspath, O_RDONLY);
+		free(nspath);
+
+		if (fd < 0)
+			return errno?:ESTALE;
+
+		*setns = fd;
+
+		if (etmp)
+			tmp = etmp;
+		else
+			tmp = NULL;
+	} while (tmp);
 
 	return 0;
 }
@@ -2510,6 +2573,18 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
+	/* those are filehandlers, so -1 indicates unused */
+	opts.setns.pid = -1;
+	opts.setns.net = -1;
+	opts.setns.ns = -1;
+	opts.setns.ipc = -1;
+	opts.setns.uts = -1;
+	opts.setns.user = -1;
+	opts.setns.cgroup = -1;
+#ifdef CLONE_NEWTIME
+	opts.setns.time = -1;
+#endif
+
 	umask(022);
 	mount_list_init();
 	init_library_search();
@@ -2562,6 +2637,9 @@ int main(int argc, char **argv)
 			opts.namespace |= CLONE_NEWUTS;
 			opts.hostname = strdup(optarg);
 			break;
+		case 'j':
+			jail_join_ns(optarg);
+			break;
 		case 'r':
 			opts.namespace |= CLONE_NEWNS;
 			add_path_and_deps(optarg, 1, 0, 0);
@@ -2610,18 +2688,6 @@ int main(int argc, char **argv)
 
 	if (opts.namespace && !opts.ocibundle)
 		opts.namespace |= CLONE_NEWIPC | CLONE_NEWPID;
-
-	/* those are filehandlers, so -1 indicates unused */
-	opts.setns.pid = -1;
-	opts.setns.net = -1;
-	opts.setns.ns = -1;
-	opts.setns.ipc = -1;
-	opts.setns.uts = -1;
-	opts.setns.user = -1;
-	opts.setns.cgroup = -1;
-#ifdef CLONE_NEWTIME
-	opts.setns.time = -1;
-#endif
 
 	/*
 	 * uid in parent user namespace representing root user in new
@@ -2690,7 +2756,13 @@ int main(int argc, char **argv)
 		ret=EXIT_FAILURE;
 		goto errout;
 	}
-	if (!(opts.ocibundle||opts.namespace||opts.capabilities||opts.seccomp)) {
+	if (!(opts.ocibundle||opts.namespace||opts.capabilities||opts.seccomp||
+		(opts.setns.net != -1) ||
+		(opts.setns.ns != -1) ||
+		(opts.setns.ipc != -1) ||
+		(opts.setns.uts != -1) ||
+		(opts.setns.user != -1) ||
+		(opts.setns.cgroup != -1))) {
 		ERROR("Not using namespaces, capabilities or seccomp !!!\n\n");
 		usage();
 		ret=EXIT_FAILURE;
@@ -2791,18 +2863,19 @@ static void post_main(struct uloop_timeout *t)
 			if (!opts.extroot)
 				add_mount_bind("/etc/nsswitch.conf", 1, -1);
 #endif
+			if (opts.setns.ns == -1) {
+				if (!(opts.namespace & CLONE_NEWNET)) {
+					add_mount_bind("/etc/resolv.conf", 1, 0);
+				} else {
+					/* new mount namespace to provide /dev/resolv.conf.d */
+					char hostdir[PATH_MAX];
 
-			if (!(opts.namespace & CLONE_NEWNET)) {
-				add_mount_bind("/etc/resolv.conf", 1, 0);
-			} else if (opts.setns.ns == -1) {
-				/* new mount namespace to provide /dev/resolv.conf.d */
-				char hostdir[PATH_MAX];
-
-				snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
-				mkdir_p(hostdir, 0755);
-				add_mount(hostdir, "/dev/resolv.conf.d", NULL, MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, 0);
+					snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
+					mkdir_p(hostdir, 0755);
+					add_mount(hostdir, "/dev/resolv.conf.d", NULL,
+						MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, 0);
+				}
 			}
-
 			/* default mounts */
 			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "size=1M", -1);
 			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
