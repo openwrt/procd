@@ -163,8 +163,10 @@ static void print_syscalls(int policy, const char *json)
 		FILE *fp = fopen(json, "w");
 		if (fp) {
 			tmp = blobmsg_format_json_indent(b.head, true, 0);
-			if (!tmp)
+			if (!tmp) {
+				fclose(fp);
 				return;
+			}
 
 			fprintf(fp, "%s\n", tmp);
 			free(tmp);
