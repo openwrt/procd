@@ -726,7 +726,7 @@ static int build_jail_fs(void)
 		create_dev_console(jail_root);
 
 	/* make sure /etc/resolv.conf exists if in new network namespace */
-	if (!opts.extroot && opts.namespace & CLONE_NEWNET) {
+	if (opts.namespace & CLONE_NEWNET) {
 		char jailetc[PATH_MAX], jaillink[PATH_MAX];
 
 		snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
