@@ -54,6 +54,7 @@
 #include "log.h"
 #include "seccomp-oci.h"
 #include "cgroups.h"
+#include "netifd.h"
 
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
@@ -3014,6 +3015,7 @@ static void post_main(struct uloop_timeout *t)
 		}
 
 		if (opts.namespace & CLONE_NEWNET) {
+			jail_network_start(parent_ctx, opts.name, jail_process.pid);
 			netns_fd = ns_open_pid("net", jail_process.pid);
 			netns_updown(jail_process.pid, true);
 		}
@@ -3083,6 +3085,7 @@ static void poststop(void) {
 	if (opts.namespace & CLONE_NEWNET) {
 		setns(netns_fd, CLONE_NEWNET);
 		netns_updown(getpid(), false);
+		jail_network_stop();
 		close(netns_fd);
 	}
 	run_hooks(opts.hooks.poststop, post_poststop);
