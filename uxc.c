@@ -41,6 +41,7 @@
 #define UXC_VOL_CONFDIR "/var/run/uxc"
 
 static bool verbose = false;
+static bool json_output = false;
 static char *confdir = UXC_ETC_CONFDIR;
 
 struct runtime_state {
@@ -67,11 +68,12 @@ enum uxc_cmd {
 	CMD_UNKNOWN
 };
 
-#define OPT_ARGS "ab:fm:p:t:vVw:"
+#define OPT_ARGS "ab:fjm:p:t:vVw:"
 static struct option long_options[] = {
 	{"autostart",		no_argument,		0,	'a'	},
 	{"bundle",		required_argument,	0,	'b'	},
 	{"force",		no_argument,		0,	'f'	},
+	{"json",		no_argument,		0,	'j'	},
 	{"mounts",		required_argument,	0,	'm'	},
 	{"pid-file",		required_argument,	0,	'p'	},
 	{"temp-overlay-size",	required_argument,	0,	't'	},
@@ -90,7 +92,7 @@ static struct ubus_context *ctx;
 static int usage(void) {
 	printf("syntax: uxc <command> [parameters ...]\n");
 	printf("commands:\n");
-	printf("\tlist\t\t\t\t\t\tlist all configured containers\n");
+	printf("\tlist [--json]\t\t\t\tlist all configured containers\n");
 	printf("\tcreate <conf>\t\t\t\t\t(re-)create <conf>\n");
 	printf("                [--bundle <path>]\t\t\tOCI bundle at <path>\n");
 	printf("                [--autostart]\t\t\t\tstart on boot\n");
@@ -421,10 +423,16 @@ static int uxc_list(void)
 	struct blob_attr *cur, *tb[__CONF_MAX], *ts[__STATE_MAX];
 	int rem;
 	struct runtime_state *s = NULL;
-	char *name;
-	char *ocistatus;
+	char *name, *ocistatus, *status, *tmp;
 	int container_pid = -1;
 	bool autostart;
+	static struct blob_buf buf;
+	void *arr, *obj;
+
+	if (json_output) {
+		blob_buf_init(&buf, 0);
+		arr = blobmsg_open_array(&buf, "");
+	}
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
@@ -443,19 +451,55 @@ static int uxc_list(void)
 			container_pid = blobmsg_get_u32(ts[STATE_PID]);
 		}
 
-		printf("[%c] %s %s", autostart?'*':' ', name, ocistatus?:(s && s->running)?"creating":"stopped");
+		status = ocistatus?:(s && s->running)?"creating":"stopped";
 
-		if (s && !s->running && (s->exitcode >= 0))
-			printf(" exitcode: %d (%s)", s->exitcode, strerror(s->exitcode));
+		if (json_output) {
+			obj = blobmsg_open_table(&buf, "");
+			blobmsg_add_string(&buf, "name", name);
+			blobmsg_add_string(&buf, "status", status);
+			blobmsg_add_u8(&buf, "autostart", autostart);
+		} else {
+			printf("[%c] %s %s", autostart?'*':' ', name, status);
+		}
 
-		if (s && s->running && (s->runtime_pid >= 0))
-			printf(" runtime pid: %d", s->runtime_pid);
+		if (s && !s->running && (s->exitcode >= 0)) {
+			if (json_output)
+				blobmsg_add_u32(&buf, "exitcode", s->exitcode);
+			else
+				printf(" exitcode: %d (%s)", s->exitcode, strerror(s->exitcode));
+		}
 
-		if (s && s->running && (container_pid >= 0))
-			printf(" container pid: %d", container_pid);
+		if (s && s->running && (s->runtime_pid >= 0)) {
+			if (json_output)
+				blobmsg_add_u32(&buf, "runtime_pid", s->runtime_pid);
+			else
+				printf(" runtime pid: %d", s->runtime_pid);
+		}
 
-		printf("\n");
+		if (s && s->running && (container_pid >= 0)) {
+			if (json_output)
+				blobmsg_add_u32(&buf, "container_pid", container_pid);
+			else
+				printf(" container pid: %d", container_pid);
+		}
+
+		if (!json_output)
+			printf("\n");
+		else
+			blobmsg_close_table(&buf, obj);
 	}
+
+	if (json_output) {
+		blobmsg_close_array(&buf, arr);
+		tmp = blobmsg_format_json_indent(buf.head, true, 0);
+		if (!tmp) {
+			blob_buf_free(&buf);
+			return ENOMEM;
+		}
+		printf("%s\n", tmp);
+		free(tmp);
+		blob_buf_free(&buf);
+	};
 
 	return 0;
 }
@@ -1003,6 +1047,10 @@ int main(int argc, char **argv)
 
 			case 'f':
 				force = true;
+				break;
+
+			case 'j':
+				json_output = true;
 				break;
 
 			case 'p':
