@@ -44,6 +44,7 @@ struct service {
 	const char *name;
 	bool deleted;
 	bool autostart;
+	bool container;
 
 	struct blob_attr *trigger;
 	struct vlist_tree instances;

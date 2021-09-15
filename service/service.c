@@ -182,8 +182,6 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 	return 0;
 }
 
-static void _service_stopped(struct service *s, bool container);
-
 static void
 service_delete(struct service *s, bool container)
 {
@@ -191,7 +189,7 @@ service_delete(struct service *s, bool container)
 	free(s->data);
 	vlist_flush_all(&s->instances);
 	s->deleted = true;
-	_service_stopped(s, container);
+	service_stopped(s);
 }
 
 enum {
@@ -429,6 +427,8 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	s = service_alloc(name);
 	if (!s)
 		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	s->container = container;
 
 	ret = service_update(s, tb, add);
 	if (ret)
@@ -1009,13 +1009,8 @@ service_start_early(char *name, char *cmdline, char *user, char *group)
 
 void service_stopped(struct service *s)
 {
-	_service_stopped(s, false);
-}
-
-static void _service_stopped(struct service *s, bool container)
-{
 	if (s->deleted && avl_is_empty(&s->instances.avl)) {
-		if (container) {
+		if (s->container) {
 			service_event("container.stop", s->name, NULL);
 			avl_delete(&containers, &s->avl);
 		} else {
