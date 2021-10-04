@@ -586,12 +586,12 @@ static int uxc_create(char *name, bool immediately)
 	ret = 0;
 	if (ubus_lookup_id(ctx, "container", &id) ||
 		ubus_invoke(ctx, id, "add", req.head, NULL, NULL, 3000)) {
+		blob_buf_free(&req);
 		ret = EIO;
 	}
 
 	free(jailname);
 	free(path);
-	blob_buf_free(&req);
 
 	return ret;
 }
