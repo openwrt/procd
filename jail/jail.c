@@ -2568,6 +2568,7 @@ int main(int argc, char **argv)
 	const char ubus[] = "/var/run/ubus/ubus.sock";
 	int ret = EXIT_FAILURE;
 	int ch;
+	char *tmp;
 
 	if (uid) {
 		ERROR("not root, aborting: %m\n");
@@ -2643,11 +2644,23 @@ int main(int argc, char **argv)
 			break;
 		case 'r':
 			opts.namespace |= CLONE_NEWNS;
-			add_path_and_deps(optarg, 1, 0, 0);
+			tmp = strchr(optarg, ':');
+			if (tmp) {
+				*(tmp++) = '\0';
+				add_2paths_and_deps(optarg, tmp, 1, 0, 0);
+			} else {
+				add_path_and_deps(optarg, 1, 0, 0);
+			}
 			break;
 		case 'w':
 			opts.namespace |= CLONE_NEWNS;
-			add_path_and_deps(optarg, 0, 0, 0);
+			tmp = strchr(optarg, ':');
+			if (tmp) {
+				*(tmp++) = '\0';
+				add_2paths_and_deps(optarg, tmp, 0, 0, 0);
+			} else {
+				add_path_and_deps(optarg, 0, 0, 0);
+			}
 			break;
 		case 'u':
 			opts.namespace |= CLONE_NEWNS;

@@ -206,14 +206,19 @@ int add_mount_inner(const char *source, const char *target, const char *filesyst
 	return _add_mount(source, target, filesystemtype, mountflags, propflags, optstr, error, true);
 }
 
-int add_mount_bind(const char *path, int readonly, int error)
+static int _add_mount_bind(const char *path, const char *path2, int readonly, int error)
 {
 	unsigned long mountflags = MS_BIND;
 
 	if (readonly)
 		mountflags |= MS_RDONLY;
 
-	return add_mount(path, path, NULL, mountflags, 0, NULL, error);
+	return add_mount(path, path2, NULL, mountflags, 0, NULL, error);
+}
+
+int add_mount_bind(const char *path, int readonly, int error)
+{
+	return _add_mount_bind(path, path, readonly, error);
 }
 
 enum {
@@ -478,9 +483,10 @@ static int add_script_interp(const char *path, const char *map, int size)
 	return add_path_and_deps(buf, 1, -1, 0);
 }
 
-int add_path_and_deps(const char *path, int readonly, int error, int lib)
+int add_2paths_and_deps(const char *path, const char *path2, int readonly, int error, int lib)
 {
 	assert(path != NULL);
+	assert(path2 != NULL);
 
 	if (lib == 0 && path[0] != '/') {
 		ERROR("%s is not an absolute path\n", path);
@@ -490,12 +496,12 @@ int add_path_and_deps(const char *path, int readonly, int error, int lib)
 	char *map = NULL;
 	int fd, ret = -1;
 	if (path[0] == '/') {
-		if (avl_find(&mounts, path))
+		if (avl_find(&mounts, path2))
 			return 0;
 		fd = open(path, O_RDONLY|O_CLOEXEC);
 		if (fd < 0)
 			return error;
-		add_mount_bind(path, readonly, error);
+		_add_mount_bind(path, path2, readonly, error);
 	} else {
 		if (avl_find(&libraries, path))
 			return 0;

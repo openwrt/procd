@@ -22,7 +22,13 @@ int add_mount_inner(const char *source, const char *target, const char *filesyst
 	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error);
 int add_mount_bind(const char *path, int readonly, int error);
 int parseOCImount(struct blob_attr *msg);
-int add_path_and_deps(const char *path, int readonly, int error, int lib);
+int add_2paths_and_deps(const char *path, const char *path2, int readonly, int error, int lib);
+
+static inline int add_path_and_deps(const char *path, int readonly, int error, int lib)
+{
+	return add_2paths_and_deps(path, path, readonly, error, lib);
+}
+
 int mount_all(const char *jailroot);
 void mount_list_init(void);
 void mount_free(void);
