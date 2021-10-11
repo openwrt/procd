@@ -27,6 +27,7 @@ ENDIF()
 
 FIND_LIBRARY(ubox NAMES ubox)
 FIND_LIBRARY(ubus NAMES ubus)
+FIND_LIBRARY(uci NAMES uci)
 FIND_LIBRARY(blobmsg_json NAMES blobmsg_json)
 FIND_LIBRARY(json_script NAMES json_script)
 FIND_LIBRARY(json NAMES json-c json)
@@ -113,7 +114,7 @@ ENDIF()
 
 IF(JAIL_SUPPORT)
 ADD_EXECUTABLE(ujail jail/jail.c jail/cgroups.c jail/cgroups-bpf.c jail/elf.c jail/fs.c jail/capabilities.c jail/netifd.c ${SOURCES_OCI_SECCOMP})
-TARGET_LINK_LIBRARIES(ujail ${ubox} ${ubus} ${blobmsg_json})
+TARGET_LINK_LIBRARIES(ujail ${ubox} ${ubus} ${uci} ${blobmsg_json})
 INSTALL(TARGETS ujail
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )

@@ -16,6 +16,10 @@
 
 #define _GNU_SOURCE         /* See feature_test_macros(7) */
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <libgen.h>
 
 #include <sys/inotify.h>
 #include <sys/stat.h>
@@ -30,22 +34,110 @@
 #include <libubus.h>
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
+#include <uci.h>
 
 #include "netifd.h"
 #include "log.h"
 
 #define INOTIFY_SZ (sizeof(struct inotify_event) + PATH_MAX + 1)
 
-static char ubusd_path[] = "/sbin/ubusd";
-static char netifd_path[] = "/sbin/netifd";
+static const char ubusd_path[] = "/sbin/ubusd";
+static const char netifd_path[] = "/sbin/netifd";
+static const char uci_net[] = "network";
 
-static char *jail_name, *ubus_sock_path, *ubus_sock_dir;
+static char *jail_name, *ubus_sock_path, *ubus_sock_dir, *uci_config_network = NULL;
 
 static char *inotify_buffer;
 static struct uloop_fd fd_inotify_read;
 struct ubus_context *ctx;
 static struct passwd *ubus_pw;
 static pid_t ns_pid;
+
+/* generate /etc/config/network for jail'ed netifd */
+static int gen_jail_uci_network(const char *jailname, FILE *f)
+{
+	struct uci_context *ctx = uci_alloc_context();
+	struct uci_package *pkg = NULL;
+	struct uci_element *e, *t;
+	bool has_loopback = false;
+	int ret = 0;
+
+	/* load network uci package */
+	if (uci_load(ctx, uci_net, &pkg) != UCI_OK) {
+		char *err;
+		uci_get_errorstr(ctx, &err, uci_net);
+		fprintf(stderr, "unable to load configuration (%s)\n", err);
+		free(err);
+		ret = EIO;
+		goto uci_out;
+	}
+
+	/* remove all sections which don't match jail */
+	uci_foreach_element_safe(&pkg->sections, t, e) {
+		struct uci_section *s = uci_to_section(e);
+		struct uci_option *o = uci_lookup_option(ctx, s, "jail");
+		struct uci_ptr ptr = { .p = pkg, .s = s };
+
+		/* keep match, but remove 'jail' option and rename 'jail_ifname' */
+		if (o && o->type == UCI_TYPE_STRING && !strcmp(o->v.string, jailname)) {
+			ptr.o = o;
+			struct uci_option *jio = uci_lookup_option(ctx, s, "jail_device");
+			if (!jio)
+				jio = uci_lookup_option(ctx, s, "jail_ifname");
+
+			if (jio) {
+				struct uci_ptr ren_ptr = { .p = pkg, .s = s, .o = jio, .value = "device" };
+				struct uci_option *host_device = uci_lookup_option(ctx, s, "device");
+				struct uci_option *legacy_ifname = uci_lookup_option(ctx, s, "ifname");
+				if (host_device && legacy_ifname) {
+					struct uci_ptr delif_ptr = { .p = pkg, .s = s, .o = legacy_ifname };
+					uci_delete(ctx, &delif_ptr);
+				}
+
+				struct uci_ptr renif_ptr = { .p = pkg, .s = s, .o = host_device?:legacy_ifname, .value = "host_device" };
+				uci_rename(ctx, &renif_ptr);
+				uci_rename(ctx, &ren_ptr);
+			}
+		}
+
+		uci_delete(ctx, &ptr);
+	}
+
+	/* check if device 'lo' is defined by any remaining interfaces */
+	uci_foreach_element(&pkg->sections, e) {
+		struct uci_section *s = uci_to_section(e);
+		if (strcmp(s->type, "interface"))
+			continue;
+
+		const char *devname = uci_lookup_option_string(ctx, s, "device");
+		if (devname && !strcmp(devname, "lo")) {
+			has_loopback = true;
+			break;
+		}
+	}
+
+	/* create loopback interface section if not defined */
+	if (!has_loopback) {
+		struct uci_ptr ptr = { .p = pkg, .section = "loopback", .value = "interface" };
+		uci_set(ctx, &ptr);
+		uci_reorder_section(ctx, ptr.s, 0);
+		struct uci_ptr ptr1 = { .p = pkg, .s = ptr.s, .option = "device", .value = "lo" };
+		struct uci_ptr ptr2 = { .p = pkg, .s = ptr.s, .option = "proto", .value = "static" };
+		struct uci_ptr ptr3 = { .p = pkg, .s = ptr.s, .option = "ipaddr", .value = "127.0.0.1" };
+		struct uci_ptr ptr4 = { .p = pkg, .s = ptr.s, .option = "netmask", .value = "255.0.0.0" };
+		uci_set(ctx, &ptr1);
+		uci_set(ctx, &ptr2);
+		uci_set(ctx, &ptr3);
+		uci_set(ctx, &ptr4);
+	}
+
+	ret = uci_export(ctx, f, pkg, false);
+
+uci_out:
+	uci_free_context(ctx);
+
+	return ret;
+}
 
 static void run_ubusd(struct uloop_timeout *t)
 {
@@ -82,8 +174,12 @@ static void run_netifd(struct uloop_timeout *t)
 {
 	static struct blob_buf req;
 	void *ins, *in, *cmd, *jail, *setns, *setnso, *namespaces, *mount;
-	char *resolvconf_dir, *resolvconf;
+	char *resolvconf_dir, *resolvconf, *ucinetmount;
+	char uci_dir[] = "/tmp/ujail-uci-XXXXXX";
+
+	FILE *ucinetf;
 	uint32_t id;
+	bool running = false;
 
 	uloop_fd_delete(&fd_inotify_read);
 	close(fd_inotify_read.fd);
@@ -91,10 +187,27 @@ static void run_netifd(struct uloop_timeout *t)
 	if (asprintf(&resolvconf_dir, "/tmp/resolv.conf-%s.d", jail_name) == -1)
 		return;
 
-	if (asprintf(&resolvconf, "%s/resolv.conf.auto", resolvconf_dir) == -1) {
-		free(resolvconf_dir);
-		return;
+	if (asprintf(&resolvconf, "%s/resolv.conf.auto", resolvconf_dir) == -1)
+		goto netifd_out_resolvconf_dir;
+
+	if (!mkdtemp(uci_dir))
+		goto netifd_out_resolvconf;
+
+	if (asprintf(&uci_config_network, "%s/network", uci_dir) == -1)
+		goto netifd_out_ucidir;
+
+	if (asprintf(&ucinetmount, "%s:/etc/config/network", uci_config_network) == -1)
+		goto netifd_out_ucinetconf;
+
+	ucinetf = fopen(uci_config_network, "w");
+	if (!ucinetf)
+		goto netifd_out_ucinetmount;
+
+	if (gen_jail_uci_network(jail_name, ucinetf)) {
+		fclose(ucinetf);
+		goto netifd_out_ucinetmount;
 	}
+	fclose(ucinetf);
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", jail_name);
@@ -125,6 +238,7 @@ static void run_netifd(struct uloop_timeout *t)
 	mount = blobmsg_open_table(&req, "mount");
 	blobmsg_add_string(&req, ubus_sock_dir, "1");
 	blobmsg_add_string(&req, resolvconf_dir, "1");
+	blobmsg_add_string(&req, ucinetmount, "0");
 	blobmsg_add_string(&req, "/etc/hotplug.d", "0");
 	blobmsg_add_string(&req, "/lib/functions.sh", "0");
 	blobmsg_add_string(&req, "/lib/netifd", "0");
@@ -151,11 +265,22 @@ static void run_netifd(struct uloop_timeout *t)
 	blobmsg_close_table(&req, ins);
 
 	if (!ubus_lookup_id(ctx, "container", &id))
-		ubus_invoke(ctx, id, "add", req.head, NULL, NULL, 3000);
+		running = !ubus_invoke(ctx, id, "add", req.head, NULL, NULL, 3000);
 
 	blob_buf_free(&req);
-	free(resolvconf_dir);
+netifd_out_ucinetmount:
+	free(ucinetmount);
+netifd_out_ucinetconf:
+	if (!running)
+		unlink(uci_config_network);
+	free(uci_config_network);
+netifd_out_ucidir:
+	if (!running)
+		rmdir(uci_dir);
+netifd_out_resolvconf:
 	free(resolvconf);
+netifd_out_resolvconf_dir:
+	free(resolvconf_dir);
 
 	uloop_end();
 }
@@ -284,6 +409,12 @@ int jail_network_stop(void)
 	ret = kill_jail_instance("netifd");
 	if (ret)
 		return ret;
+
+	if (uci_config_network) {
+		unlink(uci_config_network);
+		rmdir(dirname(uci_config_network));
+		free(uci_config_network);
+	};
 
 	ret = kill_jail_instance("ubus");
 	if (ret)
