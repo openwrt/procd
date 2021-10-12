@@ -590,9 +590,6 @@ static int uxc_create(char *name, bool immediately)
 		ret = EIO;
 	}
 
-	free(jailname);
-	free(path);
-
 	return ret;
 }
 
