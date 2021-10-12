@@ -1293,33 +1293,13 @@ static void post_start_hook(void)
 	exit(EXIT_FAILURE);
 }
 
-static int ns_open_pid(const char *nstype, const pid_t target_ns)
+int ns_open_pid(const char *nstype, const pid_t target_ns)
 {
 	char pid_pid_path[PATH_MAX];
 
 	snprintf(pid_pid_path, sizeof(pid_pid_path), "/proc/%u/ns/%s", target_ns, nstype);
 
 	return open(pid_pid_path, O_RDONLY);
-}
-
-static void netns_updown(pid_t pid, bool start)
-{
-	static struct blob_buf req;
-	uint32_t id;
-
-	if (!parent_ctx)
-		return;
-
-	blob_buf_init(&req, 0);
-	blobmsg_add_string(&req, "jail", opts.name);
-	blobmsg_add_u32(&req, "pid", pid);
-	blobmsg_add_u8(&req, "start", start);
-
-	if (ubus_lookup_id(parent_ctx, "network", &id) ||
-	    ubus_invoke(parent_ctx, id, "netns_updown", req.head, NULL, NULL, 3000))
-		INFO("ubus request failed\n");
-
-	blob_buf_free(&req);
 }
 
 static int parseOCIenvarray(struct blob_attr *msg, char ***envp)
@@ -3027,11 +3007,8 @@ static void post_main(struct uloop_timeout *t)
 			}
 		}
 
-		if (opts.namespace & CLONE_NEWNET) {
+		if (opts.namespace & CLONE_NEWNET)
 			jail_network_start(parent_ctx, opts.name, jail_process.pid);
-			netns_fd = ns_open_pid("net", jail_process.pid);
-			netns_updown(jail_process.pid, true);
-		}
 
 		if (jail_writepid(jail_process.pid)) {
 			ERROR("failed to write pidfile: %m\n");
@@ -3097,7 +3074,6 @@ static void post_poststop(void);
 static void poststop(void) {
 	if (opts.namespace & CLONE_NEWNET) {
 		setns(netns_fd, CLONE_NEWNET);
-		netns_updown(getpid(), false);
 		jail_network_stop();
 		close(netns_fd);
 	}

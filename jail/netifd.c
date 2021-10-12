@@ -38,6 +38,7 @@
 
 #include "netifd.h"
 #include "log.h"
+#include "jail.h"
 
 #define INOTIFY_SZ (sizeof(struct inotify_event) + PATH_MAX + 1)
 
@@ -49,18 +50,34 @@ static char *jail_name, *ubus_sock_path, *ubus_sock_dir, *uci_config_network = N
 
 static char *inotify_buffer;
 static struct uloop_fd fd_inotify_read;
-struct ubus_context *ctx;
 static struct passwd *ubus_pw;
 static pid_t ns_pid;
 
+static struct ubus_context *ctx = NULL;
+static struct ubus_context *netifd_ubus_ctx = NULL;
+
+static struct ubus_subscriber config_watch_subscribe;
+
 /* generate /etc/config/network for jail'ed netifd */
-static int gen_jail_uci_network(const char *jailname, FILE *f)
+static int gen_jail_uci_network(void)
 {
 	struct uci_context *ctx = uci_alloc_context();
 	struct uci_package *pkg = NULL;
 	struct uci_element *e, *t;
 	bool has_loopback = false;
 	int ret = 0;
+	FILE *ucinetf;
+
+	/* if no network configuration is active just return */
+	if (!uci_config_network)
+		goto uci_out;
+
+	/* open output uci network config file */
+	ucinetf = fopen(uci_config_network, "w");
+	if (!ucinetf) {
+		ret = errno;
+		goto uci_out;
+	}
 
 	/* load network uci package */
 	if (uci_load(ctx, uci_net, &pkg) != UCI_OK) {
@@ -69,7 +86,7 @@ static int gen_jail_uci_network(const char *jailname, FILE *f)
 		fprintf(stderr, "unable to load configuration (%s)\n", err);
 		free(err);
 		ret = EIO;
-		goto uci_out;
+		goto ucinetf_out;
 	}
 
 	/* remove all sections which don't match jail */
@@ -79,7 +96,7 @@ static int gen_jail_uci_network(const char *jailname, FILE *f)
 		struct uci_ptr ptr = { .p = pkg, .s = s };
 
 		/* keep match, but remove 'jail' option and rename 'jail_ifname' */
-		if (o && o->type == UCI_TYPE_STRING && !strcmp(o->v.string, jailname)) {
+		if (o && o->type == UCI_TYPE_STRING && !strcmp(o->v.string, jail_name)) {
 			ptr.o = o;
 			struct uci_option *jio = uci_lookup_option(ctx, s, "jail_device");
 			if (!jio)
@@ -131,7 +148,10 @@ static int gen_jail_uci_network(const char *jailname, FILE *f)
 		uci_set(ctx, &ptr4);
 	}
 
-	ret = uci_export(ctx, f, pkg, false);
+	ret = uci_export(ctx, ucinetf, pkg, false);
+
+ucinetf_out:
+	fclose(ucinetf);
 
 uci_out:
 	uci_free_context(ctx);
@@ -169,20 +189,22 @@ static void run_ubusd(struct uloop_timeout *t)
 	blob_buf_free(&req);
 }
 
-
 static void run_netifd(struct uloop_timeout *t)
 {
 	static struct blob_buf req;
 	void *ins, *in, *cmd, *jail, *setns, *setnso, *namespaces, *mount;
-	char *resolvconf_dir, *resolvconf, *ucinetmount;
-	char uci_dir[] = "/tmp/ujail-uci-XXXXXX";
+	char *resolvconf_dir, *resolvconf, *ucimount;
+	char uci_dir[] = "/var/containers/ujail-uci-XXXXXX";
 
-	FILE *ucinetf;
 	uint32_t id;
 	bool running = false;
 
 	uloop_fd_delete(&fd_inotify_read);
 	close(fd_inotify_read.fd);
+
+	netifd_ubus_ctx = ubus_connect(ubus_sock_path);
+	if (!netifd_ubus_ctx)
+		return;
 
 	if (asprintf(&resolvconf_dir, "/tmp/resolv.conf-%s.d", jail_name) == -1)
 		return;
@@ -196,18 +218,11 @@ static void run_netifd(struct uloop_timeout *t)
 	if (asprintf(&uci_config_network, "%s/network", uci_dir) == -1)
 		goto netifd_out_ucidir;
 
-	if (asprintf(&ucinetmount, "%s:/etc/config/network", uci_config_network) == -1)
+	if (asprintf(&ucimount, "%s:/etc/config", uci_dir) == -1)
 		goto netifd_out_ucinetconf;
 
-	ucinetf = fopen(uci_config_network, "w");
-	if (!ucinetf)
-		goto netifd_out_ucinetmount;
-
-	if (gen_jail_uci_network(jail_name, ucinetf)) {
-		fclose(ucinetf);
-		goto netifd_out_ucinetmount;
-	}
-	fclose(ucinetf);
+	if (gen_jail_uci_network())
+		goto netifd_out_ucimount;
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", jail_name);
@@ -238,7 +253,7 @@ static void run_netifd(struct uloop_timeout *t)
 	mount = blobmsg_open_table(&req, "mount");
 	blobmsg_add_string(&req, ubus_sock_dir, "1");
 	blobmsg_add_string(&req, resolvconf_dir, "1");
-	blobmsg_add_string(&req, ucinetmount, "0");
+	blobmsg_add_string(&req, ucimount, "0");
 	blobmsg_add_string(&req, "/etc/hotplug.d", "0");
 	blobmsg_add_string(&req, "/lib/functions.sh", "0");
 	blobmsg_add_string(&req, "/lib/netifd", "0");
@@ -267,13 +282,15 @@ static void run_netifd(struct uloop_timeout *t)
 	if (!ubus_lookup_id(ctx, "container", &id))
 		running = !ubus_invoke(ctx, id, "add", req.head, NULL, NULL, 3000);
 
-	blob_buf_free(&req);
-netifd_out_ucinetmount:
-	free(ucinetmount);
-netifd_out_ucinetconf:
 	if (!running)
+		blob_buf_free(&req);
+netifd_out_ucimount:
+	free(ucimount);
+netifd_out_ucinetconf:
+	if (!running) {
 		unlink(uci_config_network);
-	free(uci_config_network);
+		free(uci_config_network);
+	}
 netifd_out_ucidir:
 	if (!running)
 		rmdir(uci_dir);
@@ -283,26 +300,6 @@ netifd_out_resolvconf_dir:
 	free(resolvconf_dir);
 
 	uloop_end();
-}
-
-static int kill_jail_instance(char *instance)
-{
-	static struct blob_buf req;
-	uint32_t id;
-	int ret = 0;
-
-	blob_buf_init(&req, 0);
-	blobmsg_add_string(&req, "name", jail_name);
-	blobmsg_add_string(&req, "instance", instance);
-
-	if (ubus_lookup_id(ctx, "container", &id) ||
-		ubus_invoke(ctx, id, "delete", req.head, NULL, NULL, 3000)) {
-		ret = EIO;
-	}
-
-	blob_buf_free(&req);
-
-	return ret;
 }
 
 static struct uloop_timeout netifd_start_timeout = { .cb = run_netifd, };
@@ -333,12 +330,96 @@ static void inotify_read_handler(struct uloop_fd *u, unsigned int events)
         }
 }
 
+static void netns_updown(struct ubus_context *ctx, const char *name, bool start, int netns_fd)
+{
+	static struct blob_buf req;
+	uint32_t id;
+
+	if (!ctx)
+		return;
+
+	blob_buf_init(&req, 0);
+	if (name)
+		blobmsg_add_string(&req, "jail", name);
+
+	blobmsg_add_u8(&req, "start", start);
+
+	if (ubus_lookup_id(ctx, "network", &id) ||
+	    ubus_invoke_fd(ctx, id, "netns_updown", req.head, NULL, NULL, 3000, netns_fd)) {
+		INFO("ubus request failed\n");
+	}
+
+	blob_buf_free(&req);
+}
+
+static void jail_network_reload(struct uloop_timeout *t)
+{
+	uint32_t id;
+
+	if (!netifd_ubus_ctx)
+		return;
+
+	if (gen_jail_uci_network())
+		return;
+
+	if (ubus_lookup_id(netifd_ubus_ctx, "network", &id))
+		return;
+
+	ubus_invoke(netifd_ubus_ctx, id, "reload", NULL, NULL, NULL, 3000);
+}
+
+static const struct blobmsg_policy service_watch_policy = { "config", BLOBMSG_TYPE_STRING };
+static struct uloop_timeout jail_network_reload_timeout = { .cb = jail_network_reload, };
+
+static int config_watch_notify_cb(struct ubus_context *ctx, struct ubus_object *obj,
+			   struct ubus_request_data *req, const char *method,
+			   struct blob_attr *msg)
+{
+	struct blob_attr *attr;
+	const char *config;
+
+	if (strcmp(method, "config.change"))
+		return 0;
+
+	blobmsg_parse(&service_watch_policy, 1, &attr, blob_data(msg), blob_len(msg));
+	if (!attr)
+		return 1;
+
+	config = blobmsg_get_string(attr);
+	if (strcmp(config, "network"))
+		return 0;
+
+	uloop_timeout_add(&jail_network_reload_timeout);
+
+	return 0;
+}
+
+static void watch_ubus_service(void)
+{
+	uint32_t id;
+
+	config_watch_subscribe.cb = config_watch_notify_cb;
+	if (ubus_register_subscriber(ctx, &config_watch_subscribe)) {
+		ERROR("failed to register ubus subscriber\n");
+		return;
+	}
+
+	if (ubus_lookup_id(ctx, "service", &id))
+		return;
+
+	if (!ubus_subscribe(ctx, &config_watch_subscribe, id))
+		return;
+
+	ERROR("failed to subscribe %d\n", id);
+}
+
 static struct uloop_timeout ubus_start_timeout = { .cb = run_ubusd, };
 
 int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t new_ns_pid)
 {
 	ubus_pw = getpwnam("ubus");
 	int ret = 0;
+	int netns_fd;
 
 	ctx = new_ctx;
 	ns_pid = new_ns_pid;
@@ -387,6 +468,13 @@ int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t 
 		goto errout_inotify;
 	}
 
+	watch_ubus_service();
+
+	netns_fd = ns_open_pid("net", ns_pid);
+
+	netns_updown(ctx, jail_name, true, netns_fd);
+
+	close(netns_fd);
 	uloop_timeout_add(&ubus_start_timeout);
 	uloop_run();
 
@@ -402,23 +490,45 @@ errout_dir:
 	return ret;
 }
 
+static int jail_delete_instance(const char *instance)
+{
+	static struct blob_buf req;
+	uint32_t id;
+
+	if (ubus_lookup_id(ctx, "container", &id))
+		return -1;
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "name", jail_name);
+	blobmsg_add_string(&req, "instance", instance);
+
+	return ubus_invoke(ctx, id, "delete", req.head, NULL, NULL, 3000);
+}
+
 int jail_network_stop(void)
 {
-	int ret;
+	int host_netns = open("/proc/self/ns/net", O_RDONLY);
 
-	ret = kill_jail_instance("netifd");
-	if (ret)
-		return ret;
+	if (host_netns < 0)
+		return errno;
+
+	netns_updown(netifd_ubus_ctx, NULL, false, host_netns);
+
+	close(host_netns);
+	ubus_free(netifd_ubus_ctx);
+
+	jail_delete_instance("netifd");
+	jail_delete_instance("ubus");
 
 	if (uci_config_network) {
 		unlink(uci_config_network);
 		rmdir(dirname(uci_config_network));
 		free(uci_config_network);
-	};
+	}
 
-	ret = kill_jail_instance("ubus");
-	if (ret)
-		return ret;
+	free(ubus_sock_path);
+	rmdir(ubus_sock_dir);
+	free(ubus_sock_dir);
 
 	return 0;
 }
