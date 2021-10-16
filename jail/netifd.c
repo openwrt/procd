@@ -425,14 +425,12 @@ int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t 
 	ns_pid = new_ns_pid;
 	jail_name = new_jail_name;
 
-	asprintf(&ubus_sock_dir, "/var/containers/ubus-%s", jail_name);
-	if (!ubus_sock_dir) {
+	if (asprintf(&ubus_sock_dir, "/var/containers/ubus-%s", jail_name) == -1) {
 		ret = ENOMEM;
 		goto errout_dir;
 	}
 
-	asprintf(&ubus_sock_path, "%s/ubus", ubus_sock_dir);
-	if (!ubus_sock_path) {
+	if (asprintf(&ubus_sock_path, "%s/ubus", ubus_sock_dir) == -1) {
 		ret = ENOMEM;
 		goto errout_path;
 	}
