@@ -530,6 +530,7 @@ static int uxc_create(char *name, bool immediately)
 			continue;
 
 		found = true;
+		break;
 	}
 
 	if (!found)
@@ -545,7 +546,6 @@ static int uxc_create(char *name, bool immediately)
 
 	if (tb[CONF_WRITE_OVERLAY_PATH])
 		writepath = blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]);
-
 
 	if (tb[CONF_JAIL])
 		jailname = blobmsg_get_string(tb[CONF_JAIL]);
