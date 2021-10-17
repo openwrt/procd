@@ -469,6 +469,10 @@ int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t 
 	watch_ubus_service();
 
 	netns_fd = ns_open_pid("net", ns_pid);
+	if (netns_fd < 0) {
+		ret = ESRCH;
+		goto errout_inotify;
+	}
 
 	netns_updown(host_ubus_ctx, jail_name, true, netns_fd);
 
