@@ -20,6 +20,7 @@
 #include <string.h>
 #include <errno.h>
 #include <libgen.h>
+#include <fcntl.h>
 
 #include <sys/inotify.h>
 #include <sys/stat.h>
