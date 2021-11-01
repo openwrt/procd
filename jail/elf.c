@@ -235,11 +235,7 @@ int elf_load_deps(const char *path, const char *map)
 	unsigned long dyn_offset, dyn_size;
 	unsigned long load_offset, load_vaddr;
 	unsigned long interp_offset;
-#if defined(__mips__) && (__mips == 64)
-	static int gcc_mips64_bug_work_around;
 
-	gcc_mips64_bug_work_around = 1;
-#endif
 	if (elf_find_section(map, PT_LOAD, &load_offset, NULL, &load_vaddr)) {
 		ERROR("failed to load the .load section from %s\n", path);
 		return -1;
@@ -255,14 +251,6 @@ int elf_load_deps(const char *path, const char *map)
 	}
 
 	int clazz = map[EI_CLASS];
-
-#if defined(__mips__) && (__mips == 64)
-	if (gcc_mips64_bug_work_around != 1) {
-		ERROR("compiler bug: GCC for MIPS64 should be fixed!\n");
-		return -1;
-	}
-	gcc_mips64_bug_work_around = 0;
-#endif
 
 	if (clazz == ELFCLASS32)
 		return elf32_scan_dynamic(map, dyn_offset, dyn_size, load_vaddr - load_offset);
