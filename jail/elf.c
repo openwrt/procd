@@ -102,7 +102,7 @@ const char* find_lib(const char *file)
 	return l->path;
 }
 
-static int elf64_find_section(const char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
+static int elf64_find_section(const char *map, unsigned int type, unsigned long *offset, unsigned long *size, unsigned long *vaddr)
 {
 	Elf64_Ehdr *e;
 	Elf64_Phdr *ph;
@@ -125,7 +125,7 @@ static int elf64_find_section(const char *map, unsigned int type, unsigned int *
 	return -1;
 }
 
-static int elf32_find_section(const char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
+static int elf32_find_section(const char *map, unsigned int type, unsigned long *offset, unsigned long *size, unsigned long *vaddr)
 {
 	Elf32_Ehdr *e;
 	Elf32_Phdr *ph;
@@ -148,7 +148,7 @@ static int elf32_find_section(const char *map, unsigned int type, unsigned int *
 	return -1;
 }
 
-static int elf_find_section(const char *map, unsigned int type, unsigned int *offset, unsigned int *size, unsigned int *vaddr)
+static int elf_find_section(const char *map, unsigned int type, unsigned long *offset, unsigned long *size, unsigned long *vaddr)
 {
 	int clazz = map[EI_CLASS];
 
@@ -162,7 +162,7 @@ static int elf_find_section(const char *map, unsigned int type, unsigned int *of
 	return -1;
 }
 
-static int elf32_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int load_offset)
+static int elf32_scan_dynamic(const char *map, unsigned long dyn_offset, unsigned long dyn_size, long load_offset)
 {
 	Elf32_Dyn *dynamic = (Elf32_Dyn *) (map + dyn_offset);
 	const char *strtab = NULL;
@@ -196,7 +196,7 @@ static int elf32_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int
 	return 0;
 }
 
-static int elf64_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int load_offset)
+static int elf64_scan_dynamic(const char *map, unsigned long dyn_offset, unsigned long dyn_size, long load_offset)
 {
 	Elf64_Dyn *dynamic = (Elf64_Dyn *) (map + dyn_offset);
 	const char *strtab = NULL;
@@ -232,9 +232,9 @@ static int elf64_scan_dynamic(const char *map, int dyn_offset, int dyn_size, int
 
 int elf_load_deps(const char *path, const char *map)
 {
-	unsigned int dyn_offset, dyn_size;
-	unsigned int load_offset, load_vaddr;
-	unsigned int interp_offset;
+	unsigned long dyn_offset, dyn_size;
+	unsigned long load_offset, load_vaddr;
+	unsigned long interp_offset;
 #if defined(__mips__) && (__mips == 64)
 	static int gcc_mips64_bug_work_around;
 
