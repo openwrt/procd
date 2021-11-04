@@ -155,7 +155,7 @@ static void trigger_command_start(struct uloop_timeout *timeout)
 static void trigger_command_add(struct trigger *t, struct blob_attr *data)
 {
 	struct trigger_command *cmd;
-	int remaining;
+	int64_t remaining;
 
 	cmd = avl_find_element(&trigger_pending, data, cmd, avl);
 	if (cmd) {
@@ -166,7 +166,7 @@ static void trigger_command_add(struct trigger *t, struct blob_attr *data)
 		}
 
 		/* Extend timer if trigger timeout is bigger than remaining time */
-		remaining = uloop_timeout_remaining(&cmd->delay);
+		remaining = uloop_timeout_remaining64(&cmd->delay);
 		if (remaining < t->timeout)
 			uloop_timeout_set(&cmd->delay, t->timeout);
 
