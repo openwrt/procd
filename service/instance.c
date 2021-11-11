@@ -385,6 +385,11 @@ jail_run(struct service_instance *in, char **argv)
 	if (in->require_jail)
 		argv[argc++] = "-E";
 
+	blobmsg_list_for_each(&in->env, var) {
+		argv[argc++] = "-e";
+		argv[argc++] = (char *) blobmsg_name(var->data);
+	}
+
 	blobmsg_list_for_each(&jail->mount, var) {
 		const char *type = blobmsg_data(var->data);
 
@@ -1137,6 +1142,7 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 {
 	struct blob_attr *tb[__JAIL_ATTR_MAX];
 	struct jail *jail = &in->jail;
+	struct blobmsg_list_node *var;
 
 	blobmsg_parse(jail_attr, __JAIL_ATTR_MAX, tb,
 		blobmsg_data(attr), blobmsg_data_len(attr));
@@ -1218,6 +1224,9 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 			jail->argc += 2;
 		instance_fill_array(&jail->mount, tb[JAIL_ATTR_MOUNT], NULL, false);
 	}
+
+	blobmsg_list_for_each(&in->env, var)
+		jail->argc += 2;
 
 	if (in->seccomp)
 		jail->argc += 2;

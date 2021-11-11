@@ -69,7 +69,7 @@
 #endif
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"cC:d:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:T:y"
+#define OPT_ARGS	"cC:d:e:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:T:y"
 
 #define OCI_VERSION_STRING "1.0.2"
 
@@ -980,6 +980,7 @@ static void usage(void)
 	fprintf(stderr, "  -C <file>\tcapabilities drop config\n");
 	fprintf(stderr, "  -c\t\tset PR_SET_NO_NEW_PRIVS\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
+	fprintf(stderr, "  -e <var>\timport environment variable\n");
 	fprintf(stderr, "namespace jail options:\n");
 	fprintf(stderr, "  -h <hostname>\tchange the hostname of the jail\n");
 	fprintf(stderr, "  -N\t\tjail has network namespace\n");
@@ -2541,6 +2542,12 @@ static int pidns_fd;
 static int timens_fd;
 #endif
 static void post_create_runtime(void);
+
+struct env_e {
+	struct list_head list;
+	char *envarg;
+};
+
 int main(int argc, char **argv)
 {
 	uid_t uid = getuid();
@@ -2549,6 +2556,9 @@ int main(int argc, char **argv)
 	int ret = EXIT_FAILURE;
 	int ch;
 	char *tmp;
+	struct list_head envl = LIST_HEAD_INIT(envl);
+	struct env_e *enve, *tmpenve;
+	unsigned short int envn = 0, envc = 0;
 
 	if (uid) {
 		ERROR("not root, aborting: %m\n");
@@ -2577,6 +2587,11 @@ int main(int argc, char **argv)
 		switch (ch) {
 		case 'd':
 			debug = atoi(optarg);
+			break;
+		case 'e':
+			enve = calloc(1, sizeof(*enve));
+			enve->envarg = optarg;
+			list_add_tail(&enve->list, &envl);
 			break;
 		case 'p':
 			opts.namespace |= CLONE_NEWNS;
@@ -2682,6 +2697,34 @@ int main(int argc, char **argv)
 
 	if (opts.namespace && !opts.ocibundle)
 		opts.namespace |= CLONE_NEWIPC | CLONE_NEWPID;
+
+	/*
+	 * env import from cmdline is not available for OCI containers
+	 */
+	if (opts.ocibundle && !list_empty(&envl)) {
+		ret=-ENOTSUP;
+		goto errout;
+	}
+
+	/*
+	 * prepare list of env variables to import for slim containers
+	 */
+	if (!list_empty(&envl)) {
+		list_for_each_entry(enve, &envl, list)
+			++envn;
+
+		opts.envp = calloc(1 + envn, sizeof(char*));
+		list_for_each_entry_safe(enve, tmpenve, &envl, list) {
+			tmp = getenv(enve->envarg);
+			if (tmp)
+				asprintf(&opts.envp[envc++], "%s=%s", enve->envarg, tmp);
+
+			list_del(&enve->list);
+			free(enve);
+		}
+
+		opts.envp[envc] = NULL;
+	}
 
 	/*
 	 * uid in parent user namespace representing root user in new
