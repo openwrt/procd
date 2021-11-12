@@ -653,6 +653,34 @@ service_handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
+static void
+service_avl_stop_all(struct avl_tree *sctree, unsigned int *term_timeout)
+{
+	struct service *s;
+
+	avl_for_each_element(sctree, s, avl) {
+		struct service_instance *in, *ptr;
+
+		vlist_for_each_element_safe(&s->instances, in, node, ptr) {
+			if (in->term_timeout > *term_timeout)
+				*term_timeout = in->term_timeout;
+			instance_stop(in, true);
+		}
+	}
+}
+
+void
+service_stop_all(void)
+{
+	unsigned int term_timeout = 0;
+
+	service_avl_stop_all(&containers, &term_timeout);
+	service_avl_stop_all(&services, &term_timeout);
+	/* ToDo: inittab */
+
+	sleep(term_timeout);
+}
+
 static int
 service_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 		      struct ubus_request_data *req, const char *method,

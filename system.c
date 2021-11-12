@@ -33,6 +33,7 @@
 #include "procd.h"
 #include "sysupgrade.h"
 #include "watchdog.h"
+#include "service/service.h"
 
 static struct blob_buf b;
 static int notify;
@@ -809,6 +810,8 @@ static int sysupgrade(struct ubus_context *ctx, struct ubus_object *obj,
 		sysupgrade_error(ctx, req, "Firmware image doesn't allow preserving a backup");
 		return UBUS_STATUS_NOT_SUPPORTED;
 	}
+
+	service_stop_all();
 
 	sysupgrade_exec_upgraded(blobmsg_get_string(tb[SYSUPGRADE_PREFIX]),
 				 blobmsg_get_string(tb[SYSUPGRADE_PATH]),
