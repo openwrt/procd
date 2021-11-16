@@ -123,6 +123,9 @@ static void child_exit(struct uloop_process *proc, int ret)
 	DEBUG(4, "pid:%d, exitcode:%d\n", proc->pid, ret);
 	proc->pid = 0;
 
+	if (a->respawn < 0)
+		return;
+
 	if (!dev_exist(a->id)) {
 		DEBUG(4, "Skipping respawn: device '%s' does not exist anymore\n", a->id);
 		return;
@@ -291,6 +294,17 @@ void procd_inittab_run(const char *handler)
 			if (!a->handler->multi)
 				break;
 		}
+}
+
+void procd_inittab_kill(void)
+{
+	struct init_action *a;
+
+	list_for_each_entry(a, &actions, list) {
+		a->respawn = -1;
+		if (a->proc.pid)
+			kill(a->proc.pid, SIGKILL);
+	}
 }
 
 void procd_inittab(void)

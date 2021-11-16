@@ -676,7 +676,7 @@ service_stop_all(void)
 
 	service_avl_stop_all(&containers, &term_timeout);
 	service_avl_stop_all(&services, &term_timeout);
-	/* ToDo: inittab */
+	procd_inittab_kill();
 
 	sleep(term_timeout);
 }
