@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -312,6 +313,12 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
+static unsigned long
+kscale(unsigned long b, unsigned long bs)
+{
+	return (b * (unsigned long long) bs + 1024/2) / 1024;
+}
+
 static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
                 struct ubus_request_data *req, const char *method,
                 struct blob_attr *msg)
@@ -325,6 +332,12 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	char *key, *val;
 	unsigned long long available, cached;
 	FILE *f;
+	int i;
+	struct statvfs s;
+	const char *fslist[] = {
+		"/",    "root",
+		"/tmp", "tmp",
+	};
 
 	if (sysinfo(&info))
 		return UBUS_STATUS_UNKNOWN_ERROR;
@@ -383,6 +396,23 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_add_u64(&b, "available", available);
 	blobmsg_add_u64(&b, "cached", cached);
 	blobmsg_close_table(&b, c);
+
+	for (i = 0; i < sizeof(fslist) / sizeof(fslist[0]); i += 2) {
+		if (statvfs(fslist[i], &s))
+			continue;
+
+		c = blobmsg_open_table(&b, fslist[i+1]);
+
+		if (!s.f_frsize)
+			s.f_frsize = s.f_bsize;
+
+		blobmsg_add_u64(&b, "total", kscale(s.f_blocks, s.f_frsize));
+		blobmsg_add_u64(&b, "free",  kscale(s.f_bfree, s.f_frsize));
+		blobmsg_add_u64(&b, "used", kscale(s.f_blocks - s.f_bfree, s.f_frsize));
+		blobmsg_add_u64(&b, "avail", kscale(s.f_bavail, s.f_frsize));
+
+		blobmsg_close_table(&b, c);
+	}
 
 	c = blobmsg_open_table(&b, "swap");
 	blobmsg_add_u64(&b, "total",
