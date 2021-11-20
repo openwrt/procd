@@ -1387,22 +1387,6 @@ instance_config_parse(struct service_instance *in)
 	if (tb[INSTANCE_ATTR_RELOADSIG])
 		in->reload_signal = blobmsg_get_u32(tb[INSTANCE_ATTR_RELOADSIG]);
 
-	if (!in->trace && tb[INSTANCE_ATTR_JAIL])
-		in->has_jail = instance_jail_parse(in, tb[INSTANCE_ATTR_JAIL]);
-
-	if (in->has_jail) {
-		r = stat(UJAIL_BIN_PATH, &s);
-		if (r < 0) {
-			if (in->require_jail) {
-				ERROR("Cannot jail service %s::%s. %s: %m (%d)\n",
-						in->srv->name, in->name, UJAIL_BIN_PATH, r);
-				return false;
-			}
-			DEBUG(2, "unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
-			in->has_jail = false;
-		}
-	}
-
 	if (tb[INSTANCE_ATTR_STDOUT] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDOUT]))
 		in->_stdout.fd.fd = -1;
 
@@ -1461,6 +1445,22 @@ instance_config_parse(struct service_instance *in)
 		} else {
 			in->watchdog.freq = 30;
 			DEBUG(3, "invalid watchdog timeout (%d) given, using default (30)\n", vals[1]);
+		}
+	}
+
+	if (!in->trace && tb[INSTANCE_ATTR_JAIL])
+		in->has_jail = instance_jail_parse(in, tb[INSTANCE_ATTR_JAIL]);
+
+	if (in->has_jail) {
+		r = stat(UJAIL_BIN_PATH, &s);
+		if (r < 0) {
+			if (in->require_jail) {
+				ERROR("Cannot jail service %s::%s. %s: %m (%d)\n",
+						in->srv->name, in->name, UJAIL_BIN_PATH, r);
+				return false;
+			}
+			DEBUG(2, "unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
+			in->has_jail = false;
 		}
 	}
 
