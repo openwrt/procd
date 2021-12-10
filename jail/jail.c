@@ -69,7 +69,7 @@
 #endif
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"cC:d:e:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:T:y"
+#define OPT_ARGS	"cC:d:e:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
 
 #define OCI_VERSION_STRING "1.0.2"
 
@@ -153,6 +153,7 @@ static struct {
 	char *ocibundle;
 	bool immediately;
 	struct blob_attr *annotations;
+	int term_timeout;
 } opts;
 
 static struct blob_buf ocibuf;
@@ -1093,11 +1094,17 @@ static void jail_handle_signal(int signo)
 	if (hook_running) {
 		DEBUG("forwarding signal %d to the hook process\n", signo);
 		kill(hook_process.pid, signo);
+		/* set timeout to send SIGKILL hook process in case SIGTERM doesn't succeed */
+		if (signo == SIGTERM)
+			uloop_timeout_set(&hook_process_timeout, opts.term_timeout * 1000);
 	}
 
 	if (jail_running) {
 		DEBUG("forwarding signal %d to the jailed process\n", signo);
 		kill(jail_process.pid, signo);
+		/* set timeout to send SIGKILL jail process in case SIGTERM doesn't succeed */
+		if (signo == SIGTERM)
+			uloop_timeout_set(&jail_process_timeout, opts.term_timeout * 1000);
 	}
 }
 
@@ -1112,7 +1119,7 @@ static void signals_init(void)
 
 		if (!sigismember(&sigmask, i))
 			continue;
-		if ((i == SIGCHLD) || (i == SIGPIPE) || (i == SIGSEGV))
+		if ((i == SIGCHLD) || (i == SIGPIPE) || (i == SIGSEGV) || (i == SIGSTOP) || (i == SIGKILL))
 			continue;
 
 		s.sa_handler = jail_handle_signal;
@@ -2577,6 +2584,9 @@ int main(int argc, char **argv)
 	opts.setns.time = -1;
 #endif
 
+	/* default 5 seconds timeout after SIGTERM before SIGKILL is sent */
+	opts.term_timeout = 5;
+
 	umask(022);
 	mount_list_init();
 	init_library_search();
@@ -2673,6 +2683,9 @@ int main(int argc, char **argv)
 			break;
 		case 'O':
 			opts.overlaydir = realpath(optarg, NULL);
+			break;
+		case 't':
+			opts.term_timeout = atoi(optarg);
 			break;
 		case 'T':
 			opts.tmpoverlaysize = optarg;

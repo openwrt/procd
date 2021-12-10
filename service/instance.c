@@ -288,11 +288,16 @@ instance_gen_setns_argstr(struct blob_attr *attr)
 static inline int
 jail_run(struct service_instance *in, char **argv)
 {
+	char *term_timeout_str;
 	struct blobmsg_list_node *var;
 	struct jail *jail = &in->jail;
 	int argc = 0;
 
 	argv[argc++] = UJAIL_BIN_PATH;
+
+	asprintf(&term_timeout_str, "%d", in->term_timeout);
+	argv[argc++] = "-t";
+	argv[argc++] = term_timeout_str;
 
 	if (jail->name) {
 		argv[argc++] = "-n";
@@ -867,7 +872,8 @@ instance_stop(struct service_instance *in, bool halt)
 	in->halt = halt;
 	in->restart = in->respawn = false;
 	kill(in->proc.pid, SIGTERM);
-	uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
+	if (!in->has_jail)
+		uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
 }
 
 static void
@@ -884,7 +890,8 @@ instance_restart(struct service_instance *in)
 	in->halt = true;
 	in->restart = true;
 	kill(in->proc.pid, SIGTERM);
-	uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
+	if (!in->has_jail)
+		uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
 }
 
 static void
@@ -1147,7 +1154,7 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	blobmsg_parse(jail_attr, __JAIL_ATTR_MAX, tb,
 		blobmsg_data(attr), blobmsg_data_len(attr));
 
-	jail->argc = 2;
+	jail->argc = 4;
 
 	if (tb[JAIL_ATTR_REQUIREJAIL] && blobmsg_get_bool(tb[JAIL_ATTR_REQUIREJAIL])) {
 		in->require_jail = true;
