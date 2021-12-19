@@ -15,23 +15,24 @@
 #define _GNU_SOURCE
 #endif
 
+#include <errno.h>
+#include <fcntl.h>
+#include <getopt.h>
+#include <glob.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <fcntl.h>
+#include <stdio.h>
+#include <signal.h>
+#include <termios.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #include <libubus.h>
 #include <libubox/avl-cmp.h>
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <getopt.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <glob.h>
-#include <signal.h>
+#include <libubox/ustream.h>
 
 #include "log.h"
 
@@ -43,6 +44,9 @@
 static bool verbose = false;
 static bool json_output = false;
 static char *confdir = UXC_ETC_CONFDIR;
+static struct ustream_fd cufd;
+static struct ustream_fd lufd;
+
 
 struct runtime_state {
 	struct avl_node avl;
@@ -56,6 +60,7 @@ struct runtime_state {
 };
 
 enum uxc_cmd {
+	CMD_ATTACH,
 	CMD_LIST,
 	CMD_BOOT,
 	CMD_START,
@@ -71,6 +76,7 @@ enum uxc_cmd {
 #define OPT_ARGS "ab:fjm:p:t:vVw:"
 static struct option long_options[] = {
 	{"autostart",		no_argument,		0,	'a'	},
+	{"console",		no_argument,		0,	'c'	},
 	{"bundle",		required_argument,	0,	'b'	},
 	{"force",		no_argument,		0,	'f'	},
 	{"json",		no_argument,		0,	'j'	},
@@ -93,13 +99,14 @@ static int usage(void) {
 	printf("syntax: uxc <command> [parameters ...]\n");
 	printf("commands:\n");
 	printf("\tlist [--json]\t\t\t\tlist all configured containers\n");
+	printf("\tattach <conf>\t\t\t\tattach to container console\n");
 	printf("\tcreate <conf>\t\t\t\t\t(re-)create <conf>\n");
 	printf("                [--bundle <path>]\t\t\tOCI bundle at <path>\n");
 	printf("                [--autostart]\t\t\t\tstart on boot\n");
 	printf("                [--temp-overlay-size size]\t\tuse tmpfs overlay with {size}\n");
 	printf("                [--write-overlay-path path]\t\tuse overlay on {path}\n");
 	printf("                [--mounts v1,v2,...,vN]\t\trequire filesystems to be available\n");
-	printf("\tstart <conf>\t\t\t\t\tstart container <conf>\n");
+	printf("\tstart [--console] <conf>\t\t\t\tstart container <conf>\n");
 	printf("\tstate <conf>\t\t\t\t\tget state of container <conf>\n");
 	printf("\tkill <conf> [<signal>]\t\t\t\tsend signal to container <conf>\n");
 	printf("\tenable <conf>\t\t\t\t\tstart container <conf> on boot\n");
@@ -363,6 +370,167 @@ static void runtime_free(void)
 	return;
 }
 
+static inline int setup_tios(int fd, struct termios *oldtios)
+{
+	struct termios newtios;
+
+	if (!isatty(fd)) {
+		return -1;
+	}
+
+	/* Get current termios */
+	if (tcgetattr(fd, oldtios))
+		return -1;
+
+	newtios = *oldtios;
+
+	/* We use the same settings that ssh does. */
+	newtios.c_iflag |= IGNPAR;
+	newtios.c_iflag &= ~(ISTRIP | INLCR | IGNCR | ICRNL | IXON | IXANY | IXOFF);
+	newtios.c_lflag &= ~(TOSTOP | ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHONL);
+	newtios.c_oflag &= ~ONLCR;
+	newtios.c_oflag |= OPOST;
+	newtios.c_cc[VMIN] = 1;
+	newtios.c_cc[VTIME] = 0;
+
+	/* Set new attributes */
+	if (tcsetattr(fd, TCSAFLUSH, &newtios))
+	        return -1;
+
+	return 0;
+}
+
+
+static void client_cb(struct ustream *s, int bytes)
+{
+	char *buf;
+	int len, rv;
+
+	do {
+		buf = ustream_get_read_buf(s, &len);
+		if (!buf)
+			break;
+
+		rv = ustream_write(&lufd.stream, buf, len, false);
+
+		if (rv > 0)
+			ustream_consume(s, rv);
+
+		if (rv <= len)
+			break;
+	} while(1);
+}
+
+static void local_cb(struct ustream *s, int bytes)
+{
+	char *buf;
+	int len, rv;
+
+	do {
+		buf = ustream_get_read_buf(s, &len);
+		if (!buf)
+			break;
+
+		if ((len > 0) && (buf[0] == 2))
+				uloop_end();
+
+		rv = ustream_write(&cufd.stream, buf, len, false);
+
+		if (rv > 0)
+			ustream_consume(s, rv);
+
+		if (rv <= len)
+			break;
+	} while(1);
+}
+
+static int uxc_attach(const char *container_name)
+{
+	struct ubus_context *ctx;
+	uint32_t id;
+	static struct blob_buf req;
+	int client_fd, server_fd, tty_fd;
+	struct termios oldtermios;
+
+	ctx = ubus_connect(NULL);
+	if (!ctx) {
+		fprintf(stderr, "can't connect to ubus!\n");
+		return -1;
+	}
+
+	/* open pseudo-terminal pair */
+	client_fd = posix_openpt(O_RDWR | O_NOCTTY);
+	if (client_fd < 0) {
+		fprintf(stderr, "can't create virtual console!\n");
+		ubus_free(ctx);
+		return -1;
+	}
+	setup_tios(client_fd, &oldtermios);
+	grantpt(client_fd);
+	unlockpt(client_fd);
+	server_fd = open(ptsname(client_fd), O_RDWR | O_NOCTTY);
+	if (server_fd < 0) {
+		fprintf(stderr, "can't open virtual console!\n");
+		close(client_fd);
+		ubus_free(ctx);
+		return -1;
+	}
+	setup_tios(server_fd, &oldtermios);
+
+	tty_fd = open("/dev/tty", O_RDWR);
+	if (tty_fd < 0) {
+		fprintf(stderr, "can't open local console!\n");
+		close(server_fd);
+		close(client_fd);
+		ubus_free(ctx);
+		return -1;
+	}
+	setup_tios(tty_fd, &oldtermios);
+
+	/* register server-side with procd */
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "name", container_name);
+	blobmsg_add_string(&req, "instance", container_name);
+
+	if (ubus_lookup_id(ctx, "container", &id) ||
+	    ubus_invoke_fd(ctx, id, "console_attach", req.head, NULL, NULL, 3000, server_fd)) {
+		fprintf(stderr, "ubus request failed\n");
+		close(server_fd);
+		close(client_fd);
+		blob_buf_free(&req);
+		ubus_free(ctx);
+		return -2;
+	}
+
+	close(server_fd);
+	blob_buf_free(&req);
+	ubus_free(ctx);
+
+	uloop_init();
+
+	/* forward between stdio and client_fd until detach is requested */
+	lufd.stream.notify_read = local_cb;
+	ustream_fd_init(&lufd, tty_fd);
+
+	cufd.stream.notify_read = client_cb;
+/* ToDo: handle remote close and other events */
+//	cufd.stream.notify_state = client_state_cb;
+	ustream_fd_init(&cufd, client_fd);
+
+	fprintf(stderr, "attaching to jail console. press [CTRL]+[B] to exit.\n");
+	close(0);
+	close(1);
+	close(2);
+	uloop_run();
+
+	tcsetattr(tty_fd, TCSAFLUSH, &oldtermios);
+	ustream_free(&lufd.stream);
+	ustream_free(&cufd.stream);
+	close(client_fd);
+
+	return 0;
+}
+
 static int uxc_state(char *name)
 {
 	struct runtime_state *s = avl_find_element(&runtime, name, s, avl);
@@ -602,10 +770,17 @@ static int uxc_create(char *name, bool immediately)
 	return ret;
 }
 
-static int uxc_start(const char *name)
+static int uxc_start(const char *name, bool console)
 {
 	char *objname;
 	unsigned int id;
+	pid_t pid;
+
+	if (console) {
+		pid = fork();
+		if (pid > 0)
+			exit(uxc_attach(name));
+	}
 
 	if (asprintf(&objname, "container.%s", name) == -1)
 		return ENOMEM;
@@ -1018,6 +1193,7 @@ int main(int argc, char **argv)
 	char *requiredmounts = NULL;
 	bool autostart = false;
 	bool force = false;
+	bool console = false;
 	int signal = SIGTERM;
 	int c;
 
@@ -1049,6 +1225,10 @@ int main(int argc, char **argv)
 
 			case 'b':
 				bundle = optarg;
+				break;
+
+			case 'c':
+				console = true;
 				break;
 
 			case 'f':
@@ -1090,6 +1270,8 @@ int main(int argc, char **argv)
 
 	if (!strcmp("list", argv[optind]))
 		cmd = CMD_LIST;
+	else if (!strcmp("attach", argv[optind]))
+		cmd = CMD_ATTACH;
 	else if (!strcmp("boot", argv[optind]))
 		cmd = CMD_BOOT;
 	else if(!strcmp("start", argv[optind]))
@@ -1108,6 +1290,13 @@ int main(int argc, char **argv)
 		cmd = CMD_CREATE;
 
 	switch (cmd) {
+		case CMD_ATTACH:
+			if (optind != argc - 2)
+				goto usage_out;
+
+			ret = uxc_attach(argv[optind + 1]);
+			break;
+
 		case CMD_LIST:
 			ret = uxc_list();
 			break;
@@ -1120,7 +1309,7 @@ int main(int argc, char **argv)
 			if (optind != argc - 2)
 				goto usage_out;
 
-			ret = uxc_start(argv[optind + 1]);
+			ret = uxc_start(argv[optind + 1], console);
 			break;
 
 		case CMD_STATE:
