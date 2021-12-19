@@ -38,7 +38,7 @@
 #define UXC_VERSION "0.2"
 #define OCI_VERSION_STRING "1.0.2"
 #define UXC_ETC_CONFDIR "/etc/uxc"
-#define UXC_VOL_CONFDIR "/var/run/uxc"
+#define UXC_VOL_CONFDIR "/var/run/uvol/.meta/uxc"
 
 static bool verbose = false;
 static bool json_output = false;
@@ -140,19 +140,28 @@ static int conf_load(void)
 	void *c, *o;
 	struct stat sb;
 
-	if (!stat(UXC_VOL_CONFDIR, &sb)) {
-		if (sb.st_mode & S_IFDIR)
-			confdir = UXC_VOL_CONFDIR;
-	}
 
-	if (asprintf(&globstr, "%s/*.json", confdir) == -1)
+	if (asprintf(&globstr, "%s/*.json", UXC_ETC_CONFDIR) == -1)
 		return ENOMEM;
+
+	if (glob(globstr, gl_flags, NULL, &gl) == 0)
+		gl_flags |= GLOB_APPEND;
+
+	free(globstr);
+
+	if (!stat(UXC_VOL_CONFDIR, &sb)) {
+		if (sb.st_mode & S_IFDIR) {
+			if (asprintf(&globstr, "%s/*.json", UXC_VOL_CONFDIR) == -1)
+				return ENOMEM;
+
+			res = glob(globstr, gl_flags, NULL, &gl);
+			free(globstr);
+		}
+	}
 
 	blob_buf_init(&conf, 0);
 	c = blobmsg_open_table(&conf, NULL);
 
-	res = glob(globstr, gl_flags, NULL, &gl);
-	free(globstr);
 	if (res < 0)
 		return 0;
 
@@ -661,7 +670,7 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	int rem, ret;
-	bool found = false;
+	const char *cfname = NULL;
 	char *fname = NULL;
 	char *keeppath = NULL;
 	char *tmprwsize = _tmprwsize;
@@ -679,14 +688,14 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 		if (strcmp(name, blobmsg_get_string(tb[CONF_NAME])))
 			continue;
 
-		found = true;
+		cfname = blobmsg_name(cur);
 		break;
 	}
 
-	if (found && add)
+	if (cfname && add)
 		return EEXIST;
 
-	if (!found && !add)
+	if (!cfname && !add)
 		return ENOENT;
 
 	if (add && !path)
@@ -700,17 +709,23 @@ static int uxc_set(char *name, char *path, bool autostart, bool add, char *pidfi
 			return ENOTDIR;
 	}
 
-	ret = mkdir(confdir, 0755);
+	if (!cfname) {
+		ret = mkdir(confdir, 0755);
 
-	if (ret && errno != EEXIST)
-		return ret;
+		if (ret && errno != EEXIST)
+			return ret;
 
-	if (asprintf(&fname, "%s/%s.json", confdir, name) == -1)
-		return ENOMEM;
+		if (asprintf(&fname, "%s/%s.json", confdir, name) == -1)
+			return ENOMEM;
 
-	f = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (f < 0)
-		return errno;
+		f = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (f < 0)
+			return errno;
+	} else {
+		f = open(cfname, O_WRONLY | O_TRUNC, 0644);
+		if (f < 0)
+			return errno;
+	}
 
 	if (!add) {
 		keeppath = blobmsg_get_string(tb[CONF_PATH]);
@@ -926,8 +941,7 @@ static int uxc_delete(char *name, bool force)
 	static struct blob_buf req;
 	uint32_t id;
 	int rem, ret = 0;
-	bool found = false;
-	char *fname;
+	const char *fname = NULL;
 	struct stat sb;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
@@ -938,15 +952,11 @@ static int uxc_delete(char *name, bool force)
 		if (strcmp(name, blobmsg_get_string(tb[CONF_NAME])))
 			continue;
 
-		fname = strdup(blobmsg_name(cur));
-		if (!fname)
-			return errno;
-
-		found = true;
+		fname = blobmsg_name(cur);
 		break;
 	}
 
-	if (!found)
+	if (!fname)
 		return ENOENT;
 
 	s = avl_find_element(&runtime, name, s, avl);
@@ -974,13 +984,13 @@ static int uxc_delete(char *name, bool force)
 
 		if (ubus_invoke(ctx, id, "delete", req.head, NULL, NULL, 3000)) {
 			blob_buf_free(&req);
-			ret=EIO;
+			ret = EIO;
 			goto errout;
 		}
 	}
 
 	if (stat(fname, &sb) == -1) {
-		ret=ENOENT;
+		ret = ENOENT;
 		goto errout;
 	}
 
@@ -988,7 +998,6 @@ static int uxc_delete(char *name, bool force)
 		ret=errno;
 
 errout:
-	free(fname);
 	return ret;
 }
 
