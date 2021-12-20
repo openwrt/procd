@@ -123,12 +123,6 @@ IF(SECCOMP_SUPPORT)
   ADD_DEPENDENCIES(ujail syscall-names-h)
 ENDIF()
 
-ADD_EXECUTABLE(ujail-console jail/console.c)
-TARGET_LINK_LIBRARIES(ujail-console ${ubox} ${ubus} ${blobmsg_json})
-INSTALL(TARGETS ujail-console
-	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
-)
-
 ADD_EXECUTABLE(uxc uxc.c)
 TARGET_LINK_LIBRARIES(uxc ${ubox} ${ubus} ${blobmsg_json})
 INSTALL(TARGETS uxc
