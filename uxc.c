@@ -100,18 +100,18 @@ static int usage(void) {
 	printf("commands:\n");
 	printf("\tlist [--json]\t\t\t\tlist all configured containers\n");
 	printf("\tattach <conf>\t\t\t\tattach to container console\n");
-	printf("\tcreate <conf>\t\t\t\t\t(re-)create <conf>\n");
-	printf("                [--bundle <path>]\t\t\tOCI bundle at <path>\n");
-	printf("                [--autostart]\t\t\t\tstart on boot\n");
-	printf("                [--temp-overlay-size size]\t\tuse tmpfs overlay with {size}\n");
-	printf("                [--write-overlay-path path]\t\tuse overlay on {path}\n");
-	printf("                [--mounts v1,v2,...,vN]\t\trequire filesystems to be available\n");
-	printf("\tstart [--console] <conf>\t\t\t\tstart container <conf>\n");
-	printf("\tstate <conf>\t\t\t\t\tget state of container <conf>\n");
-	printf("\tkill <conf> [<signal>]\t\t\t\tsend signal to container <conf>\n");
-	printf("\tenable <conf>\t\t\t\t\tstart container <conf> on boot\n");
-	printf("\tdisable <conf>\t\t\t\t\tdon't start container <conf> on boot\n");
-	printf("\tdelete <conf> [--force]\t\t\t\tdelete <conf>\n");
+	printf("\tcreate <conf>\t\t\t\t(re-)create <conf>\n");
+	printf("\t\t[--bundle <path>]\t\t\tOCI bundle at <path>\n");
+	printf("\t\t[--autostart]\t\t\t\tstart on boot\n");
+	printf("\t\t[--temp-overlay-size <size>]\t\tuse tmpfs overlay with {size}\n");
+	printf("\t\t[--write-overlay-path <path>]\t\tuse overlay on {path}\n");
+	printf("\t\t[--mounts <v1>,<v2>,...,<vN>]\t\trequire filesystems to be available\n");
+	printf("\tstart [--console] <conf>\t\tstart container <conf>\n");
+	printf("\tstate <conf>\t\t\t\tget state of container <conf>\n");
+	printf("\tkill <conf> [<signal>]\t\t\tsend signal to container <conf>\n");
+	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
+	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
+	printf("\tdelete <conf> [--force]\t\t\tdelete <conf>\n");
 	return EINVAL;
 }
 
