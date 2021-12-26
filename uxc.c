@@ -151,7 +151,8 @@ static int conf_load(void)
 	if (asprintf(&globstr, "%s/*.json", UXC_ETC_CONFDIR) == -1)
 		return ENOMEM;
 
-	if (glob(globstr, gl_flags, NULL, &gl) == 0)
+	res = glob(globstr, gl_flags, NULL, &gl);
+	if (res == 0)
 		gl_flags |= GLOB_APPEND;
 
 	free(globstr);
@@ -495,6 +496,7 @@ static int uxc_attach(const char *container_name)
 	if (ubus_lookup_id(ctx, "container", &id) ||
 	    ubus_invoke_fd(ctx, id, "console_attach", req.head, NULL, NULL, 3000, server_fd)) {
 		fprintf(stderr, "ubus request failed\n");
+		close(tty_fd);
 		close(server_fd);
 		close(client_fd);
 		blob_buf_free(&req);
