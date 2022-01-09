@@ -50,7 +50,7 @@ void procd_coldplug(void)
 		umount2("/dev/", MNT_DETACH);
 		mount("tmpfs", "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "mode=0755,size=512K");
 		mkdir("/dev/pts", 0755);
-		mount("devpts", "/dev/pts", "devpts", MS_NOEXEC | MS_NOSUID, 0);
+		mount("devpts", "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0);
 	}
 
 	ignore(symlink("/tmp/shm", "/dev/shm"));
