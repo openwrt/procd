@@ -138,7 +138,7 @@ void cgroups_apply(pid_t pid)
 		else if (!strncmp("pids.", ent, 5))
 			pids = true;
 		else if (!strncmp("rdma.", ent, 5))
-			pids = true;
+			rdma = true;
 	}
 
 	maxlen += strlen(cgroup_path) + 2;
