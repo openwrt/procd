@@ -13,11 +13,11 @@ CC=$1
 
 echo "#include <asm/unistd.h>"
 echo "static const char *__syscall_names[] = {"
-echo "#include <sys/syscall.h>" | ${CC} -E -dM - | grep '^#define __NR_' | \
-	LC_ALL=C sed -r -n -e 's/^\#define[ \t]+__NR_([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_Linux]+)(.*)/ [\2] = "\1",/p'
+echo "#include <sys/syscall.h>" | ${CC} -E -dM - | grep '^#define __NR_[a-z0-9_]\+[ \t].*[0-9].*$' | \
+	LC_ALL=C sed -r -n -e 's/^\#define[ \t]+__NR_([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_LSYCABE]+)(.*)/ [\2] = "\1",/p'
 echo "};"
 
-extra_syscalls="$(echo "#include <sys/syscall.h>" | ${CC} -E -dM - | sed -n -e '/^#define __ARM_NR_/ s///p')"
+extra_syscalls="$(echo "#include <sys/syscall.h>" | ${CC} -E -dM - | sed -r -n -e 's/^#define __ARM_NR_([a-z0-9_]+)/\1/p')"
 
 cat <<EOF
 static inline const char *syscall_name(unsigned i) {
@@ -26,7 +26,7 @@ static inline const char *syscall_name(unsigned i) {
   switch (i) {
 EOF
 echo "$extra_syscalls" | \
-    LC_ALL=C sed -r -n -e 's/^([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_Linux]+)(.*)/    case \2: return "\1";/p'
+    LC_ALL=C sed -r -n -e 's/^([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_LAMBSE]+)(.*)/    case \2: return "\1";/p'
 cat <<EOF
   default: return (void*)0;
   }
@@ -40,7 +40,7 @@ static inline int syscall_index(unsigned i) {
   switch (i) {
 EOF
 echo "$extra_syscalls" | \
-    LC_ALL=C perl -ne 'print "  case $2: return ARRAY_SIZE(__syscall_names) + ", $. - 1, ";\n" if /^([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_Linux]+)(.*)/;'
+    LC_ALL=C perl -ne 'print "  case $2: return ARRAY_SIZE(__syscall_names) + ", $. - 1, ";\n" if /^([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_LAMBSE]+)(.*)/;'
 cat <<EOF
   default: return -1;
   }
@@ -54,7 +54,7 @@ static inline int syscall_index_to_number(unsigned i) {
   switch (i) {
 EOF
 echo "$extra_syscalls" | \
-    LC_ALL=C perl -ne 'print "  case ARRAY_SIZE(__syscall_names) + ", $. - 1, ": return $2;\n" if /^([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_Linux]+)(.*)/;'
+    LC_ALL=C perl -ne 'print "  case ARRAY_SIZE(__syscall_names) + ", $. - 1, ": return $2;\n" if /^([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_LAMBSE]+)(.*)/;'
 cat <<EOF
   default: return -1;
   }
