@@ -295,7 +295,9 @@ jail_run(struct service_instance *in, char **argv)
 
 	argv[argc++] = UJAIL_BIN_PATH;
 
-	asprintf(&term_timeout_str, "%d", in->term_timeout);
+	if (asprintf(&term_timeout_str, "%d", in->term_timeout) == -1)
+		exit(ENOMEM);
+
 	argv[argc++] = "-t";
 	argv[argc++] = term_timeout_str;
 
