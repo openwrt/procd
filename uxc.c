@@ -36,7 +36,7 @@
 
 #include "log.h"
 
-#define UXC_VERSION "0.2"
+#define UXC_VERSION "0.3"
 #define OCI_VERSION_STRING "1.0.2"
 #define UXC_ETC_CONFDIR "/etc/uxc"
 #define UXC_VOL_CONFDIR "/tmp/run/uvol/.meta/uxc"
@@ -771,23 +771,28 @@ static int uxc_list(void)
 	return 0;
 }
 
+static int uxc_exists(char *name)
+{
+	struct runtime_state *rsstate = NULL;
+	rsstate = avl_find_element(&runtime, name, rsstate, avl);
+
+	if (rsstate && (rsstate->running))
+		return EEXIST;
+
+	return 0;
+}
+
 static int uxc_create(char *name, bool immediately)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	int rem, ret;
 	uint32_t id;
-	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
 	char *path = NULL, *jailname = NULL, *pidfile = NULL, *tmprwsize = NULL, *writepath = NULL;
 
 	void *in, *ins, *j;
 	bool found = false;
-
-	rsstate = avl_find_element(&runtime, name, rsstate, avl);
-
-	if (rsstate && (rsstate->running))
-		return EEXIST;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
@@ -944,7 +949,7 @@ static int uxc_kill(char *name, int signal)
 }
 
 
-static int uxc_set(char *name, char *path, signed char _autostart, bool add, char *pidfile, char *_tmprwsize, char *_writepath, char *requiredmounts)
+static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
 	static struct blob_buf req;
 	struct settings *usettings = NULL;
@@ -953,19 +958,14 @@ static int uxc_set(char *name, char *path, signed char _autostart, bool add, cha
 	const char *cfname = NULL;
 	const char *sfname = NULL;
 	char *fname = NULL;
-	char *tmprwsize = NULL;
-	char *writepath = NULL;
 	char *curvol, *tmp, *mnttok;
 	void *mntarr;
 	int f;
 	struct stat sb;
-	signed char autostart = -1;
 
-	if (add) {
-		tmprwsize = _tmprwsize;
-		writepath = _writepath;
-		autostart = _autostart;
-	}
+	/* nothing to do */
+	if (!path && (autostart<0) && !pidfile && !tmprwsize && !writepath && !requiredmounts)
+		return 0;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
@@ -979,14 +979,11 @@ static int uxc_set(char *name, char *path, signed char _autostart, bool add, cha
 		break;
 	}
 
-	if (cfname && add)
+	if (cfname && path)
 		return EEXIST;
 
-	if (!cfname && !add)
+	if (!cfname && !path)
 		return ENOENT;
-
-	if (add && !path)
-		return EINVAL;
 
 	if (path) {
 		if (stat(path, &sb) == -1)
@@ -997,24 +994,26 @@ static int uxc_set(char *name, char *path, signed char _autostart, bool add, cha
 	}
 
 	usettings = avl_find_element(&settings, blobmsg_get_string(tb[CONF_NAME]), usettings, avl);
-	if (!add && usettings) {
+	if (path && usettings)
+		return EIO;
+
+	if (usettings) {
 		sfname = usettings->fname;
-		if (usettings->tmprwsize) {
-			tmprwsize = usettings->tmprwsize;
-			writepath = NULL;
+		if (!tmprwsize && !writepath) {
+			if (usettings->tmprwsize) {
+				tmprwsize = usettings->tmprwsize;
+				writepath = NULL;
+			}
+			if (usettings->writepath) {
+				writepath = usettings->writepath;
+				tmprwsize = NULL;
+			}
 		}
-		if (usettings->writepath) {
-			writepath = usettings->writepath;
-			tmprwsize = NULL;
-		}
-		if (usettings->autostart >= 0)
+		if (usettings->autostart >= 0 && autostart < 0)
 			autostart = !!(usettings->autostart);
-		
-		if (_autostart >= 0)
-			autostart = _autostart;
 	}
 
-	if (add) {
+	if (path) {
 		ret = mkdir(confdir, 0755);
 
 		if (ret && errno != EEXIST)
@@ -1058,7 +1057,7 @@ static int uxc_set(char *name, char *path, signed char _autostart, bool add, cha
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", name);
-	if (add)
+	if (path)
 		blobmsg_add_string(&req, "path", path);
 
 	if (autostart >= 0)
@@ -1073,10 +1072,10 @@ static int uxc_set(char *name, char *path, signed char _autostart, bool add, cha
 	if (writepath)
 		blobmsg_add_string(&req, "write-overlay-path", writepath);
 
-	if (!add && usettings && usettings->volumes)
+	if (!requiredmounts && usettings && usettings->volumes)
 		blobmsg_add_blob(&req, usettings->volumes);
 
-	if (add && requiredmounts) {
+	if (requiredmounts) {
 		mntarr = blobmsg_open_array(&req, "volumes");
 		for (mnttok = requiredmounts; ; mnttok = NULL) {
 			curvol = strtok_r(mnttok, ",;", &tmp);
@@ -1268,6 +1267,9 @@ static int uxc_boot(void)
 				continue;
 
 		name = strdup(blobmsg_get_string(tb[CONF_NAME]));
+		if (uxc_exists(name))
+			continue;
+
 		ret += uxc_create(name, true);
 		free(name);
 	}
@@ -1522,14 +1524,14 @@ int main(int argc, char **argv)
 			if (optind != argc - 2)
 				goto usage_out;
 
-			ret = uxc_set(argv[optind + 1], NULL, 1, false, NULL, NULL, NULL, NULL);
+			ret = uxc_set(argv[optind + 1], NULL, 1, NULL, NULL, NULL, NULL);
 			break;
 
 		case CMD_DISABLE:
 			if (optind != argc - 2)
 				goto usage_out;
 
-			ret = uxc_set(argv[optind + 1], NULL, 0, false, NULL, NULL, NULL, NULL);
+			ret = uxc_set(argv[optind + 1], NULL, 0, NULL, NULL, NULL, NULL);
 			break;
 
 		case CMD_DELETE:
@@ -1543,13 +1545,15 @@ int main(int argc, char **argv)
 			if (optind != argc - 2)
 				goto usage_out;
 
-			if (bundle) {
-				ret = uxc_set(argv[optind + 1], bundle, autostart, true, pidfile, tmprwsize, writepath, requiredmounts);
-				if (ret)
-					goto runtime_out;
+			ret = uxc_exists(argv[optind + 1]);
+			if (ret)
+				goto runtime_out;
 
-				reload_conf();
-			}
+			ret = uxc_set(argv[optind + 1], bundle, autostart, pidfile, tmprwsize, writepath, requiredmounts);
+			if (ret)
+				goto runtime_out;
+
+			reload_conf();
 
 			ret = uxc_create(argv[optind + 1], false);
 			break;
