@@ -1034,7 +1034,7 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 			t2 = strrchr(t1, '/');
 			*t2 = '\0';
 
-			if (asprintf(&t2, "%s/settings", t1, name) == -1)
+			if (asprintf(&t2, "%s/settings", t1) == -1)
 				return -ENOMEM;
 
 			ret = mkdir(t2, 0755);
