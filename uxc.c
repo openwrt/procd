@@ -124,7 +124,7 @@ static int usage(void) {
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
 	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
 	printf("\tdelete <conf> [--force]\t\t\tdelete <conf>\n");
-	return EINVAL;
+	return -EINVAL;
 }
 
 enum {
@@ -161,7 +161,7 @@ static int conf_load(bool load_settings)
 	struct blob_buf *target;
 
 	if (asprintf(&globstr, "%s/%s*.json", UXC_ETC_CONFDIR, load_settings?"settings/":"") == -1)
-		return ENOMEM;
+		return -ENOMEM;
 
 	res = glob(globstr, gl_flags, NULL, &gl);
 	if (res == 0)
@@ -172,7 +172,7 @@ static int conf_load(bool load_settings)
 	if (!stat(UXC_VOL_CONFDIR, &sb)) {
 		if (sb.st_mode & S_IFDIR) {
 			if (asprintf(&globstr, "%s/%s*.json",  UXC_VOL_CONFDIR, load_settings?"settings/":"") == -1)
-				return ENOMEM;
+				return -ENOMEM;
 
 			res = glob(globstr, gl_flags, NULL, &gl);
 			free(globstr);
@@ -265,7 +265,6 @@ static void settings_free(void)
 		free(item);
 	}
 
-	blob_buf_free(&settingsbuf);
 	return;
 }
 
@@ -429,7 +428,7 @@ static int runtime_load(void)
 	avl_init(&runtime, avl_strcmp, false, NULL);
 	if (ubus_lookup_id(ctx, "container", &id) ||
 		ubus_invoke(ctx, id, "list", NULL, list_cb, &runtime, 3000))
-		return EIO;
+		return -EIO;
 
 	avl_for_each_element_safe(&runtime, item, avl, tmp)
 		get_ocistate(&item->ocistate, item->jail_name);
@@ -457,12 +456,12 @@ static inline int setup_tios(int fd, struct termios *oldtios)
 	struct termios newtios;
 
 	if (!isatty(fd)) {
-		return -1;
+		return -EIO;
 	}
 
 	/* Get current termios */
-	if (tcgetattr(fd, oldtios))
-		return -1;
+	if (tcgetattr(fd, oldtios) < 0)
+		return -errno;
 
 	newtios = *oldtios;
 
@@ -476,8 +475,8 @@ static inline int setup_tios(int fd, struct termios *oldtios)
 	newtios.c_cc[VTIME] = 0;
 
 	/* Set new attributes */
-	if (tcsetattr(fd, TCSAFLUSH, &newtios))
-	        return -1;
+	if (tcsetattr(fd, TCSAFLUSH, &newtios) < 0)
+	        return -errno;
 
 	return 0;
 }
@@ -537,7 +536,7 @@ static int uxc_attach(const char *container_name)
 	ctx = ubus_connect(NULL);
 	if (!ctx) {
 		fprintf(stderr, "can't connect to ubus!\n");
-		return -1;
+		return -ECONNREFUSED;
 	}
 
 	/* open pseudo-terminal pair */
@@ -545,7 +544,7 @@ static int uxc_attach(const char *container_name)
 	if (client_fd < 0) {
 		fprintf(stderr, "can't create virtual console!\n");
 		ubus_free(ctx);
-		return -1;
+		return -EIO;
 	}
 	setup_tios(client_fd, &oldtermios);
 	grantpt(client_fd);
@@ -555,7 +554,7 @@ static int uxc_attach(const char *container_name)
 		fprintf(stderr, "can't open virtual console!\n");
 		close(client_fd);
 		ubus_free(ctx);
-		return -1;
+		return -EIO;
 	}
 	setup_tios(server_fd, &oldtermios);
 
@@ -565,7 +564,7 @@ static int uxc_attach(const char *container_name)
 		close(server_fd);
 		close(client_fd);
 		ubus_free(ctx);
-		return -1;
+		return -EIO;
 	}
 	setup_tios(tty_fd, &oldtermios);
 
@@ -582,7 +581,7 @@ static int uxc_attach(const char *container_name)
 		close(client_fd);
 		blob_buf_free(&req);
 		ubus_free(ctx);
-		return -2;
+		return -ENXIO;
 	}
 
 	close(server_fd);
@@ -632,7 +631,7 @@ static int uxc_state(char *name)
 	if (ocistate) {
 		state = blobmsg_format_json_indent(ocistate, true, 0);
 		if (!state)
-			return 1;
+			return -ENOMEM;
 
 		printf("%s\n", state);
 		free(state);
@@ -656,7 +655,7 @@ static int uxc_state(char *name)
 	}
 
 	if (!bundle)
-		return ENOENT;
+		return -ENOENT;
 
 	blob_buf_init(&buf, 0);
 	blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
@@ -667,7 +666,7 @@ static int uxc_state(char *name)
 	tmp = blobmsg_format_json_indent(buf.head, true, 0);
 	if (!tmp) {
 		blob_buf_free(&buf);
-		return ENOMEM;
+		return -ENOMEM;
 	}
 
 	printf("%s\n", tmp);
@@ -761,7 +760,7 @@ static int uxc_list(void)
 		tmp = blobmsg_format_json_indent(buf.head, true, 0);
 		if (!tmp) {
 			blob_buf_free(&buf);
-			return ENOMEM;
+			return -ENOMEM;
 		}
 		printf("%s\n", tmp);
 		free(tmp);
@@ -777,7 +776,7 @@ static int uxc_exists(char *name)
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
 
 	if (rsstate && (rsstate->running))
-		return EEXIST;
+		return -EEXIST;
 
 	return 0;
 }
@@ -786,7 +785,7 @@ static int uxc_create(char *name, bool immediately)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
-	int rem, ret;
+	int rem, ret = 0;
 	uint32_t id;
 	struct settings *usettings = NULL;
 	char *path = NULL, *jailname = NULL, *pidfile = NULL, *tmprwsize = NULL, *writepath = NULL;
@@ -807,7 +806,7 @@ static int uxc_create(char *name, bool immediately)
 	}
 
 	if (!found)
-		return ENOENT;
+		return -ENOENT;
 
 	path = blobmsg_get_string(tb[CONF_PATH]);
 
@@ -862,17 +861,16 @@ static int uxc_create(char *name, bool immediately)
 		char *tmp;
 		tmp = blobmsg_format_json_indent(req.head, true, 1);
 		if (!tmp)
-			return ENOMEM;
+			return -ENOMEM;
 
 		fprintf(stderr, "adding container to procd:\n\t%s\n", tmp);
 		free(tmp);
 	}
 
-	ret = 0;
 	if (ubus_lookup_id(ctx, "container", &id) ||
 		ubus_invoke(ctx, id, "add", req.head, NULL, NULL, 3000)) {
 		blob_buf_free(&req);
-		ret = EIO;
+		ret = -EIO;
 	}
 
 	return ret;
@@ -891,10 +889,10 @@ static int uxc_start(const char *name, bool console)
 	}
 
 	if (asprintf(&objname, "container.%s", name) == -1)
-		return ENOMEM;
+		return -ENOMEM;
 
 	if (ubus_lookup_id(ctx, objname, &id))
-		return ENOENT;
+		return -ENOENT;
 
 	free(objname);
 	return ubus_invoke(ctx, id, "start", NULL, NULL, NULL, 3000);
@@ -923,27 +921,27 @@ static int uxc_kill(char *name, int signal)
 	}
 
 	if (!found)
-		return ENOENT;
+		return -ENOENT;
 
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
 
 	if (!rsstate || !(rsstate->running))
-		return ENOENT;
+		return -ENOENT;
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_u32(&req, "signal", signal);
 	blobmsg_add_string(&req, "name", name);
 
 	if (asprintf(&objname, "container.%s", name) == -1)
-		return ENOMEM;
+		return -ENOMEM;
 
 	ret = ubus_lookup_id(ctx, objname, &id);
 	free(objname);
 	if (ret)
-		return ENOENT;
+		return -ENOENT;
 
 	if (ubus_invoke(ctx, id, "kill", req.head, NULL, NULL, 3000))
-		return EIO;
+		return -EIO;
 
 	return 0;
 }
@@ -980,22 +978,22 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 	}
 
 	if (cfname && path)
-		return EEXIST;
+		return -EEXIST;
 
 	if (!cfname && !path)
-		return ENOENT;
+		return -ENOENT;
 
 	if (path) {
 		if (stat(path, &sb) == -1)
-			return ENOENT;
+			return -ENOENT;
 
 		if ((sb.st_mode & S_IFMT) != S_IFDIR)
-			return ENOTDIR;
+			return -ENOTDIR;
 	}
 
 	usettings = avl_find_element(&settings, blobmsg_get_string(tb[CONF_NAME]), usettings, avl);
 	if (path && usettings)
-		return EIO;
+		return -EIO;
 
 	if (usettings) {
 		sfname = usettings->fname;
@@ -1017,14 +1015,14 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 		ret = mkdir(confdir, 0755);
 
 		if (ret && errno != EEXIST)
-			return ret;
+			return -errno;
 
 		if (asprintf(&fname, "%s/%s.json", confdir, name) == -1)
-			return ENOMEM;
+			return -ENOMEM;
 
 		f = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		if (f < 0)
-			return errno;
+			return -errno;
 
 		free(fname);
 	} else {
@@ -1037,22 +1035,22 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 			*t2 = '\0';
 
 			if (asprintf(&t2, "%s/settings", t1, name) == -1)
-				return ENOMEM;
+				return -ENOMEM;
 
 			ret = mkdir(t2, 0755);
 			if (ret && ret != EEXIST)
-				return ret;
+				return -ret;
 
 			free(t2);
 			if (asprintf(&t2, "%s/settings/%s.json", t1, name) == -1)
-				return ENOMEM;
+				return -ENOMEM;
 
 			free(t1);
 			f = open(t2, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 			free(t2);
 		}
 		if (f < 0)
-			return errno;
+			return -errno;
 	}
 
 	blob_buf_init(&req, 0);
@@ -1096,7 +1094,7 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 	blob_buf_free(&req);
 	close(f);
 
-	return 0;
+	return 1;
 }
 
 enum {
@@ -1118,7 +1116,7 @@ static const struct blobmsg_policy block_info_policy[__BLOCK_INFO_MAX] = {
 
 
 /* check if device 'devname' is mounted according to blockd */
-static int checkblock(const char *uuid)
+static bool checkblock(const char *uuid)
 {
 	struct blob_attr *tb[__BLOCK_INFO_MAX];
 	struct blob_attr *cur;
@@ -1131,10 +1129,10 @@ static int checkblock(const char *uuid)
 			continue;
 
 		if (!strcmp(uuid, blobmsg_get_string(tb[BLOCK_INFO_UUID])))
-			return 0;
+			return false;
 	}
 
-	return 1;
+	return true;
 }
 
 enum {
@@ -1184,17 +1182,17 @@ static const char *resolveuuid(const char *volname)
 };
 
 /* check status of each required volume */
-static int checkvolumes(struct blob_attr *volumes)
+static bool checkvolumes(struct blob_attr *volumes)
 {
 	struct blob_attr *cur;
 	int rem;
 
 	blobmsg_for_each_attr(cur, volumes, rem) {
 		if (checkblock(resolveuuid(blobmsg_get_string(cur))))
-			return 1;
+			return true;
 	}
 
-	return 0;
+	return false;
 }
 
 static void block_cb(struct ubus_request *req, int type, struct blob_attr *msg)
@@ -1220,15 +1218,15 @@ static int uxc_boot(void)
 
 	ret = ubus_lookup_id(ctx, "block", &id);
 	if (ret)
-		return ENOENT;
+		return -ENOENT;
 
 	ret = ubus_invoke(ctx, id, "info", NULL, block_cb, NULL, 3000);
 	if (ret)
-		return ENXIO;
+		return -ENXIO;
 
 	ret = ubus_lookup_id(ctx, "uci", &id);
 	if (ret)
-		return ENOENT;
+		return -ENOENT;
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "config", "fstab");
@@ -1236,7 +1234,7 @@ static int uxc_boot(void)
 
 	ret = ubus_invoke(ctx, id, "get", req.head, fstab_cb, NULL, 3000);
 	if (ret)
-		return ENXIO;
+		return ret;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
@@ -1270,7 +1268,9 @@ static int uxc_boot(void)
 		if (uxc_exists(name))
 			continue;
 
-		ret += uxc_create(name, true);
+		if (uxc_create(name, true))
+			++ret;
+
 		free(name);
 	}
 
@@ -1302,7 +1302,7 @@ static int uxc_delete(char *name, bool force)
 	}
 
 	if (!cfname)
-		return ENOENT;
+		return -ENOENT;
 
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
 
@@ -1313,7 +1313,7 @@ static int uxc_delete(char *name, bool force)
 				goto errout;
 
 		} else {
-			ret = EWOULDBLOCK;
+			ret = -EWOULDBLOCK;
 			goto errout;
 		}
 	}
@@ -1329,7 +1329,7 @@ static int uxc_delete(char *name, bool force)
 
 		if (ubus_invoke(ctx, id, "delete", req.head, NULL, NULL, 3000)) {
 			blob_buf_free(&req);
-			ret = EIO;
+			ret = -EIO;
 			goto errout;
 		}
 	}
@@ -1340,23 +1340,23 @@ static int uxc_delete(char *name, bool force)
 
 	if (sfname) {
 		if (stat(sfname, &sb) == -1) {
-			ret = ENOENT;
+			ret = -ENOENT;
 			goto errout;
 		}
 
 		if (unlink(sfname) == -1) {
-			ret = errno;
+			ret = -errno;
 			goto errout;
 		}
 	}
 
 	if (stat(cfname, &sb) == -1) {
-		ret = ENOENT;
+		ret = -ENOENT;
 		goto errout;
 	}
 
 	if (unlink(cfname) == -1)
-		ret = errno;
+		ret = -errno;
 
 errout:
 	return ret;
@@ -1367,6 +1367,7 @@ static void reload_conf(void)
 	blob_buf_free(&conf);
 	conf_load(false);
 	settings_free();
+	blob_buf_free(&settingsbuf);
 	conf_load(true);
 	settings_add();
 }
@@ -1374,7 +1375,7 @@ static void reload_conf(void)
 int main(int argc, char **argv)
 {
 	enum uxc_cmd cmd = CMD_UNKNOWN;
-	int ret = EINVAL;
+	int ret = -EINVAL;
 	char *bundle = NULL;
 	char *pidfile = NULL;
 	char *tmprwsize = NULL;
@@ -1391,18 +1392,23 @@ int main(int argc, char **argv)
 
 	ctx = ubus_connect(NULL);
 	if (!ctx)
-		return ENODEV;
+		return -ENODEV;
 
 	ret = conf_load(false);
-	if (ret)
+	if (ret < 0)
 		goto out;
 
-	conf_load(true);
-	settings_add();
+	ret = conf_load(true);
+	if (ret < 0)
+		goto conf_out;
+
+	ret = settings_add();
+	if (ret < 0)
+		goto settings_out;
 
 	ret = runtime_load();
 	if (ret)
-		goto conf_out;
+		goto settings_avl_out;
 
 	while (true) {
 		int option_index = 0;
@@ -1550,10 +1556,11 @@ int main(int argc, char **argv)
 				goto runtime_out;
 
 			ret = uxc_set(argv[optind + 1], bundle, autostart, pidfile, tmprwsize, writepath, requiredmounts);
-			if (ret)
+			if (ret < 0)
 				goto runtime_out;
 
-			reload_conf();
+			if (ret > 0)
+				reload_conf();
 
 			ret = uxc_create(argv[optind + 1], false);
 			break;
@@ -1565,16 +1572,20 @@ int main(int argc, char **argv)
 	goto runtime_out;
 
 usage_out:
-	usage();
+	ret = usage();
 runtime_out:
 	runtime_free();
+settings_avl_out:
+	settings_free();
+settings_out:
+	blob_buf_free(&settingsbuf);
 conf_out:
 	blob_buf_free(&conf);
 out:
 	ubus_free(ctx);
 
-	if (ret != 0)
-		fprintf(stderr, "uxc error: %s\n", strerror(ret));
+	if (ret < 0)
+		fprintf(stderr, "uxc error: %s\n", strerror(-ret));
 
 	return ret;
 }
