@@ -1032,6 +1032,9 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 			char *t1, *t2;
 			t1 = strdup(cfname);
 			t2 = strrchr(t1, '/');
+			if (!t2)
+				return -EINVAL;
+
 			*t2 = '\0';
 
 			if (asprintf(&t2, "%s/settings", t1) == -1)
