@@ -46,6 +46,7 @@
 static const char ubusd_path[] = "/sbin/ubusd";
 static const char netifd_path[] = "/sbin/netifd";
 static const char uci_net[] = "network";
+static const char ubus_sock_name[] = "ubus.sock";
 
 static char *jail_name, *ubus_sock_path, *ubus_sock_dir, *uci_config_network = NULL;
 
@@ -193,8 +194,8 @@ static void run_ubusd(struct uloop_timeout *t)
 static void run_netifd(struct uloop_timeout *t)
 {
 	static struct blob_buf req;
-	void *ins, *in, *cmd, *jail, *setns, *setnso, *namespaces, *mount;
-	char *resolvconf_dir, *resolvconf, *ucimount;
+	void *ins, *in, *cmd, *jail, *setns, *setnso, *namespaces, *mount, *pathenv;
+	char *resolvconf_dir, *resolvconf, *ucimount, *ubusmount;
 	char uci_dir[] = "/var/containers/ujail-uci-XXXXXX";
 
 	uint32_t id;
@@ -222,8 +223,11 @@ static void run_netifd(struct uloop_timeout *t)
 	if (asprintf(&ucimount, "%s:/etc/config", uci_dir) == -1)
 		goto netifd_out_ucinetconf;
 
-	if (gen_jail_uci_network())
+	if (asprintf(&ubusmount, "%s:/var/run/ubus", ubus_sock_dir) == -1)
 		goto netifd_out_ucimount;
+
+	if (gen_jail_uci_network())
+		goto netifd_out_ubusmount;
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", jail_name);
@@ -234,9 +238,11 @@ static void run_netifd(struct uloop_timeout *t)
 	blobmsg_add_string(&req, "", netifd_path);
 	blobmsg_add_string(&req, "", "-r");
 	blobmsg_add_string(&req, "", resolvconf);
-	blobmsg_add_string(&req, "", "-s");
-	blobmsg_add_string(&req, "", ubus_sock_path);
 	blobmsg_close_array(&req, cmd);
+
+	pathenv = blobmsg_open_table(&req, "env");
+	blobmsg_add_string(&req, "PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
+	blobmsg_close_table(&req, pathenv);
 
 	jail = blobmsg_open_table(&req, "jail");
 
@@ -252,13 +258,20 @@ static void run_netifd(struct uloop_timeout *t)
 	blobmsg_close_array(&req, setns);
 
 	mount = blobmsg_open_table(&req, "mount");
-	blobmsg_add_string(&req, ubus_sock_dir, "1");
+	blobmsg_add_string(&req, ubusmount, "1");
 	blobmsg_add_string(&req, resolvconf_dir, "1");
 	blobmsg_add_string(&req, ucimount, "0");
+	blobmsg_add_string(&req, "/bin/cat", "0");
+	blobmsg_add_string(&req, "/bin/ipcalc.sh", "0");
+	blobmsg_add_string(&req, "/bin/kill", "0");
+	blobmsg_add_string(&req, "/bin/ubus", "0");
 	blobmsg_add_string(&req, "/etc/hotplug.d", "0");
+	blobmsg_add_string(&req, "/lib/functions", "0");
 	blobmsg_add_string(&req, "/lib/functions.sh", "0");
 	blobmsg_add_string(&req, "/lib/netifd", "0");
 	blobmsg_add_string(&req, "/lib/network", "0");
+	blobmsg_add_string(&req, "/usr/bin/awk", "0");
+	blobmsg_add_string(&req, "/usr/bin/killall", "0");
 	blobmsg_add_string(&req, "/usr/bin/logger", "0");
 	blobmsg_add_string(&req, "/usr/bin/jshn", "0");
 	blobmsg_add_string(&req, "/usr/share/libubox/jshn.sh", "0");
@@ -285,6 +298,8 @@ static void run_netifd(struct uloop_timeout *t)
 
 	if (!running)
 		blob_buf_free(&req);
+netifd_out_ubusmount:
+	free(ubusmount);
 netifd_out_ucimount:
 	free(ucimount);
 netifd_out_ucinetconf:
@@ -326,7 +341,7 @@ static void inotify_read_handler(struct uloop_fd *u, unsigned int events)
 		if (in->len < 4)
 			continue;
 
-		if (!strncmp("ubus", in->name, in->len))
+		if (!strncmp(ubus_sock_name, in->name, in->len))
 			uloop_timeout_add(&netifd_start_timeout);
         }
 }
@@ -431,7 +446,7 @@ int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t 
 		goto errout_dir;
 	}
 
-	if (asprintf(&ubus_sock_path, "%s/ubus", ubus_sock_dir) == -1) {
+	if (asprintf(&ubus_sock_path, "%s/%s", ubus_sock_dir, ubus_sock_name) == -1) {
 		ret = ENOMEM;
 		goto errout_path;
 	}
