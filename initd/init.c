@@ -31,6 +31,8 @@
 
 #if defined(WITH_SELINUX)
 #include <selinux/selinux.h>
+#include <selinux/restorecon.h>
+#include <selinux/avc.h>
 #endif
 
 #include "../utils/utils.h"
@@ -75,16 +77,25 @@ cmdline(void)
 static int
 selinux(char **argv)
 {
-	int enforce = 0;
 	int ret;
+	int enforce = selinux_status_getenforce();
 
-	/* SELinux already initialized */
-	if (getenv("SELINUX_INIT"))
-		return 0;
+	if (getenv("SELINUX_INIT")) {
+		/* SELinux already initialized */
+		if (getenv("SELINUX_RESTORECON")) {
+			unsetenv("SELINUX_INIT");
+			unsetenv("SELINUX_RESTORECON");
+			return 0;
+		}
+		/* Second call: restore filesystem labels */
+		ret = selinux_restorecon("/", SELINUX_RESTORECON_RECURSE);
+		putenv("SELINUX_RESTORECON=1");
+	} else {
+		/* First call: load policy */
+		ret = selinux_init_load_policy(&enforce);
+		putenv("SELINUX_INIT=1");
+	}
 
-	putenv("SELINUX_INIT=1");
-
-	ret = selinux_init_load_policy(&enforce);
 	if (ret == 0)
 		execv(argv[0], argv);
 
