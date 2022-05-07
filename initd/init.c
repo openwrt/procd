@@ -88,7 +88,9 @@ selinux(char **argv)
 			return 0;
 		}
 		/* Second call: restore filesystem labels */
-		ret = selinux_restorecon("/", SELINUX_RESTORECON_RECURSE);
+		const char *exclude_list[] = { "/dev/console", "/proc", "/sys", 0 };
+		selinux_restorecon_set_exclude_list(exclude_list);
+		ret = selinux_restorecon("/", SELINUX_RESTORECON_RECURSE | SELINUX_RESTORECON_MASS_RELABEL);
 		putenv("SELINUX_RESTORECON=1");
 	} else {
 		/* First call: load policy */
