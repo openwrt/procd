@@ -80,14 +80,15 @@ selinux(char **argv)
 	int ret;
 	int enforce = selinux_status_getenforce();
 
+	/* is SELinux already initialized? */
 	if (getenv("SELINUX_INIT")) {
-		/* SELinux already initialized */
-		if (getenv("SELINUX_RESTORECON")) {
+		/* have initramfs permissions already been restored? */
+		if (!getenv("INITRAMFS") || getenv("SELINUX_RESTORECON")) {
 			unsetenv("SELINUX_INIT");
 			unsetenv("SELINUX_RESTORECON");
 			return 0;
 		}
-		/* Second call: restore filesystem labels */
+		/* Second call (initramfs only): restore filesystem labels */
 		const char *exclude_list[] = { "/dev/console", "/proc", "/sys", 0 };
 		selinux_restorecon_set_exclude_list(exclude_list);
 		ret = selinux_restorecon("/", SELINUX_RESTORECON_RECURSE | SELINUX_RESTORECON_MASS_RELABEL);
