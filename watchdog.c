@@ -87,10 +87,32 @@ static void watchdog_close(void)
 
 static int watchdog_set_drv_timeout(void)
 {
+	int timeout = wdt_drv_timeout;
+	int rv;
+
 	if (wdt_fd < 0)
 		return -1;
 
-	return ioctl(wdt_fd, WDIOC_SETTIMEOUT, &wdt_drv_timeout);
+	while (1) {
+		rv = ioctl(wdt_fd, WDIOC_SETTIMEOUT, &timeout);
+
+		if (rv != 0)
+			break;
+
+		if (timeout == 0 && wdt_drv_timeout != 0) {
+			DEBUG(2, "Watchdog timeout %d too low, retrying with %d\n", wdt_drv_timeout, wdt_drv_timeout * 2);
+
+			wdt_drv_timeout *= 2;
+			timeout = wdt_drv_timeout;
+
+			continue;
+		}
+
+		wdt_drv_timeout = timeout;
+		break;
+	}
+
+	return rv;
 }
 
 static void watchdog_print_status(void)
