@@ -381,6 +381,10 @@ int main(int argc, char **argv, char **envp)
 		ULOG_ERR("failed to exec %s: %m\n", _argv[0]);
 
 		free(_argv);
+		if (_envp[0])
+			free(_envp[0]);
+		if (newenv == 2 && _envp[1])
+			free(_envp[1]);
 		free(_envp);
 		return ret;
 	}
