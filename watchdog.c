@@ -216,3 +216,12 @@ void watchdog_set_cloexec(bool val)
 		flags &= ~FD_CLOEXEC;
 	fcntl(wdt_fd, F_SETFD,  flags);
 }
+
+ssize_t watchdog_get_timeleft(void)
+{
+	ssize_t timeleft;
+
+	ioctl(wdt_fd, WDIOC_GETTIMELEFT, &timeleft);
+
+	return timeleft;
+}

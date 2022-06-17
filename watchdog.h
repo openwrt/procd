@@ -15,6 +15,7 @@
 #ifndef __PROCD_WATCHDOG_H
 #define __PROCD_WATCHDOG_H
 
+#include <sys/types.h>
 #include <stdbool.h>
 
 #ifndef DISABLE_INIT
@@ -28,6 +29,7 @@ void watchdog_set_stopped(bool val);
 bool watchdog_get_stopped(void);
 void watchdog_set_cloexec(bool val);
 void watchdog_ping(void);
+ssize_t watchdog_get_timeleft(void);
 #else
 static inline void watchdog_init(int preinit)
 {

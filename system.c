@@ -457,6 +457,7 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	struct blob_attr *tb[__WDT_MAX];
 	const char *status;
+	ssize_t timeleft = -1;
 
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -493,14 +494,18 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 		status = "offline";
 	else if (watchdog_get_stopped())
 		status = "stopped";
-	else
+	else {
 		status = "running";
+		timeleft = watchdog_get_timeleft();
+	}
 
 	blob_buf_init(&b, 0);
 	blobmsg_add_string(&b, "status", status);
 	blobmsg_add_u32(&b, "timeout", watchdog_timeout(0));
 	blobmsg_add_u32(&b, "frequency", watchdog_frequency(0));
 	blobmsg_add_u8(&b, "magicclose", watchdog_get_magicclose());
+	if (timeleft >= 0)
+		blobmsg_add_u32(&b, "timeleft", timeleft);
 	ubus_send_reply(ctx, req, b.head);
 
 	return 0;
