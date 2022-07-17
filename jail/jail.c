@@ -585,6 +585,7 @@ static int create_devices(void)
 {
 	struct mknod_args **cur, *curdef;
 	char *path, *tmp;
+	int ret;
 
 	if (!opts.devices)
 		goto only_default_devices;
@@ -640,11 +641,25 @@ only_default_devices:
 	}
 
 	/* Dev symbolic links as defined in OCI spec */
-	(void) symlink("/dev/pts/ptmx", "/dev/ptmx");
-	(void) symlink("/proc/self/fd", "/dev/fd");
-	(void) symlink("/proc/self/fd/0", "/dev/stdin");
-	(void) symlink("/proc/self/fd/1", "/dev/stdout");
-	(void) symlink("/proc/self/fd/2", "/dev/stderr");
+	ret = symlink("/dev/pts/ptmx", "/dev/ptmx");
+	if (ret < 0)
+		WARNING("symlink() failed to create link to /dev/pts/ptmx");
+
+	ret = symlink("/proc/self/fd", "/dev/fd");
+	if (ret < 0)
+		WARNING("symlink() failed to create link to /proc/self/fd");
+
+	ret = symlink("/proc/self/fd/0", "/dev/stdin");
+	if (ret < 0)
+		WARNING("symlink() failed to create link to /proc/self/fd/0");
+
+	ret = symlink("/proc/self/fd/1", "/dev/stdout");
+	if (ret < 0)
+		WARNING("symlink() failed to create link to /proc/self/fd/1");
+
+	ret = symlink("/proc/self/fd/2", "/dev/stderr");
+	if (ret < 0)
+		WARNING("symlink() failed to create link to /proc/self/fd/2");
 
 	return 0;
 }
@@ -737,7 +752,9 @@ static int build_jail_fs(void)
 		if (overlaydir)
 			unlink(jaillink);
 
-		(void) symlink("../dev/resolv.conf.d/resolv.conf.auto", jaillink);
+		ret = symlink("../dev/resolv.conf.d/resolv.conf.auto", jaillink);
+		if (ret < 0)
+			WARNING("symlink() failed to create link to ../dev/resolv.conf.d/resolv.conf.auto");
 	}
 
 	run_hooks(opts.hooks.createContainer, enter_jail_fs);
@@ -2729,8 +2746,14 @@ int main(int argc, char **argv)
 		opts.envp = calloc(1 + envn, sizeof(char*));
 		list_for_each_entry_safe(enve, tmpenve, &envl, list) {
 			tmp = getenv(enve->envarg);
-			if (tmp)
-				asprintf(&opts.envp[envc++], "%s=%s", enve->envarg, tmp);
+			if (tmp) {
+				ret = asprintf(&opts.envp[envc++], "%s=%s", enve->envarg, tmp);
+				if (ret < 0) {
+					ERROR("filed to handle envargs %s\n", tmp);
+					free(enve);
+					goto errout;
+				}
+			}
 
 			list_del(&enve->list);
 			free(enve);
