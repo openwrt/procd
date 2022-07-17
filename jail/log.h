@@ -20,6 +20,10 @@ extern int debug;
 #define INFO(fmt, ...) do { \
 	printf("jail: "fmt, ## __VA_ARGS__); \
 	} while (0)
+#define WARNING(fmt, ...) do { \
+	syslog(LOG_WARNING, "jail: "fmt, ## __VA_ARGS__); \
+	printf("jail: "fmt, ## __VA_ARGS__); \
+	} while (0)
 #define ERROR(fmt, ...) do { \
 	syslog(LOG_ERR, "jail: "fmt, ## __VA_ARGS__); \
 	fprintf(stderr,"jail: "fmt, ## __VA_ARGS__); \
