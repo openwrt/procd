@@ -1707,6 +1707,15 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_close_table(b, e);
 	}
 
+	if (!avl_is_empty(&in->netdev.avl)) {
+		struct blobmsg_list_node *var;
+		void *n = blobmsg_open_array(b, "netdev");
+
+		blobmsg_list_for_each(&in->netdev, var)
+			blobmsg_add_string(b, NULL, blobmsg_data(var->data));
+		blobmsg_close_array(b, n);
+	}
+
 	if (in->reload_signal)
 		blobmsg_add_u32(b, "reload_signal", in->reload_signal);
 
