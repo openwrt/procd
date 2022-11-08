@@ -19,8 +19,10 @@
 #include "sysupgrade.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <libubox/blobmsg.h>
@@ -100,10 +102,12 @@ void sysupgrade_exec_upgraded(const char *prefix, char *path,
 		free(name);
 	}
 
+	errno = 0;
+
 	execvp(argv[0], argv);
 
 	/* Cleanup on failure */
-	fprintf(stderr, "Failed to exec upgraded.\n");
+	fprintf(stderr, "Failed to exec upgraded: %s\n", strerror(-errno));
 	unsetenv("WDTFD");
 	watchdog_set_cloexec(true);
 	ret = chroot(".");
