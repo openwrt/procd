@@ -215,6 +215,10 @@ static void free_hooklist(struct hook_execvpe **hooklist)
 
 static void free_sysctl(void) {
 	struct sysctl_val *cur;
+
+	if (!opts.sysctl)
+		return;
+
 	cur = *opts.sysctl;
 
 	while (cur) {
