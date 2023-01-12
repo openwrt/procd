@@ -61,20 +61,22 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	struct stat s;
 	char new[PATH_MAX];
 	char *source = (char *)orig_source;
-	int fd;
+	int fd, ret = 0;
 	bool is_bind = (orig_mountflags & MS_BIND);
 	bool is_mask = (source == (void *)(-1));
 	unsigned long mountflags = orig_mountflags;
+
+	assert(!(inner && is_mask));
+	assert(!(inner && !orig_source));
 
 	if (source && is_bind && stat(source, &s)) {
 		ERROR("stat(%s) failed: %m\n", source);
 		return error;
 	}
 
-	if (!is_mask && orig_source && inner) {
+	if (inner)
 		if (asprintf(&source, "%s%s", root, orig_source) < 0)
 			return ENOMEM;
-	}
 
 	snprintf(new, sizeof(new), "%s%s", root, target?target:source);
 
@@ -83,7 +85,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 			return 0; /* doesn't exists, nothing to mask */
 
 		if (S_ISDIR(s.st_mode)) {/* use empty 0-sized tmpfs for directories */
-			if (mount(NULL, new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_NOATIME, "size=0,mode=000"))
+			if (mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_NOATIME, "size=0,mode=000"))
 				return error;
 		} else {
 			/* mount-bind 0-sized file having mode 000 */
@@ -104,12 +106,16 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	} else if (is_bind && source) {
 		mkdir_p(dirname(new), 0755);
 		snprintf(new, sizeof(new), "%s%s", root, target?target:source);
-		fd = creat(new, 0644);
-		if (fd < 0) {
-			ERROR("creat(%s) failed: %m\n", new);
-			return error;
+		fd = open(new, O_CREAT|O_WRONLY|O_TRUNC|O_EXCL, 0644);
+		if (fd >= 0)
+			close(fd);
+
+		if (error && fd < 0 && errno != EEXIST) {
+			ERROR("failed to create mount target %s: %m\n", new);
+
+			ret = errno;
+			goto free_source_out;
 		}
-		close(fd);
 	}
 
 	if (is_bind) {
@@ -117,10 +123,8 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 			if (error)
 				ERROR("failed to mount -B %s %s: %m\n", source, new);
 
-			if (inner)
-				free(source);
-
-			return error;
+			ret = error;
+			goto free_source_out;
 		}
 		mountflags |= MS_REMOUNT;
 	}
@@ -130,10 +134,8 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 		if (error)
 			ERROR("failed to mount %s %s: %m\n", source, new);
 
-		if (inner)
-			free(source);
-
-		return error;
+		ret = error;
+		goto free_source_out;
 	}
 
 	DEBUG("mount %s%s %s (%s)\n", (mountflags & MS_BIND)?"-B ":"", source, new,
@@ -143,16 +145,14 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 		if (error)
 			ERROR("failed to mount --make-... %s \n", new);
 
-		if (inner)
-			free(source);
-
-		return error;
+		ret = error;
 	}
 
+free_source_out:
 	if (inner)
 		free(source);
 
-	return 0;
+	return ret;
 }
 
 static int _add_mount(const char *source, const char *target, const char *filesystemtype,
