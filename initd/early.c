@@ -58,13 +58,14 @@ early_mounts(void)
 	unsigned int oldumask = umask(0);
 
 	if (!is_container()) {
-		mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
-		mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0);
+		mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL);
+		mount("sysfs", "/sys", "sysfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL);
+		mount("efivars", "/sys/firmware/efi/efivars", "efivarfs", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, NULL);
 		mount("cgroup2", "/sys/fs/cgroup", "cgroup2",  MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME, "nsdelegate");
 		mount("tmpfs", "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "mode=0755,size=512K");
 		ignore(symlink("/tmp/shm", "/dev/shm"));
 		mkdir("/dev/pts", 0755);
-		mount("devpts", "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0);
+		mount("devpts", "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, NULL);
 
 		early_dev();
 	}
