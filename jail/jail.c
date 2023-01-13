@@ -374,7 +374,7 @@ static int create_dev_console(const char *jail_root)
 {
 	char *console_fname;
 	char dev_console_path[PATH_MAX];
-	int slave_console_fd;
+	int slave_console_fd, dev_console_dummy;
 
 	/* Open UNIX/98 virtual console */
 	console_fd = posix_openpt(O_RDWR | O_NOCTTY);
@@ -394,7 +394,11 @@ static int create_dev_console(const char *jail_root)
 
 	/* mount-bind PTY slave to /dev/console in jail */
 	snprintf(dev_console_path, sizeof(dev_console_path), "%s/dev/console", jail_root);
-	close(creat(dev_console_path, 0620));
+	dev_console_dummy = creat(dev_console_path, 0620);
+	if (dev_console_dummy < 0)
+		goto no_console;
+
+	close(dev_console_dummy);
 
 	if (mount(console_fname, dev_console_path, "bind", MS_BIND, NULL))
 		goto no_console;
