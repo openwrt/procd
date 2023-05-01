@@ -71,13 +71,15 @@ static int watchdog_open(bool cloexec)
 	return wdt_fd;
 }
 
-static void watchdog_close(void)
+static void watchdog_close(bool with_release)
 {
 	if (wdt_fd < 0)
 		return;
 
-	if (write(wdt_fd, "V", 1) < 0)
-		ERROR("WDT failed to write release: %m\n");
+	if (with_release) {
+		if (write(wdt_fd, "V", 1) < 0)
+			ERROR("WDT failed to write release: %m\n");
+	}
 
 	if (close(wdt_fd) == -1)
 		ERROR("WDT failed to close watchdog: %m\n");
@@ -137,8 +139,7 @@ void watchdog_set_stopped(bool val)
 	if (val) {
 		uloop_timeout_cancel(&wdt_timeout);
 
-		if (wdt_magicclose)
-			watchdog_close();
+		watchdog_close(wdt_magicclose);
 	}
 	else {
 		watchdog_open(true);
