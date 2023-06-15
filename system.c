@@ -153,6 +153,12 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 				blobmsg_add_string(&b, "system", line);
 				break;
 			}
+#elif __riscv
+			if (!strcasecmp(key, "isa")) {
+				snprintf(line, sizeof(line), "RISC-V (%s)", val + 2);
+				blobmsg_add_string(&b, "system", line);
+				break;
+			}
 #else
 			if (!strcasecmp(key, "system type") ||
 			    !strcasecmp(key, "processor") ||
