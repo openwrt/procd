@@ -105,6 +105,7 @@ static void trigger_command_run(struct runqueue *q, struct runqueue_task *t)
 	pid_t pid;
 	int n = 0;
 	int rem;
+	int fd;
 
 	pid = fork();
 	if (pid < 0) {
@@ -117,10 +118,12 @@ static void trigger_command_run(struct runqueue *q, struct runqueue_task *t)
 		return;
 	}
 
-	if (debug < 3) {
-		close(STDIN_FILENO);
-		close(STDOUT_FILENO);
-		close(STDERR_FILENO);
+	if (debug < 3 && (fd = open("/dev/null", O_RDWR)) >= 0) {
+		dup2(fd, STDIN_FILENO);
+		dup2(fd, STDOUT_FILENO);
+		dup2(fd, STDERR_FILENO);
+		if (fd > STDERR_FILENO)
+			close(fd);
 	}
 
 	blobmsg_for_each_attr(cur, cmd->data, rem)
