@@ -4,6 +4,7 @@ on: [ push, pull_request ]
 env:
   CI_ENABLE_UNIT_TESTING: 0
   CI_TARGET_BUILD_DEPENDS: libubox
+  CI_CMAKE_EXTRA_BUILD_ARGS: -DJAIL_SUPPORT=1
 
 jobs:
   native_testing:
