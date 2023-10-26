@@ -51,9 +51,8 @@ static const char *system_rootfs_type(void) {
 	static char fstype[16] = { 0 };
 	char *mountstr = NULL, *mp = "/", *pos, *tmp;
 	FILE *mounts;
-	ssize_t nread;
 	size_t len = 0;
-	bool found;
+	bool found = false;
 
 	if (initramfs)
 		return "initramfs";
@@ -65,9 +64,7 @@ static const char *system_rootfs_type(void) {
 	if (!mounts)
 		return NULL;
 
-	while ((nread = getline(&mountstr, &len, mounts)) != -1) {
-		found = false;
-
+	while (getline(&mountstr, &len, mounts) != -1) {
 		pos = strchr(mountstr, ' ');
 		if (!pos)
 			continue;
