@@ -40,7 +40,7 @@ static void watch_subscribe_cb(struct ubus_context *ctx, struct ubus_event_handl
 	struct blob_attr *attr;
 	const char *path;
 
-	DEBUG(3, "ubus event %s\n", type);
+	P_DEBUG(3, "ubus event %s\n", type);
 	if (strcmp(type, "ubus.object.add") != 0)
 		return;
 
@@ -49,7 +49,7 @@ static void watch_subscribe_cb(struct ubus_context *ctx, struct ubus_event_handl
 		return;
 
 	path = blobmsg_data(attr);
-	DEBUG(3, "ubus path %s\n", path);
+	P_DEBUG(3, "ubus path %s\n", path);
 
 	list_for_each_entry(o, &watch_objects, list) {
 		unsigned int id;
@@ -99,7 +99,7 @@ watch_notify_cb(struct ubus_context *ctx, struct ubus_object *obj,
 		char *str;
 
 		str = blobmsg_format_json(msg, true);
-		DEBUG(3, "Received ubus notify '%s': %s\n", method, str);
+		P_DEBUG(3, "Received ubus notify '%s': %s\n", method, str);
 		free(str);
 	}
 

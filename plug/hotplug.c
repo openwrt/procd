@@ -231,7 +231,7 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 	int fw, src, load, len;
 	static char buf[4096];
 
-	DEBUG(2, "Firmware request for %s/%s\n", dir, file);
+	P_DEBUG(2, "Firmware request for %s/%s\n", dir, file);
 
 	if (!file || !dir || !dev) {
 		ERROR("Request for unknown firmware %s/%s\n", dir, file);
@@ -296,7 +296,7 @@ send_to_kernel:
 		ERROR("failed to write to %s: %m\n", loadpath);
 	close(load);
 
-	DEBUG(2, "Done loading %s\n", path);
+	P_DEBUG(2, "Done loading %s\n", path);
 
 	exit(EXIT_FAILURE);
 }
@@ -305,12 +305,12 @@ static void handle_start_console(struct blob_attr *msg, struct blob_attr *data)
 {
 	char *dev = blobmsg_get_string(blobmsg_data(data));
 
-	DEBUG(2, "Start console request for %s\n", dev);
+	P_DEBUG(2, "Start console request for %s\n", dev);
 
 	procd_inittab_run("respawn");
 	procd_inittab_run("askfirst");
 
-	DEBUG(2, "Done starting console for %s\n", dev);
+	P_DEBUG(2, "Done starting console for %s\n", dev);
 
 	exit(EXIT_FAILURE);
 }
@@ -390,12 +390,12 @@ static void queue_next(void)
 
 	uloop_process_add(&queue_proc);
 
-	DEBUG(4, "Launched hotplug exec instance, pid=%d\n", (int) queue_proc.pid);
+	P_DEBUG(4, "Launched hotplug exec instance, pid=%d\n", (int) queue_proc.pid);
 }
 
 static void queue_proc_cb(struct uloop_process *c, int ret)
 {
-	DEBUG(4, "Finished hotplug exec instance, pid=%d\n", (int) c->pid);
+	P_DEBUG(4, "Finished hotplug exec instance, pid=%d\n", (int) c->pid);
 
 	if (current) {
 		current->complete(current->msg, current->data, ret);
@@ -513,13 +513,13 @@ static void rule_handle_command(struct json_script_ctx *ctx, const char *name,
 	int rem, i;
 
 	if (debug > 3) {
-		DEBUG(4, "Command: %s\n", name);
+		P_DEBUG(4, "Command: %s\n", name);
 		blobmsg_for_each_attr(cur, data, rem)
-			DEBUG(4, " %s\n", (char *) blobmsg_data(cur));
+			P_DEBUG(4, " %s\n", (char *) blobmsg_data(cur));
 
-		DEBUG(4, "Message:\n");
+		P_DEBUG(4, "Message:\n");
 		blobmsg_for_each_attr(cur, vars, rem)
-			DEBUG(4, " %s=%s\n", blobmsg_name(cur), (char *) blobmsg_data(cur));
+			P_DEBUG(4, " %s=%s\n", blobmsg_name(cur), (char *) blobmsg_data(cur));
 	}
 
 	for (i = 0; i < ARRAY_SIZE(handlers); i++)
@@ -560,7 +560,7 @@ static void hotplug_handler_debug(struct blob_attr *data)
 		return;
 
 	str = blobmsg_format_json(data, true);
-	DEBUG(3, "%s\n", str);
+	P_DEBUG(3, "%s\n", str);
 	free(str);
 }
 

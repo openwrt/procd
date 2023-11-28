@@ -66,14 +66,14 @@ service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 		in_n = container_of(node_new, struct service_instance, node);
 
 	if (in_o && in_n) {
-		DEBUG(2, "Update instance %s::%s\n", in_o->srv->name, in_o->name);
+		P_DEBUG(2, "Update instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_update(in_o, in_n);
 		instance_free(in_n);
 	} else if (in_o) {
-		DEBUG(2, "Stop instance %s::%s\n", in_o->srv->name, in_o->name);
+		P_DEBUG(2, "Stop instance %s::%s\n", in_o->srv->name, in_o->name);
 		instance_stop(in_o, true);
 	} else if (in_n && in_n->srv->autostart) {
-		DEBUG(2, "Start instance %s::%s\n", in_n->srv->name, in_n->name);
+		P_DEBUG(2, "Start instance %s::%s\n", in_n->srv->name, in_n->name);
 		instance_start(in_n);
 	}
 	blob_buf_init(&b, 0);
@@ -419,11 +419,11 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		s = avl_find_element(&services, name, s, avl);
 
 	if (s) {
-		DEBUG(2, "Update service %s\n", name);
+		P_DEBUG(2, "Update service %s\n", name);
 		return service_update(s, tb, add);
 	}
 
-	DEBUG(2, "Create service %s\n", name);
+	P_DEBUG(2, "Create service %s\n", name);
 	s = service_alloc(name);
 	if (!s)
 		return UBUS_STATUS_UNKNOWN_ERROR;

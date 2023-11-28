@@ -22,6 +22,13 @@
 		ulog(LOG_NOTICE, fmt, ## __VA_ARGS__); \
 	} } while (0)
 
+#define P_DEBUG(level, fmt, ...) do { \
+	if (debug >= level) { \
+		ulog(LOG_NOTICE, fmt, ## __VA_ARGS__); \
+	} else { \
+		procd_udebug_printf(fmt, ## __VA_ARGS__); \
+	} } while (0)
+
 #define LOG   ULOG_INFO
 #define ERROR ULOG_ERR
 

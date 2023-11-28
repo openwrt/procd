@@ -18,6 +18,7 @@
 #include <libubox/uloop.h>
 #include <libubox/utils.h>
 #include <libubus.h>
+#include <udebug.h>
 
 #include <stdio.h>
 #include <syslog.h>
@@ -54,5 +55,8 @@ void trigger_del(void *id);
 void watch_add(const char *_name, void *id);
 void watch_del(void *id);
 void watch_ubus(struct ubus_context *ctx);
+
+void procd_udebug_printf(const char *format, ...);
+void procd_udebug_set_enabled(bool val);
 
 #endif

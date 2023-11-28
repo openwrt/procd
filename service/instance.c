@@ -664,7 +664,7 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
-	DEBUG(2, "Started instance %s::%s[%d]\n", in->srv->name, in->name, pid);
+	P_DEBUG(2, "Started instance %s::%s[%d]\n", in->srv->name, in->name, pid);
 	in->proc.pid = pid;
 	instance_writepid(in);
 	clock_gettime(CLOCK_MONOTONIC, &in->start);
@@ -684,7 +684,7 @@ instance_start(struct service_instance *in)
 
 	if (in->watchdog.mode != INSTANCE_WATCHDOG_MODE_DISABLED) {
 		uloop_timeout_set(&in->watchdog.timeout, in->watchdog.freq * 1000);
-		DEBUG(2, "Started instance %s::%s watchdog timer : timeout = %d\n", in->srv->name, in->name, in->watchdog.freq);
+		P_DEBUG(2, "Started instance %s::%s watchdog timer : timeout = %d\n", in->srv->name, in->name, in->watchdog.freq);
 	}
 
 	service_event("instance.start", in->srv->name, in->name);
@@ -830,7 +830,7 @@ instance_exit(struct uloop_process *p, int ret)
 	clock_gettime(CLOCK_MONOTONIC, &tp);
 	runtime = tp.tv_sec - in->start.tv_sec;
 
-	DEBUG(2, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
+	P_DEBUG(2, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
 
 	in->exit_code = instance_exit_code(ret);
 	uloop_timeout_cancel(&in->timeout);
@@ -901,7 +901,7 @@ instance_watchdog(struct uloop_timeout *t)
 {
 	struct service_instance *in = container_of(t, struct service_instance, watchdog.timeout);
 
-	DEBUG(3, "instance %s::%s watchdog timer expired\n", in->srv->name, in->name);
+	P_DEBUG(3, "instance %s::%s watchdog timer expired\n", in->srv->name, in->name);
 
 	if (in->respawn)
 		instance_restart(in);
@@ -1333,7 +1333,7 @@ instance_config_parse(struct service_instance *in)
 		blobmsg_for_each_attr(cur2, tb[INSTANCE_ATTR_WATCH], rem) {
 			if (blobmsg_type(cur2) != BLOBMSG_TYPE_STRING)
 				continue;
-			DEBUG(3, "watch for %s\n", blobmsg_get_string(cur2));
+			P_DEBUG(3, "watch for %s\n", blobmsg_get_string(cur2));
 			watch_add(blobmsg_get_string(cur2), in);
 		}
 	}
@@ -1423,9 +1423,9 @@ instance_config_parse(struct service_instance *in)
 		int facility = syslog_facility_str_to_int(blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
 		if (facility != -1) {
 			in->syslog_facility = facility;
-			DEBUG(3, "setting facility '%s'\n", blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
+			P_DEBUG(3, "setting facility '%s'\n", blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
 		} else
-			DEBUG(3, "unknown syslog facility '%s' given, using default (LOG_DAEMON)\n", blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
+			P_DEBUG(3, "unknown syslog facility '%s' given, using default (LOG_DAEMON)\n", blobmsg_get_string(tb[INSTANCE_ATTR_FACILITY]));
 	}
 
 	if (tb[INSTANCE_ATTR_WATCHDOG]) {
@@ -1442,18 +1442,18 @@ instance_config_parse(struct service_instance *in)
 
 		if (vals[0] >= 0 && vals[0] < __INSTANCE_WATCHDOG_MODE_MAX) {
 			in->watchdog.mode = vals[0];
-			DEBUG(3, "setting watchdog mode (%d)\n", vals[0]);
+			P_DEBUG(3, "setting watchdog mode (%d)\n", vals[0]);
 		} else {
 			in->watchdog.mode = 0;
-			DEBUG(3, "unknown watchdog mode (%d) given, using default (0)\n", vals[0]);
+			P_DEBUG(3, "unknown watchdog mode (%d) given, using default (0)\n", vals[0]);
 		}
 
 		if (vals[1] > 0) {
 			in->watchdog.freq = vals[1];
-			DEBUG(3, "setting watchdog timeout (%d)\n", vals[0]);
+			P_DEBUG(3, "setting watchdog timeout (%d)\n", vals[0]);
 		} else {
 			in->watchdog.freq = 30;
-			DEBUG(3, "invalid watchdog timeout (%d) given, using default (30)\n", vals[1]);
+			P_DEBUG(3, "invalid watchdog timeout (%d) given, using default (30)\n", vals[1]);
 		}
 	}
 
@@ -1468,7 +1468,7 @@ instance_config_parse(struct service_instance *in)
 						in->srv->name, in->name, UJAIL_BIN_PATH, r);
 				return false;
 			}
-			DEBUG(2, "unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
+			P_DEBUG(2, "unable to find %s: %m (%d)\n", UJAIL_BIN_PATH, r);
 			in->has_jail = false;
 		}
 	}

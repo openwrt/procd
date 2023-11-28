@@ -27,6 +27,55 @@
 
 unsigned int debug;
 
+static struct udebug ud;
+static struct udebug_buf udb;
+static bool udebug_enabled;
+
+static void procd_udebug_vprintf(const char *format, va_list ap)
+{
+	if (!udebug_enabled)
+		return;
+
+	udebug_entry_init(&udb);
+	udebug_entry_vprintf(&udb, format, ap);
+	udebug_entry_add(&udb);
+}
+
+void procd_udebug_printf(const char *format, ...)
+{
+	va_list ap;
+
+	va_start(ap, format);
+	procd_udebug_vprintf(format, ap);
+	va_end(ap);
+}
+
+void procd_udebug_set_enabled(bool val)
+{
+	static const struct udebug_buf_meta meta = {
+		.name = "procd_log",
+		.format = UDEBUG_FORMAT_STRING,
+	};
+
+	if (udebug_enabled == val)
+		return;
+
+	udebug_enabled = val;
+	if (!val) {
+		ulog_udebug(NULL);
+		udebug_buf_free(&udb);
+		udebug_free(&ud);
+		return;
+	}
+
+	udebug_init(&ud);
+	udebug_auto_connect(&ud, NULL);
+	udebug_buf_init(&udb, 1024, 64 * 1024);
+	udebug_buf_add(&ud, &udb, &meta);
+	ulog_udebug(&udb);
+}
+
+
 static int usage(const char *prog)
 {
 	fprintf(stderr, "Usage: %s [options]\n"
@@ -74,6 +123,7 @@ int main(int argc, char **argv)
 	setsid();
 	uloop_init();
 	procd_signal();
+	procd_udebug_set_enabled(true);
 	if (getpid() != 1)
 		procd_connect_ubus();
 	else

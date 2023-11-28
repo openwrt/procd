@@ -23,6 +23,13 @@ char *ubus_socket = NULL;
 static struct ubus_context *ctx;
 static struct uloop_timeout ubus_timer;
 static int timeout;
+static struct udebug_ubus udebug;
+
+static void
+procd_udebug_cb(struct udebug_ubus *ctx, struct blob_attr *data, bool enabled)
+{
+	procd_udebug_set_enabled(enabled);
+}
 
 static void reset_timeout(void)
 {
@@ -67,6 +74,7 @@ ubus_connect_cb(struct uloop_timeout *timeout)
 		return;
 	}
 
+	udebug_ubus_init(&udebug, ctx, "procd", procd_udebug_cb);
 	ctx->connection_lost = ubus_disconnect_cb;
 	ubus_init_hotplug(ctx);
 	ubus_init_service(ctx);

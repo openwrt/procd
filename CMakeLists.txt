@@ -31,8 +31,9 @@ FIND_LIBRARY(uci NAMES uci)
 FIND_LIBRARY(blobmsg_json NAMES blobmsg_json)
 FIND_LIBRARY(json_script NAMES json_script)
 FIND_LIBRARY(json NAMES json-c json)
+FIND_LIBRARY(udebug NAMES udebug)
 
-SET(LIBS ${ubox} ${ubus} ${json} ${blobmsg_json} ${json_script})
+SET(LIBS ${ubox} ${ubus} ${json} ${blobmsg_json} ${json_script} ${udebug})
 
 IF(DEBUG)
   ADD_DEFINITIONS(-DUDEV_DEBUG -g3)
@@ -52,12 +53,14 @@ add_subdirectory(upgraded)
 
 ADD_EXECUTABLE(procd ${SOURCES})
 TARGET_LINK_LIBRARIES(procd ${LIBS})
+SET_TARGET_PROPERTIES(procd PROPERTIES COMPILE_DEFINITIONS "HAS_UDEBUG")
 INSTALL(TARGETS procd
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
 
 FIND_PATH(ubox_include_dir libubox/uloop.h)
-INCLUDE_DIRECTORIES(${ubox_include_dir})
+FIND_PATH(udebug_include_dir NAMES udebug.h)
+INCLUDE_DIRECTORIES(${ubox_include_dir} ${udebug_include_dir})
 
 IF(DISABLE_INIT)
 ADD_DEFINITIONS(-DDISABLE_INIT)
