@@ -48,11 +48,12 @@ static void set_stdio(const char* tty)
 	if (chdir("/dev") ||
 	    !freopen(tty, "r", stdin) ||
 	    !freopen(tty, "w", stdout) ||
-	    !freopen(tty, "w", stderr) ||
-	    chdir("/"))
+	    !freopen(tty, "w", stderr))
 		ERROR("failed to set stdio: %m\n");
 	else
 		fcntl(STDERR_FILENO, F_SETFL, fcntl(STDERR_FILENO, F_GETFL) | O_NONBLOCK);
+	if (chdir("/"))
+		ERROR("failed to change dir to /: %m\n");
 }
 
 static void set_console(void)
