@@ -94,8 +94,12 @@ static const char *system_rootfs_type(void) {
 			 * lowerdir, as that can point to "/" being a previous
 			 * overlay mount (after firstboot or sysuprade config
 			 * restore). Hence just assume the lowerdir is "/rom" and
-			 * restart searching for that instead.
+			 * restart searching for that instead if that's not
+			 * already the case.
 			 */
+			if (!strcmp(mp, "/rom"))
+				break;
+
 			mp = "/rom";
 			fseek(mounts, 0, SEEK_SET);
 			continue;
