@@ -241,9 +241,6 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 			continue;
 		*tmp = '=';
 
-		if (!strlen(++tmp))
-			continue;
-
 		if (!strcmp(enve, "ASYNC=0"))
 			async = false;
 
