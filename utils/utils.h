@@ -51,8 +51,11 @@ int blobmsg_list_fill(struct blobmsg_list *list, void *data, int len, bool array
 void blobmsg_list_free(struct blobmsg_list *list);
 bool blobmsg_list_equal(struct blobmsg_list *l1, struct blobmsg_list *l2);
 void blobmsg_list_move(struct blobmsg_list *list, struct blobmsg_list *src);
-char *get_cmdline_val(const char *name, char *out, int len);
+char *get_cmdline_val_offset(const char *name, char *out, int len, int offset);
 char *get_active_console(char *out, int len);
+
+#define get_cmdline_val(name, out, len) \
+	get_cmdline_val_offset(name, out, len, 0)
 
 int patch_fd(const char *device, int fd, int flags);
 int patch_stdio(const char *device);

@@ -163,10 +163,10 @@ char *get_active_console(char *out, int len)
 	return NULL;
 }
 
-char* get_cmdline_val(const char* name, char* out, int len)
+char *get_cmdline_val_offset(const char *name, char *out, int len, int offset)
 {
 	char line[CMDLINE_SIZE + 1], *c, *sptr;
-	int fd = open("/proc/cmdline", O_RDONLY);
+	int i, fd = open("/proc/cmdline", O_RDONLY);
 	ssize_t r = read(fd, line, sizeof(line) - 1);
 	close(fd);
 
@@ -175,7 +175,7 @@ char* get_cmdline_val(const char* name, char* out, int len)
 
 	line[r] = 0;
 
-	for (c = strtok_r(line, " \t\n", &sptr); c;
+	for (i = 0, c = strtok_r(line, " \t\n", &sptr); c;
 			c = strtok_r(NULL, " \t\n", &sptr)) {
 		char *sep = strchr(c, '=');
 		if (sep == NULL)
@@ -185,6 +185,8 @@ char* get_cmdline_val(const char* name, char* out, int len)
 		if (strncmp(name, c, klen) || name[klen] != 0)
 			continue;
 
+		if (i++ < offset)
+			continue;
 		strncpy(out, &sep[1], len);
 		out[len-1] = 0;
 		return out;
