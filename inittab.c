@@ -192,7 +192,8 @@ static void askconsole(struct init_action *a)
 	 * is in the device tree
 	 */
 	tty = get_cmdline_val("console", line, sizeof(line));
-	if (tty == NULL) {
+	if (tty == NULL ||
+	    get_cmdline_val_offset("console", line, sizeof(line), 1)) {
 		if (dev_exist("console"))
 			tty = "console";
 		else
