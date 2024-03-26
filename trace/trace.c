@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
-#include <string.h>
+#include <libgen.h>
 #include <syslog.h>
 #include <limits.h>
 
