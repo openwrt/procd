@@ -167,7 +167,12 @@ char *get_cmdline_val_offset(const char *name, char *out, int len, int offset)
 {
 	char line[CMDLINE_SIZE + 1], *c, *sptr;
 	int i, fd = open("/proc/cmdline", O_RDONLY);
-	ssize_t r = read(fd, line, sizeof(line) - 1);
+	ssize_t r;
+
+	if (fd < 0)
+		return NULL;
+
+	r = read(fd, line, sizeof(line) - 1);
 	close(fd);
 
 	if (r <= 0)
