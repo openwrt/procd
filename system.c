@@ -251,7 +251,7 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 	if (rootfs_type)
 		blobmsg_add_string(&b, "rootfs_type", rootfs_type);
 
-	if ((f = fopen("/etc/openwrt_release", "r")) != NULL)
+	if ((f = fopen("/usr/lib/os-release", "r")) != NULL)
 	{
 		c = blobmsg_open_table(&b, "release");
 
@@ -267,17 +267,17 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 
 			*(val++) = 0;
 
-			if (!strcasecmp(key, "DISTRIB_ID"))
+			if (!strcasecmp(key, "NAME"))
 				key = "distribution";
-			else if (!strcasecmp(key, "DISTRIB_RELEASE"))
+			else if (!strcasecmp(key, "VERSION"))
 				key = "version";
-			else if (!strcasecmp(key, "DISTRIB_REVISION"))
+			else if (!strcasecmp(key, "BUILD_ID"))
 				key = "revision";
-			else if (!strcasecmp(key, "DISTRIB_CODENAME"))
+			else if (!strcasecmp(key, "VERSION_CODENAME"))
 				key = "codename";
-			else if (!strcasecmp(key, "DISTRIB_TARGET"))
+			else if (!strcasecmp(key, "OPENWRT_BOARD"))
 				key = "target";
-			else if (!strcasecmp(key, "DISTRIB_DESCRIPTION"))
+			else if (!strcasecmp(key, "PRETTY_NAME"))
 				key = "description";
 			else
 				continue;
