@@ -2215,7 +2215,7 @@ static int parseOCIlinux(struct blob_attr *msg)
 	}
 
 	if (tb[OCI_LINUX_UIDMAPPINGS]) {
-		res = parseOCIuidgidmappings(tb[OCI_LINUX_GIDMAPPINGS], 0);
+		res = parseOCIuidgidmappings(tb[OCI_LINUX_UIDMAPPINGS], 0);
 		if (res)
 			return res;
 	}
