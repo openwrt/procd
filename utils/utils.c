@@ -156,7 +156,7 @@ char *get_active_console(char *out, int len)
 	char *newline = strtok(line, "\n");
 
 	if (newline != NULL) {
-		strncpy(out, newline, len);
+		strlcpy(out, newline, len);
 		return out;
 	}
 
@@ -192,8 +192,7 @@ char *get_cmdline_val_offset(const char *name, char *out, int len, int offset)
 
 		if (i++ < offset)
 			continue;
-		strncpy(out, &sep[1], len);
-		out[len-1] = 0;
+		strlcpy(out, &sep[1], len);
 		return out;
 	}
 
