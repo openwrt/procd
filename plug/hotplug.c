@@ -361,6 +361,17 @@ static struct cmd_handler {
 	},
 };
 
+/* This is a non-public handler used when a button event
+ * return a non-zero value, which is used as a timeout
+ * to subsequently call the same script.
+ */
+static struct cmd_handler BUTTON_TIMEOUT_HANDLER = {
+	.name = "button_timeout",
+	.handler = handle_exec,
+	.complete = handle_button_complete,
+};
+
+
 static void queue_next(void)
 {
 	struct cmd_queue *c;
@@ -441,13 +452,15 @@ static void handle_button_timeout(struct uloop_timeout *t)
 	blobmsg_add_string(&button_buf, "ACTION", "timeout");
 	snprintf(seen, sizeof(seen), "%d", b->seen);
 	blobmsg_add_string(&button_buf, "SEEN", seen);
-	queue_add(&handlers[HANDLER_EXEC], button_buf.head, b->data);
+	queue_add(&BUTTON_TIMEOUT_HANDLER, button_buf.head, b->data);
 	button_free(b);
 }
 
 static void handle_button_complete(struct blob_attr *msg, struct blob_attr *data, int ret)
 {
 	char *name = hotplug_msg_find_var(msg, "BUTTON");
+	char *action = hotplug_msg_find_var(msg, "ACTION");
+	char *seen = hotplug_msg_find_var(msg, "SEEN");
 	struct button_timeout *b;
 	int timeout = ret >> 8;
 
@@ -464,6 +477,13 @@ static void handle_button_complete(struct blob_attr *msg, struct blob_attr *data
 	b->data = malloc(blob_pad_len(data));
 	b->name = strdup(name);
 	b->seen = timeout;
+
+	if (action && seen && (!strcmp(action, "timeout") || !strcmp(action, "released"))) {
+		/* If this happening due to a previous timeout or a released action,
+		 * then we should add on the previous SEEN time.
+		 */
+		b->seen += atoi(seen);
+	}
 
 	memcpy(b->data, data, blob_pad_len(data));
 	b->timeout.cb = handle_button_timeout;
