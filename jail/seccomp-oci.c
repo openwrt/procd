@@ -422,7 +422,7 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	return prog;
 
 errout1:
-	free(prog->filter);
+	free(filter);
 errout2:
 	free(prog);
 	return NULL;
