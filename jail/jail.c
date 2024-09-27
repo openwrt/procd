@@ -532,7 +532,9 @@ static int apply_sysctl(const char *jail_root)
 	if (asprintf(&procdir, "%s/proc", jail_root) < 0)
 		return ENOMEM;
 
-	mkdir(procdir, 0700);
+	if (mkdir(procdir, 0700))
+		return errno;
+
 	if (mount("proc", procdir, "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0))
 		return EPERM;
 
@@ -615,7 +617,8 @@ static int create_devices(void)
 		if (strcmp(path, "/dev")) {
 			DEBUG("creating directory %s\n", path);
 
-			mkdir_p(path, 0755);
+			if (mkdir_p(path, 0755))
+				return errno;
 		}
 		*tmp = '/';
 
@@ -755,7 +758,10 @@ static int build_jail_fs(void)
 		char jailetc[PATH_MAX], jaillink[PATH_MAX];
 
 		snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
-		mkdir_p(jailetc, 0755);
+		if (mkdir_p(jailetc, 0755)) {
+			ERROR("mkdir(%s) failed: %m\n", jailetc);
+			return -1;
+		}
 		snprintf(jaillink, PATH_MAX, "%s/etc/resolv.conf", jail_root);
 		if (overlaydir)
 			unlink(jaillink);
@@ -790,8 +796,10 @@ static void enter_jail_fs(void)
 	char dirbuf[sizeof(jail_root) + 4];
 
 	snprintf(dirbuf, sizeof(dirbuf), "%s/old", jail_root);
-	mkdir(dirbuf, 0755);
-
+	if (mkdir(dirbuf, 0755)) {
+		ERROR("mkdir(%s) failed: %m\n", dirbuf);
+		free_and_exit(-1);
+	}
 	if (pivot_root(jail_root, dirbuf) == -1) {
 		ERROR("pivot_root(%s, %s) failed: %m\n", jail_root, dirbuf);
 		free_and_exit(-1);
@@ -2952,7 +2960,10 @@ static void post_main(struct uloop_timeout *t)
 					char hostdir[PATH_MAX];
 
 					snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
-					mkdir_p(hostdir, 0755);
+					if (mkdir_p(hostdir, 0755)) {
+						ERROR("mkdir(%s) failed: %m\n", hostdir);
+						free_and_exit(-1);
+					}
 					add_mount(hostdir, "/dev/resolv.conf.d", NULL,
 						MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, 0);
 				}
