@@ -34,6 +34,10 @@
 #include <libubox/blobmsg_json.h>
 #include <libubox/ustream.h>
 
+#ifndef ARRAY_SIZE
+# define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+#endif
+
 #include "log.h"
 
 #define UXC_VERSION "0.3"
@@ -92,11 +96,134 @@ static struct option long_options[] = {
 	{"json",		no_argument,		0,	'j'	},
 	{"mounts",		required_argument,	0,	'm'	},
 	{"pid-file",		required_argument,	0,	'p'	},
+	{"signal",		required_argument,	0,	's'	},
 	{"temp-overlay-size",	required_argument,	0,	't'	},
 	{"write-overlay-path",	required_argument,	0,	'w'	},
 	{"verbose",		no_argument,		0,	'v'	},
 	{"version",		no_argument,		0,	'V'	},
 	{0,			0,			0,	0	}
+};
+
+struct signame {
+	int	signal;
+	char	name[7];
+};
+
+static const struct signame signames[] = {
+#ifdef SIGABRT
+	{ .signal =   SIGABRT, .name = "ABRT" },
+#endif
+#ifdef SIGALRM
+	{ .signal =   SIGALRM, .name = "ALRM" },
+#endif
+#ifdef SIGBUS
+	{ .signal =    SIGBUS, .name = "BUS" },
+#endif
+#ifdef SIGCHLD
+	{ .signal =   SIGCHLD, .name = "CHLD" },
+#endif
+#ifdef SIGCLD
+	{ .signal =    SIGCLD, .name = "CLD" },
+#endif
+#ifdef SIGCONT
+	{ .signal =   SIGCONT, .name = "CONT" },
+#endif
+#ifdef SIGEMT
+	{ .signal =    SIGEMT, .name = "EMT" },
+#endif
+#ifdef SIGFPE
+	{ .signal =    SIGFPE, .name = "FPE" },
+#endif
+#ifdef SIGHUP
+	{ .signal =    SIGHUP, .name = "HUP" },
+#endif
+#ifdef SIGILL
+	{ .signal =    SIGILL, .name = "ILL" },
+#endif
+#ifdef SIGINFO
+	{ .signal =   SIGINFO, .name = "INFO" },
+#endif
+#ifdef SIGINT
+	{ .signal =    SIGINT, .name = "INT" },
+#endif
+#ifdef SIGIO
+	{ .signal =     SIGIO, .name = "IO" },
+#endif
+#ifdef SIGIOT
+	{ .signal =    SIGIOT, .name = "IOT" },
+#endif
+#ifdef SIGKILL
+	{ .signal =   SIGKILL, .name = "KILL" },
+#endif
+#ifdef SIGLOST
+	{ .signal =   SIGLOST, .name = "LOST" },
+#endif
+#ifdef SIGPIPE
+	{ .signal =   SIGPIPE, .name = "PIPE" },
+#endif
+#ifdef SIGPOLL
+	{ .signal =   SIGPOLL, .name = "POLL" },
+#endif
+#ifdef SIGPROF
+	{ .signal =   SIGPROF, .name = "PROF" },
+#endif
+#ifdef SIGPWR
+	{ .signal =    SIGPWR, .name = "PWR" },
+#endif
+#ifdef SIGQUIT
+	{ .signal =   SIGQUIT, .name = "QUIT" },
+#endif
+#ifdef SIGSEGV
+	{ .signal =   SIGSEGV, .name = "SEGV" },
+#endif
+#ifdef SIGSTKFLT
+	{ .signal = SIGSTKFLT, .name = "STKFLT" },
+#endif
+#ifdef SIGSTOP
+	{ .signal =   SIGSTOP, .name = "STOP" },
+#endif
+#ifdef SIGSYS
+	{ .signal =    SIGSYS, .name = "SYS" },
+#endif
+#ifdef SIGTERM
+	{ .signal =   SIGTERM, .name = "TERM" },
+#endif
+#ifdef SIGTRAP
+	{ .signal =   SIGTRAP, .name = "TRAP" },
+#endif
+#ifdef SIGTSTP
+	{ .signal =   SIGTSTP, .name = "TSTP" },
+#endif
+#ifdef SIGTTIN
+	{ .signal =   SIGTTIN, .name = "TTIN" },
+#endif
+#ifdef SIGTTOU
+	{ .signal =   SIGTTOU, .name = "TTOU" },
+#endif
+#ifdef SIGUNUSED
+	{ .signal = SIGUNUSED, .name = "UNUSED" },
+#endif
+#ifdef SIGURG
+	{ .signal =    SIGURG, .name = "URG" },
+#endif
+#ifdef SIGUSR1
+	{ .signal =   SIGUSR1, .name = "USR1" },
+#endif
+#ifdef SIGUSR2
+	{ .signal =   SIGUSR2, .name = "USR2" },
+#endif
+#ifdef SIGVTALRM
+	{ .signal = SIGVTALRM, .name = "VTALRM" },
+#endif
+#ifdef SIGWINCH
+	{ .signal =  SIGWINCH, .name = "WINCH" },
+#endif
+#ifdef SIGXCPU
+	{ .signal =   SIGXCPU, .name = "XCPU" },
+#endif
+#ifdef SIGXFSZ
+	{ .signal =   SIGXFSZ, .name = "XFSZ" },
+#endif
 };
 
 AVL_TREE(runtime, avl_strcmp, false, NULL);
@@ -120,7 +247,7 @@ static int usage(void) {
 	printf("\t\t[--mounts <v1>,<v2>,...,<vN>]\t\trequire filesystems to be available\n");
 	printf("\tstart [--console] <conf>\t\tstart container <conf>\n");
 	printf("\tstate <conf>\t\t\t\tget state of container <conf>\n");
-	printf("\tkill <conf> [<signal>]\t\t\tsend signal to container <conf>\n");
+	printf("\tkill <conf> [--signal <signal>]\t\tsend signal to container <conf>\n");
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
 	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
 	printf("\tdelete <conf> [--force]\t\t\tdelete <conf>\n");
@@ -1375,6 +1502,28 @@ static void reload_conf(void)
 	settings_add();
 }
 
+static int get_signum(const char *name)
+{
+	char *endptr;
+	long sig;
+	int i;
+
+	sig = strtol(name, &endptr, 10);
+	if (endptr == name + strlen(name) && sig < NSIG)
+		/* string is a valid signal number */
+		return sig;
+
+	if (strncasecmp(name, "SIG", 3) == 0)
+		name += 3;
+
+	for (i = 0; i < ARRAY_SIZE(signames); ++i) {
+		if (!strcmp(name, signames[i].name))
+			return signames[i].signal;
+	}
+
+	return -1;
+}
+
 int main(int argc, char **argv)
 {
 	enum uxc_cmd cmd = CMD_UNKNOWN;
@@ -1442,6 +1591,12 @@ int main(int argc, char **argv)
 
 			case 'p':
 				pidfile = optarg;
+				break;
+
+			case 's':
+				signal = get_signum(optarg);
+				if (signal < 0)
+					goto usage_out;
 				break;
 
 			case 't':
@@ -1521,9 +1676,7 @@ int main(int argc, char **argv)
 			break;
 
 		case CMD_KILL:
-			if (optind == (argc - 3))
-				signal = atoi(argv[optind + 2]);
-			else if (optind > argc - 2)
+			if (optind > argc - 2)
 				goto usage_out;
 
 			ret = uxc_kill(argv[optind + 1], signal);
