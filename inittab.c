@@ -79,7 +79,7 @@ static int dev_exist(const char *dev)
 	if (dfd < 0)
 		return 0;
 
-	fd = openat(dfd, dev, O_RDONLY);
+	fd = openat(dfd, dev, O_RDONLY|O_NOCTTY);
 	close(dfd);
 
 	if (fd < 0)
