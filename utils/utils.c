@@ -203,6 +203,8 @@ int patch_fd(const char *device, int fd, int flags)
 {
 	int dfd, nfd;
 
+	flags |= O_NOCTTY;
+
 	if (device == NULL)
 		device = "/dev/null";
 
