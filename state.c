@@ -79,7 +79,7 @@ static void set_console(void)
 		return;
 	}
 	while (tty!=NULL) {
-		f = open(tty, O_RDONLY);
+		f = open(tty, O_RDONLY|O_NOCTTY);
 		if (f >= 0) {
 			close(f);
 			break;
