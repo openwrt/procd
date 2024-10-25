@@ -277,7 +277,7 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 				key = "codename";
 			else if (!strcasecmp(key, "OPENWRT_BOARD"))
 				key = "target";
-			else if (!strcasecmp(key, "PRETTY_NAME"))
+			else if (!strcasecmp(key, "OPENWRT_RELEASE"))
 				key = "description";
 			else if (!strcasecmp(key, "OPENWRT_BUILD_DATE"))
 				key = "builddate";
