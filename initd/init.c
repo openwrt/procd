@@ -152,7 +152,7 @@ main(int argc, char **argv)
 		const struct timespec req = {0, 10 * 1000 * 1000};
 		int i;
 
-		for (i = 0; i < 1200; i++) {
+		for (i = 0; i < 2000; i++) {
 			if (waitpid(pid, NULL, WNOHANG) > 0)
 				break;
 			nanosleep(&req, NULL);
