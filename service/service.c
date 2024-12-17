@@ -163,10 +163,6 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 		s->trigger = NULL;
 	}
 
-	if (s->data) {
-		s->data = NULL;
-	}
-
 	service_validate_del(s);
 
 	if (tb[SERVICE_SET_AUTOSTART] && !blobmsg_get_bool(tb[SERVICE_SET_AUTOSTART]))
