@@ -60,6 +60,7 @@ int service_start_early(char *name, char *cmdline, char *user, char *group);
 void service_stopped(struct service *s);
 void service_validate_del(struct service *s);
 void service_event(const char *type, const char *service, const char *instance);
+void service_data_trigger(struct blobmsg_list *list);
 void service_stop_all(void);
 
 

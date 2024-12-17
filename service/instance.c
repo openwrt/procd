@@ -1580,6 +1580,10 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 	} else {
 		if (changed)
 			instance_restart(in);
+		else if (!blobmsg_list_equal(&in->data, &in_new->data)) {
+			service_data_trigger(&in->data);
+			service_data_trigger(&in_new->data);
+		}
 		instance_config_move(in, in_new);
 		/* restart happens in the child callback handler */
 	}
@@ -1588,6 +1592,7 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 void
 instance_free(struct service_instance *in)
 {
+	service_data_trigger(&in->data);
 	instance_free_stdio(in);
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
@@ -1654,6 +1659,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->watchdog.timeout.cb = instance_watchdog;
 
 	in->valid = instance_config_parse(in);
+	service_data_trigger(&in->data);
 }
 
 void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)

@@ -53,6 +53,17 @@ service_instance_add(struct service *s, struct blob_attr *attr)
 	vlist_add(&s->instances, &in->node, (void *) in->name);
 }
 
+void service_data_trigger(struct blobmsg_list *list)
+{
+	struct blobmsg_list_node *node;
+
+	avl_for_each_element(&list->avl, node, avl) {
+		blob_buf_init(&b, 0);
+		blobmsg_add_string(&b, "name", blobmsg_name(node->data));
+		trigger_event("service.data.update", b.head);
+	}
+}
+
 static void
 service_instance_update(struct vlist_tree *tree, struct vlist_node *node_new,
 			struct vlist_node *node_old)
@@ -121,6 +132,26 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 };
 
 static int
+service_update_data(struct service *s, struct blob_attr *data)
+{
+	if (blob_attr_equal(s->data, data))
+		return 0;
+
+	free(s->data);
+	s->data = blob_memdup(data);
+	if (!s->data)
+		return -1;
+
+	service_data_trigger(&s->data_blob);
+	blobmsg_list_free(&s->data_blob);
+	blobmsg_list_fill(&s->data_blob, blobmsg_data(s->data),
+			blobmsg_data_len(s->data), false);
+	service_data_trigger(&s->data_blob);
+
+	return 0;
+}
+
+static int
 service_update(struct service *s, struct blob_attr **tb, bool add)
 {
 	struct blob_attr *cur;
@@ -133,8 +164,6 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 	}
 
 	if (s->data) {
-		blobmsg_list_free(&s->data_blob);
-		free(s->data);
 		s->data = NULL;
 	}
 
@@ -167,13 +196,9 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 			vlist_flush(&s->instances);
 	}
 
-	if (tb[SERVICE_SET_DATA] && blobmsg_data_len(tb[SERVICE_SET_DATA])) {
-		s->data = blob_memdup(tb[SERVICE_SET_DATA]);
-		if (!s->data)
-			return -1;
-		blobmsg_list_fill(&s->data_blob, blobmsg_data(s->data),
-				blobmsg_data_len(s->data), false);
-	}
+	if (tb[SERVICE_SET_DATA] &&
+	    service_update_data(s, tb[SERVICE_SET_DATA]) < 0)
+		return -1;
 
 	s->deleted = false;
 
