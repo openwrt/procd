@@ -152,32 +152,28 @@ service_update_data(struct service *s, struct blob_attr *data)
 }
 
 static int
-service_update(struct service *s, struct blob_attr **tb, bool add)
+service_update(struct service *s, struct blob_attr **tb, bool add, bool init)
 {
 	struct blob_attr *cur;
 	int rem;
 
-	if (s->trigger) {
-		trigger_del(s);
-		free(s->trigger);
-		s->trigger = NULL;
-	}
-
-	service_validate_del(s);
-
-	if (tb[SERVICE_SET_AUTOSTART] && !blobmsg_get_bool(tb[SERVICE_SET_AUTOSTART]))
-		s->autostart = false;
-	else
+	if (tb[SERVICE_SET_AUTOSTART])
+		s->autostart = blobmsg_get_bool(tb[SERVICE_SET_AUTOSTART]);
+	else if (init)
 		s->autostart = true;
 
-	if (tb[SERVICE_SET_TRIGGER] && blobmsg_data_len(tb[SERVICE_SET_TRIGGER])) {
+	if (tb[SERVICE_SET_TRIGGER]) {
+		free(s->trigger);
 		s->trigger = blob_memdup(tb[SERVICE_SET_TRIGGER]);
 		if (!s->trigger)
 			return -1;
+
+		trigger_del(s);
 		trigger_add(s->trigger, s);
 	}
 
-	if (tb[SERVICE_SET_VALIDATE] && blobmsg_data_len(tb[SERVICE_SET_VALIDATE])) {
+	if (tb[SERVICE_SET_VALIDATE]) {
+		service_validate_del(s);
 		blobmsg_for_each_attr(cur, tb[SERVICE_SET_VALIDATE], rem)
 			service_validate_add(s, cur);
 	}
@@ -198,7 +194,8 @@ service_update(struct service *s, struct blob_attr **tb, bool add)
 
 	s->deleted = false;
 
-	rc(s->name, "running");
+	if (init || tb[SERVICE_SET_INSTANCES])
+		rc(s->name, "running");
 
 	return 0;
 }
@@ -441,7 +438,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	if (s) {
 		P_DEBUG(2, "Update service %s\n", name);
-		return service_update(s, tb, add);
+		return service_update(s, tb, add, false);
 	}
 
 	P_DEBUG(2, "Create service %s\n", name);
@@ -451,7 +448,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	s->container = container;
 
-	ret = service_update(s, tb, add);
+	ret = service_update(s, tb, add, true);
 	if (ret)
 		return ret;
 
