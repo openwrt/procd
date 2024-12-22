@@ -48,7 +48,7 @@
 #define _offsetof(a, b) __builtin_offsetof(a,b)
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-#if defined (__aarch64__)
+#if defined (__aarch64__) || defined(__loongarch_lp64)
 #include <linux/ptrace.h>
 #elif defined(__amd64__)
 #define reg_syscall_nr	_offsetof(struct user, regs.orig_rax)
@@ -226,7 +226,7 @@ static void tracer_cb(struct uloop_process *c, int ret)
 	if (WIFSTOPPED(ret) || (ret >> 16)) {
 		if (WSTOPSIG(ret) & 0x80) {
 			if (!tracee->in_syscall) {
-#ifdef __aarch64__
+#if defined(__aarch64__) || defined(__loongarch_lp64)
 				int syscall = -1;
 				struct ptrace_syscall_info ptsi = {.op=PTRACE_SYSCALL_INFO_ENTRY};
 				if (ptrace(PTRACE_GET_SYSCALL_INFO, c->pid, sizeof(ptsi), &ptsi) != -1)
@@ -260,7 +260,7 @@ static void tracer_cb(struct uloop_process *c, int ret)
 		} else if ((ret >> 16) == PTRACE_EVENT_STOP) {
 			/* Nothing special to do here */
 		} else if ((ret >> 8) == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) {
-#ifdef __aarch64__
+#if defined(__aarch64__) || defined(__loongarch_lp64)
 			int syscall = -1;
 			struct ptrace_syscall_info ptsi = {.op=PTRACE_SYSCALL_INFO_SECCOMP};
 			if (ptrace(PTRACE_GET_SYSCALL_INFO, c->pid, sizeof(ptsi), &ptsi) != -1)

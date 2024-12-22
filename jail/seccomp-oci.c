@@ -119,6 +119,8 @@ static uint32_t resolve_architecture(char *archname)
 		return AUDIT_ARCH_ARM;
 	else if (!strcmp(archname, "SCMP_ARCH_AARCH64"))
 		return AUDIT_ARCH_AARCH64;
+	else if (!strcmp(archname, "SCMP_ARCH_LOONGARCH64"))
+		return AUDIT_ARCH_LOONGARCH64;
 	else if (!strcmp(archname, "SCMP_ARCH_MIPS"))
 		return AUDIT_ARCH_MIPS;
 	else if (!strcmp(archname, "SCMP_ARCH_MIPS64"))

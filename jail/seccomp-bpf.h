@@ -80,6 +80,9 @@ struct seccomp_data {
 #elif defined(__i386__)
 # define REG_SYSCALL	REG_EAX
 # define ARCH_NR	AUDIT_ARCH_I386
+#elif defined(__loongarch_lp64)
+# define REG_SYSCALL	regs[11]
+# define ARCH_NR	AUDIT_ARCH_LOONGARCH64
 #elif defined(__mips__)
 # define REG_SYSCALL	regs[2]
 # if __BYTE_ORDER == __LITTLE_ENDIAN
