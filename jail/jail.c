@@ -2866,6 +2866,12 @@ int main(int argc, char **argv)
 	signals_init();
 
 	parent_ctx = ubus_connect(NULL);
+	if (!parent_ctx) {
+		ERROR("Connection to ubus failed\n");
+		ret = -ECONNREFUSED;
+		goto errout;
+	}
+
 	ubus_add_uloop(parent_ctx);
 
 	if (opts.ocibundle) {
