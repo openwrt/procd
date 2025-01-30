@@ -281,6 +281,8 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 				key = "description";
 			else if (!strcasecmp(key, "OPENWRT_BUILD_DATE"))
 				key = "builddate";
+			else if (!strcasecmp(key, "FIRMWARE_URL"))
+				key = "firmware_url";
 			else
 				continue;
 
