@@ -32,6 +32,7 @@
 #include <libubox/md5.h>
 
 #include "../procd.h"
+#include "../rcS.h"
 
 #include "service.h"
 #include "instance.h"
@@ -786,8 +787,10 @@ instance_timeout(struct uloop_timeout *t)
 		LOG("Instance %s::%s pid %d not stopped on SIGTERM, sending SIGKILL instead\n",
 				in->srv->name, in->name, in->proc.pid);
 		kill(in->proc.pid, SIGKILL);
-	} else if (in->restart || in->respawn)
+	} else if (in->restart || in->respawn) {
 		instance_start(in);
+		rc(in->srv->name, "running");
+	}
 }
 
 static void
@@ -822,6 +825,7 @@ static void
 instance_exit(struct uloop_process *p, int ret)
 {
 	struct service_instance *in;
+	bool restart = false;
 	struct timespec tp;
 	long runtime;
 
@@ -840,11 +844,11 @@ instance_exit(struct uloop_process *p, int ret)
 	if (in->halt) {
 		instance_removepid(in);
 		if (in->restart)
-			instance_start(in);
+			restart = true;
 		else
 			instance_delete(in);
 	} else if (in->restart) {
-		instance_start(in);
+		restart = true;
 	} else if (in->respawn) {
 		if (runtime < in->respawn_threshold)
 			in->respawn_count++;
@@ -860,6 +864,11 @@ instance_exit(struct uloop_process *p, int ret)
 			service_event("instance.respawn", in->srv->name, in->name);
 			uloop_timeout_set(&in->timeout, in->respawn_timeout * 1000);
 		}
+	}
+
+	if (restart) {
+		instance_start(in);
+		rc(in->srv->name, "running");
 	}
 }
 
