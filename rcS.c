@@ -125,6 +125,16 @@ static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 	free(s);
 }
 
+static bool find_runqueue_list_entry(struct list_head *list, char *file, char *param)
+{
+	struct initd *s;
+
+	list_for_each_entry(s, list, proc.task.list.list)
+		if (!strcmp(s->file, file) && !strcmp(s->param, param))
+			return true;
+	return false;
+}
+
 static void add_initd(struct runqueue *q, char *file, char *param)
 {
 	static const struct runqueue_task_type initd_type = {
@@ -134,6 +144,11 @@ static void add_initd(struct runqueue *q, char *file, char *param)
 	};
 	struct initd *s;
 	char *p, *f;
+
+	if (!strcmp(param, "running") &&
+	    (find_runqueue_list_entry(&q->tasks_active.list, file, param) ||
+	     find_runqueue_list_entry(&q->tasks_inactive.list, file, param)))
+		return;
 
 	s = calloc_a(sizeof(*s), &f, strlen(file) + 1, &p, strlen(param) + 1);
 	if (!s) {
