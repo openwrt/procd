@@ -33,6 +33,7 @@
 #include <libubus.h>
 
 #include "procd.h"
+#include "utils/utils.h"
 
 #define HOTPLUG_BASEDIR "/etc/hotplug.d"
 #define HOTPLUG_OBJECT_PREFIX "hotplug."
@@ -120,7 +121,10 @@ static void hotplug_exec(struct uloop_timeout *t)
 	pc->process.pid = fork();
 	if (pc->process.pid == 0) {
 		/* child */
-		exit(execve(exec_argv[0], exec_argv, pc->envp));
+		patch_stdio("/dev/null");
+		execve(exec_argv[0], exec_argv, pc->envp);
+		ERROR("Failed to execute script: %m\n");
+		exit(EXIT_FAILURE);
 	} else if (pc->process.pid < 0) {
 		/* fork error */
 		free(script);
