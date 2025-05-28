@@ -24,15 +24,20 @@
 #define SIGNALLED_OFFSET 128
 
 struct jail {
-	bool procfs;
-	bool sysfs;
-	bool ubus;
-	bool log;
-	bool ronly;
-	bool netns;
-	bool userns;
-	bool cgroupsns;
-	bool console;
+	union {
+		struct {
+			uint32_t procfs:1;
+			uint32_t sysfs:1;
+			uint32_t ubus:1;
+			uint32_t log:1;
+			uint32_t ronly:1;
+			uint32_t netns:1;
+			uint32_t userns:1;
+			uint32_t cgroupsns:1;
+			uint32_t console:1;
+		};
+		uint32_t flags;
+	};
 	char *name;
 	char *hostname;
 	char *pidfile;
