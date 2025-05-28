@@ -2982,6 +2982,7 @@ static void post_main(struct uloop_timeout *t)
 			}
 			/* default mounts */
 			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "size=1M", -1);
+			add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, "mode=1777", -1);
 			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
 
 			if (opts.procfs || opts.ocibundle) {
@@ -3011,9 +3012,6 @@ static void post_main(struct uloop_timeout *t)
 			}
 			if (opts.sysfs || opts.ocibundle)
 				add_mount("sysfs", "/sys", "sysfs", MS_RELATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
-
-			if (opts.ocibundle)
-				add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, "mode=1777", -1);
 
 		}
 
