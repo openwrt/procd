@@ -29,6 +29,7 @@ struct jail {
 			uint32_t procfs:1;
 			uint32_t sysfs:1;
 			uint32_t ubus:1;
+			uint32_t udebug:1;
 			uint32_t log:1;
 			uint32_t ronly:1;
 			uint32_t netns:1;

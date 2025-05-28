@@ -111,6 +111,7 @@ enum {
 	JAIL_ATTR_PROCFS,
 	JAIL_ATTR_SYSFS,
 	JAIL_ATTR_UBUS,
+	JAIL_ATTR_UDEBUG,
 	JAIL_ATTR_LOG,
 	JAIL_ATTR_RONLY,
 	JAIL_ATTR_MOUNT,
@@ -131,6 +132,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_PROCFS] = { "procfs", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_SYSFS] = { "sysfs", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_UBUS] = { "ubus", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_UDEBUG] = { "udebug", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_LOG] = { "log", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_RONLY] = { "ronly", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_MOUNT] = { "mount", BLOBMSG_TYPE_TABLE },
@@ -343,6 +345,9 @@ jail_run(struct service_instance *in, char **argv)
 
 	if (jail->ubus)
 		argv[argc++] = "-u";
+
+	if (jail->udebug)
+		argv[argc++] = "-D";
 
 	if (jail->log)
 		argv[argc++] = "-l";
@@ -1169,6 +1174,10 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	}
 	if (tb[JAIL_ATTR_UBUS] && blobmsg_get_bool(tb[JAIL_ATTR_UBUS])) {
 		jail->ubus = true;
+		jail->argc++;
+	}
+	if (tb[JAIL_ATTR_UDEBUG] && blobmsg_get_bool(tb[JAIL_ATTR_UDEBUG])) {
+		jail->udebug = true;
 		jail->argc++;
 	}
 	if (tb[JAIL_ATTR_LOG] && blobmsg_get_bool(tb[JAIL_ATTR_LOG])) {

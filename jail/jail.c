@@ -69,7 +69,7 @@
 #endif
 
 #define STACK_SIZE	(1024 * 1024)
-#define OPT_ARGS	"cC:d:e:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
+#define OPT_ARGS	"cC:d:De:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
 
 #define OCI_VERSION_STRING "1.0.2"
 
@@ -1026,6 +1026,7 @@ static void usage(void)
 	fprintf(stderr, "  -s\t\tjail has /sys\n");
 	fprintf(stderr, "  -l\t\tjail has /dev/log\n");
 	fprintf(stderr, "  -u\t\tjail has a ubus socket\n");
+	fprintf(stderr, "  -D\t\tjail has a udebug socket\n");
 	fprintf(stderr, "  -U <name>\tuser to run jailed process\n");
 	fprintf(stderr, "  -G <name>\tgroup to run jailed process\n");
 	fprintf(stderr, "  -o\t\tremont jail root (/) read only\n");
@@ -2593,6 +2594,7 @@ int main(int argc, char **argv)
 	uid_t uid = getuid();
 	const char log[] = "/dev/log";
 	const char ubus[] = "/var/run/ubus/ubus.sock";
+	const char udebug[] = "/var/run/udebug.sock";
 	int ret = EXIT_FAILURE;
 	int ch;
 	char *tmp;
@@ -2703,6 +2705,10 @@ int main(int argc, char **argv)
 		case 'u':
 			opts.namespace |= CLONE_NEWNS;
 			add_mount_bind(ubus, 0, -1);
+			break;
+		case 'D':
+			opts.namespace |= CLONE_NEWNS;
+			add_mount_bind(udebug, 0, -1);
 			break;
 		case 'l':
 			opts.namespace |= CLONE_NEWNS;
