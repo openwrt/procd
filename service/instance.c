@@ -1032,31 +1032,7 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->jail.pidfile, in_new->jail.pidfile))
 		return true;
 
-	if (in->jail.procfs != in_new->jail.procfs)
-		return true;
-
-	if (in->jail.sysfs != in_new->jail.sysfs)
-		return true;
-
-	if (in->jail.ubus != in_new->jail.ubus)
-		return true;
-
-	if (in->jail.log != in_new->jail.log)
-		return true;
-
-	if (in->jail.ronly != in_new->jail.ronly)
-		return true;
-
-	if (in->jail.netns != in_new->jail.netns)
-		return true;
-
-	if (in->jail.userns != in_new->jail.userns)
-		return true;
-
-	if (in->jail.cgroupsns != in_new->jail.cgroupsns)
-		return true;
-
-	if (in->jail.console != in_new->jail.console)
+	if (in->jail.flags != in_new->jail.flags)
 		return true;
 
 	if (in->watchdog.mode != in_new->watchdog.mode)
@@ -1548,14 +1524,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->gr_gid = in_src->gr_gid;
 
 	in->has_jail = in_src->has_jail;
-	in->jail.procfs = in_src->jail.procfs;
-	in->jail.sysfs = in_src->jail.sysfs;
-	in->jail.ubus = in_src->jail.ubus;
-	in->jail.log = in_src->jail.log;
-	in->jail.ronly = in_src->jail.ronly;
-	in->jail.netns = in_src->jail.netns;
-	in->jail.cgroupsns = in_src->jail.cgroupsns;
-	in->jail.console = in_src->jail.console;
+	in->jail.flags = in_src->jail.flags;
 	in->jail.argc = in_src->jail.argc;
 
 	instance_config_move_strdup(&in->pidfile, in_src->pidfile);
