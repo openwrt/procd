@@ -2708,7 +2708,7 @@ int main(int argc, char **argv)
 			break;
 		case 'D':
 			opts.namespace |= CLONE_NEWNS;
-			add_mount_bind(udebug, 0, -1);
+			add_mount_bind(udebug, 0, 0);
 			break;
 		case 'l':
 			opts.namespace |= CLONE_NEWNS;

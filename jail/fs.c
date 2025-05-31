@@ -70,7 +70,8 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	assert(!(inner && !orig_source));
 
 	if (source && is_bind && stat(source, &s)) {
-		ERROR("stat(%s) failed: %m\n", source);
+		if (error)
+			ERROR("stat(%s) failed: %m\n", source);
 		return error;
 	}
 
