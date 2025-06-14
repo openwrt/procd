@@ -12,6 +12,10 @@ CC=$1
 [ -n "$TARGET_CC_NOCACHE" ] && CC=$TARGET_CC_NOCACHE
 
 echo "#include <asm/unistd.h>"
+
+# for loongarch __NR3264_* macros
+echo "#include <sys/syscall.h>" | ${CC} -E -dM - | grep '^#define __NR3264_[a-z0-9_]\+[ \t].*[0-9].*$'
+
 echo "static const char *__syscall_names[] = {"
 echo "#include <sys/syscall.h>" | ${CC} -E -dM - | grep '^#define __NR_[a-z0-9_]\+[ \t].*[0-9].*$' | \
 	LC_ALL=C sed -r -n -e 's/^\#define[ \t]+__NR_([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_LSYCABE]+)(.*)/ [\2] = "\1",/p'
