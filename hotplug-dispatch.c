@@ -375,6 +375,9 @@ static void remove_subsystem(char *name)
 {
 	struct hotplug_subsys *h;
 
+	if (!strcmp(name, "button"))
+		return;
+
 	h = avl_find_element(&subsystems, name, h, node);
 	if (!h)
 		return;
@@ -387,6 +390,8 @@ static int init_subsystems(void)
 {
 	DIR *dir;
 	struct dirent *dirent;
+
+	add_subsystem("button");
 
 	dir = opendir(HOTPLUG_BASEDIR);
 	if (dir == NULL)
