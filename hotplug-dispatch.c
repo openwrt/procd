@@ -43,12 +43,12 @@ struct ubus_context *ctx;
 static char *inotify_buffer;
 static struct uloop_fd fd_inotify_read;
 
-static LIST_HEAD(subsystems);
+static AVL_TREE(subsystems, avl_strcmp, false, NULL);
 
 extern char **environ;
 
 struct hotplug_subsys {
-	struct list_head list;
+	struct avl_node node;
 	struct ubus_object ubus;
 };
 
@@ -331,39 +331,56 @@ static const struct ubus_method hotplug_methods[] = {
 static struct ubus_object_type hotplug_object_type =
 	UBUS_OBJECT_TYPE("hotplug", hotplug_methods);
 
-static void add_subsystem(int nlen, char *newname)
+static void add_subsystem(const char *name)
 {
-	struct hotplug_subsys *nh = calloc(1, sizeof(struct hotplug_subsys));
-	char *name;
+	struct hotplug_subsys *nh;
+	char *name_buf;
 
-	if (asprintf(&name, "%s%.*s", HOTPLUG_OBJECT_PREFIX, nlen, newname) == -1)
-		exit(ENOMEM);
+	nh = avl_find_element(&subsystems, name, nh, node);
+	if (nh)
+		return;
 
-	/* prepare and add ubus object */
-	nh->ubus.name = name;
+	nh = calloc_a(sizeof(struct hotplug_subsys),
+		&name_buf, sizeof(HOTPLUG_OBJECT_PREFIX) + 1 + strlen(name));
+	if (!nh)
+		return;
+
+	nh->ubus.name = name_buf;
+	name_buf += sprintf(name_buf, "%s", HOTPLUG_OBJECT_PREFIX);
+	nh->node.key = strcpy(name_buf, name);
+
 	nh->ubus.type = &hotplug_object_type;
 	nh->ubus.methods = hotplug_object_type.methods;
 	nh->ubus.n_methods = hotplug_object_type.n_methods;
-	list_add(&nh->list, &subsystems);
 	ubus_add_object(ctx, &nh->ubus);
+	avl_insert(&subsystems, &nh->node);
 }
 
-static void remove_subsystem(int nlen, char *name)
+static void free_subsystem(struct hotplug_subsys *h)
+{
+	ubus_remove_object(ctx, &h->ubus);
+	free(h);
+}
+
+static void remove_all_subsystems(void)
 {
 	struct hotplug_subsys *n, *h;
 
 	/* find match subsystem object by name or any if not given */
-	list_for_each_entry_safe(h, n, &subsystems, list) {
-		if (nlen && (strlen(h->ubus.name) != strnlen(name, nlen) + strlen(HOTPLUG_OBJECT_PREFIX)))
-			continue;
-		if (nlen && (strncmp(name, &h->ubus.name[strlen(HOTPLUG_OBJECT_PREFIX)], nlen)))
-			continue;
+	avl_remove_all_elements(&subsystems, h, node, n)
+		free_subsystem(h);
+}
 
-		list_del(&h->list);
-		ubus_remove_object(ctx, &h->ubus);
-		free((void*)h->ubus.name);
-		free(h);
-	}
+static void remove_subsystem(char *name)
+{
+	struct hotplug_subsys *h;
+
+	h = avl_find_element(&subsystems, name, h, node);
+	if (!h)
+		return;
+
+	avl_delete(&subsystems, &h->node);
+	free_subsystem(h);
 }
 
 static int init_subsystems(void)
@@ -384,7 +401,7 @@ static int init_subsystems(void)
 		if (dirent->d_name[0] == '.')
 			continue;
 
-		add_subsystem(strlen(dirent->d_name), dirent->d_name);
+		add_subsystem(dirent->d_name);
 	}
 	closedir(dir);
 
@@ -422,16 +439,16 @@ static void inotify_read_handler(struct uloop_fd *u, unsigned int events)
 
 		/* add/remove subsystem objects */
 		if (in->mask & (IN_CREATE | IN_MOVED_TO))
-			add_subsystem(in->len, in->name);
+			add_subsystem(in->name);
 		else if (in->mask & (IN_DELETE | IN_MOVED_FROM))
-			remove_subsystem(in->len, in->name);
+			remove_subsystem(in->name);
 	}
 }
 
 void ubus_init_hotplug(struct ubus_context *newctx)
 {
 	ctx = newctx;
-	remove_subsystem(0, NULL);
+	remove_all_subsystems();
 	if (init_subsystems()) {
 		printf("failed to initialize hotplug subsystems from %s\n", HOTPLUG_BASEDIR);
 		return;
