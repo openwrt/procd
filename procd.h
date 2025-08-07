@@ -34,6 +34,13 @@ void procd_reconnect_ubus(int reconnect);
 void ubus_init_hotplug(struct ubus_context *ctx);
 void ubus_init_service(struct ubus_context *ctx);
 void ubus_init_system(struct ubus_context *ctx);
+#ifndef DISABLE_INIT
+void hotplug_ubus_event(struct blob_attr *data);
+#else
+static inline void hotplug_ubus_event(struct blob_attr *data)
+{
+}
+#endif
 
 void procd_state_next(void);
 void procd_state_ubus_connect(void);

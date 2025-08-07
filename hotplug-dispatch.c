@@ -445,6 +445,26 @@ static void inotify_read_handler(struct uloop_fd *u, unsigned int events)
 	}
 }
 
+void hotplug_ubus_event(struct blob_attr *data)
+{
+	static const struct blobmsg_policy policy =
+		{ "SUBSYSTEM", BLOBMSG_TYPE_STRING };
+	struct hotplug_subsys *h;
+	struct blob_attr *attr;
+	const char *subsys;
+
+	blobmsg_parse_attr(&policy, 1, &attr, data);
+	if (!attr)
+		return;
+
+	subsys = blobmsg_get_string(attr);
+	h = avl_find_element(&subsystems, subsys, h, node);
+	if (!h)
+		return;
+
+	ubus_notify(ctx, &h->ubus, "event", data, -1);
+}
+
 void ubus_init_hotplug(struct ubus_context *newctx)
 {
 	ctx = newctx;
