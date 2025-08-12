@@ -838,9 +838,14 @@ service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
 
 			if (!cs)
 				cs = blobmsg_open_table(&b, s->name);
+			if (!ci)
+				ci = blobmsg_open_table(&b, "*");
 
 			blobmsg_add_blob(&b, var->data);
 		}
+
+		if (ci)
+			blobmsg_close_table(&b, ci);
 
 		vlist_for_each_element(&s->instances, in, node) {
 			ci = NULL;
