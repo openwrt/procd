@@ -137,13 +137,14 @@ service_update_data(struct service *s, struct blob_attr *data)
 	if (blob_attr_equal(s->data, data))
 		return 0;
 
+	service_data_trigger(&s->data_blob);
+	blobmsg_list_free(&s->data_blob);
+
 	free(s->data);
 	s->data = blob_memdup(data);
 	if (!s->data)
 		return -1;
 
-	service_data_trigger(&s->data_blob);
-	blobmsg_list_free(&s->data_blob);
 	blobmsg_list_fill(&s->data_blob, blobmsg_data(s->data),
 			blobmsg_data_len(s->data), false);
 	service_data_trigger(&s->data_blob);
