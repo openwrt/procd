@@ -305,6 +305,19 @@ static const struct blobmsg_policy get_data_policy[] = {
 };
 
 enum {
+	SET_DATA_NAME,
+	SET_DATA_INSTANCE,
+	SET_DATA_DATA,
+	__SET_DATA_MAX
+};
+
+static const struct blobmsg_policy set_data_policy[__SET_DATA_MAX] = {
+	[SET_DATA_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[SET_DATA_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+	[SET_DATA_DATA] = { "data", BLOBMSG_TYPE_TABLE },
+};
+
+enum {
 	CONTAINER_CONSOLE_NAME,
 	CONTAINER_CONSOLE_INSTANCE,
 	__CONTAINER_CONSOLE_MAX,
@@ -880,6 +893,48 @@ service_get_data(struct ubus_context *ctx, struct ubus_object *obj,
 }
 
 static int
+service_handle_set_data(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct blob_attr *tb[__SET_DATA_MAX];
+	struct service *s;
+	struct service_instance *in;
+	const char *name;
+	const char *instance = NULL;
+
+	blobmsg_parse(set_data_policy, __SET_DATA_MAX, tb,
+		      blobmsg_data(msg), blobmsg_data_len(msg));
+
+	if (!tb[SET_DATA_NAME] || !tb[SET_DATA_DATA])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	name = blobmsg_get_string(tb[SET_DATA_NAME]);
+
+	s = avl_find_element(&services, name, s, avl);
+	if (!s)
+		return UBUS_STATUS_NOT_FOUND;
+
+	if (tb[SET_DATA_INSTANCE])
+		instance = blobmsg_get_string(tb[SET_DATA_INSTANCE]);
+
+	if (instance) {
+		in = vlist_find(&s->instances, instance, in, node);
+		if (!in)
+			return UBUS_STATUS_NOT_FOUND;
+
+		blobmsg_list_free(&in->data);
+		blobmsg_list_fill(&in->data, blobmsg_data(tb[SET_DATA_DATA]),
+				  blobmsg_data_len(tb[SET_DATA_DATA]), false);
+	} else {
+		if (service_update_data(s, tb[SET_DATA_DATA]) < 0)
+			return UBUS_STATUS_UNKNOWN_ERROR;
+	}
+
+	return UBUS_STATUS_OK;
+}
+
+static int
 container_handle_console(struct ubus_context *ctx, struct ubus_object *obj,
 			 struct ubus_request_data *req, const char *method,
 			 struct blob_attr *msg)
@@ -1013,6 +1068,7 @@ static struct ubus_method main_object_methods[] = {
 	UBUS_METHOD("event", service_handle_event, event_policy),
 	UBUS_METHOD("validate", service_handle_validate, validate_policy),
 	UBUS_METHOD("get_data", service_get_data, get_data_policy),
+	UBUS_METHOD("set_data", service_handle_set_data, set_data_policy),
 	UBUS_METHOD("state", service_handle_state, service_state_attrs),
 	UBUS_METHOD("watchdog", service_handle_watchdog, service_watchdog_policy),
 };
