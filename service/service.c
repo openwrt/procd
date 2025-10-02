@@ -777,6 +777,11 @@ service_handle_event(struct ubus_context *ctx, struct ubus_object *obj,
 	event = blobmsg_get_string(tb[EVENT_TYPE]);
 	trigger_event(event, tb[EVENT_DATA]);
 
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "type", event);
+	blobmsg_add_blob(&b, tb[EVENT_DATA]);
+	ubus_notify(ctx, &main_object, "event.trigger", b.head, -1);
+
 	if (!strcmp(event, "config.change")) {
 		struct blob_attr *tb2[__VALIDATE_MAX];
 
