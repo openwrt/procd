@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 3.10)
 
 PROJECT(upgraded C)
 FIND_PATH(ubox_include_dir libubox/uloop.h)
