@@ -538,7 +538,7 @@ static int proc_signal(struct ubus_context *ctx, struct ubus_object *obj,
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
 	blobmsg_parse(signal_policy, __SIGNAL_MAX, tb, blob_data(msg), blob_len(msg));
-	if (!tb[SIGNAL_PID || !tb[SIGNAL_NUM]])
+	if (!tb[SIGNAL_PID] || !tb[SIGNAL_NUM])
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
 	kill(blobmsg_get_u32(tb[SIGNAL_PID]), blobmsg_get_u32(tb[SIGNAL_NUM]));
