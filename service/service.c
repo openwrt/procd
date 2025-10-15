@@ -1059,6 +1059,11 @@ service_handle_watchdog(struct ubus_context *ctx, struct ubus_object *obj,
 
 	ubus_send_reply(ctx, req, b.head);
 
+	// If the service adjusts the mode or timeout, mark it as self managed
+	// so that it doesn't get restarted with a new /etc/init.d/SERVICE start
+	if (tb[SERVICE_WATCHDOG_MODE] || tb[SERVICE_WATCHDOG_TIMEOUT])
+		in->watchdog.self_managed = true;
+
 	return UBUS_STATUS_OK;
 }
 

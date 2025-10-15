@@ -1040,10 +1040,10 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (in->jail.flags != in_new->jail.flags)
 		return true;
 
-	if (in->watchdog.mode != in_new->watchdog.mode)
+	if (!in->watchdog.self_managed && in->watchdog.mode != in_new->watchdog.mode)
 		return true;
 
-	if (in->watchdog.freq != in_new->watchdog.freq)
+	if (!in->watchdog.self_managed && in->watchdog.freq != in_new->watchdog.freq)
 		return true;
 
 	return false;
@@ -1517,9 +1517,11 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->respawn_timeout = in_src->respawn_timeout;
 	in->reload_signal = in_src->reload_signal;
 	in->term_timeout = in_src->term_timeout;
-	in->watchdog.mode = in_src->watchdog.mode;
-	in->watchdog.freq = in_src->watchdog.freq;
-	// Note: in->watchdog.timeout is in a linked list; do not copy
+	if (!in->watchdog.self_managed) {
+		// Note: in->watchdog.timeout is in a linked list; do not copy
+		in->watchdog.mode = in_src->watchdog.mode;
+		in->watchdog.freq = in_src->watchdog.freq;
+	}
 	in->name = in_src->name;
 	in->nice = in_src->nice;
 	in->trace = in_src->trace;
