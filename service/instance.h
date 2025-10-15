@@ -54,6 +54,7 @@ typedef enum instance_watchdog {
 } instance_watchdog_mode_t;
 
 struct watchdog {
+	bool self_managed;
 	instance_watchdog_mode_t mode;
 	uint32_t freq;
 	struct uloop_timeout timeout;
