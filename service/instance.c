@@ -1519,7 +1519,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->term_timeout = in_src->term_timeout;
 	in->watchdog.mode = in_src->watchdog.mode;
 	in->watchdog.freq = in_src->watchdog.freq;
-	in->watchdog.timeout = in_src->watchdog.timeout;
+	// Note: in->watchdog.timeout is in a linked list; do not copy
 	in->name = in_src->name;
 	in->nice = in_src->nice;
 	in->trace = in_src->trace;
