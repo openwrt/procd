@@ -283,6 +283,8 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 				key = "builddate";
 			else if (!strcasecmp(key, "FIRMWARE_URL"))
 				key = "firmware_url";
+			else if (!strcasecmp(key, "OPENWRT_DEVICE_MANUFACTURER"))
+				key = "manufacturer";
 			else
 				continue;
 
