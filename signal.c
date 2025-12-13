@@ -43,6 +43,9 @@ static void signal_shutdown(int signal, siginfo_t *siginfo, void *data)
 		msg = "reboot";
 		break;
 	case SIGUSR1:
+		event = RB_HALT_SYSTEM;
+		msg = "halt";
+		break;
 	case SIGUSR2:
 	case SIGPWR:
 		event = RB_POWER_OFF;
