@@ -370,6 +370,7 @@ static int init_subsystems(void)
 {
 	DIR *dir;
 	struct dirent *dirent;
+	struct stat st;
 
 	dir = opendir(HOTPLUG_BASEDIR);
 	if (dir == NULL)
@@ -377,7 +378,11 @@ static int init_subsystems(void)
 
 	while ((dirent = readdir(dir))) {
 		/* skip everything but directories */
-		if (dirent->d_type != DT_DIR)
+		if (dirent->d_type == DT_UNKNOWN) {
+			if ((fstatat(dirfd(dir), dirent->d_name, &st, AT_SYMLINK_NOFOLLOW) == -1)
+			    || !S_ISDIR(st.st_mode))
+				continue;
+		} else if (dirent->d_type != DT_DIR)
 			continue;
 
 		/* skip '.' and '..' as well as hidden files */
