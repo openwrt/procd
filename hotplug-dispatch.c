@@ -232,7 +232,7 @@ static int hotplug_call(struct ubus_context *ctx, struct ubus_object *obj,
 		if (!strncmp(enve, "LD_", 3))
 			continue;
 
-		if (!strcmp(enve, "PATH"))
+		if (!strncmp(enve, "PATH=", 5))
 			continue;
 
 		if (strlen(enve) < 3)
