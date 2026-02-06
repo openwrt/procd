@@ -164,9 +164,12 @@ void cgroups_apply(pid_t pid)
 	if (rdma)
 		strcat(subtree_control, "+rdma ");
 
-	/* remove trailing space */
-	ent = strchr(subtree_control, '\0') - 1;
-	*ent = '\0';
+	/* remove trailing space (length is > 0) */
+	ent = strchr(subtree_control, '\0');
+	if (ent > subtree_control) {
+		ent -= 1;
+		*ent = '\0';
+	}
 
 	ent = malloc(maxlen);
 	if (!ent)
