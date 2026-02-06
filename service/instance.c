@@ -559,30 +559,48 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	exit(127);
 }
 
-static void
+static int
 instance_add_cgroup(const char *service, const char *instance)
 {
-	struct stat sb;
+	const char *cgroup_procs = "/cgroup.procs";
 	char cgnamebuf[256];
-	int fd;
+	struct stat sb;
+	int fd, ret;
 
 	if (stat("/sys/fs/cgroup/cgroup.subtree_control", &sb))
-		return;
+		return -ENOENT;
 
 	mkdir(CGROUP_BASEDIR, 0700);
 
-	snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s", CGROUP_BASEDIR, service);
-	mkdir(cgnamebuf, 0700);
-	snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR, service, instance);
-	mkdir(cgnamebuf, 0700);
-	strcat(cgnamebuf, "/cgroup.procs");
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s", CGROUP_BASEDIR,
+		       service);
+	if (ret >= sizeof(cgnamebuf))
+		return -ENAMETOOLONG;
+
+	if (mkdir(cgnamebuf, 0700))
+		return -EPERM;
+
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
+		       service, instance);
+	if (ret >= sizeof(cgnamebuf))
+		return -ENAMETOOLONG;
+
+	if (mkdir(cgnamebuf, 0700))
+		return -EPERM;
+
+	if (strlen(cgnamebuf) + strlen(cgroup_procs) >= sizeof(cgnamebuf))
+		return -ENAMETOOLONG;
+
+	strcat(cgnamebuf, cgroup_procs);
 
 	fd = open(cgnamebuf, O_WRONLY);
 	if (fd == -1)
-		return;
+		return -EIO;
 
 	dprintf(fd, "%d", getpid());
 	close(fd);
+
+	return 0;
 }
 
 static void
@@ -616,7 +634,7 @@ instance_free_stdio(struct service_instance *in)
 void
 instance_start(struct service_instance *in)
 {
-	int pid;
+	int pid, ret;
 	int opipe[2] = { -1, -1 };
 	int epipe[2] = { -1, -1 };
 
@@ -665,7 +683,11 @@ instance_start(struct service_instance *in)
 		uloop_done();
 		closefd(opipe[0]);
 		closefd(epipe[0]);
-		instance_add_cgroup(in->srv->name, in->name);
+		ret = instance_add_cgroup(in->srv->name, in->name);
+		if (ret)
+			ULOG_WARN("failed adding instance cgroup for %s: %s\n",
+				  in->srv->name, strerror(ret));
+
 		instance_run(in, opipe[1], epipe[1]);
 		return;
 	}
