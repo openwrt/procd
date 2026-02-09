@@ -19,7 +19,7 @@
 
 #include "procd.h"
 
-char *ubus_socket = NULL;
+const char *ubus_socket = NULL;
 static struct ubus_context *ctx;
 static struct uloop_timeout ubus_timer;
 static int timeout;

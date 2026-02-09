@@ -17,7 +17,7 @@
 
 #include <libubox/runqueue.h>
 
-extern int rcS(char *pattern, char *param, void (*q_empty)(struct runqueue *));
-extern int rc(const char *file, char *param);
+extern int rcS(const char *pattern, const char *param, void (*q_empty)(struct runqueue *));
+extern int rc(const char *file, const char *param);
 
 #endif
