@@ -33,6 +33,9 @@
 #include "procd.h"
 #include "rcS.h"
 
+const char *init_d_path = "/etc/init.d";
+const char *rc_d_path = "/etc/rc.d";
+
 static struct runqueue q, r;
 
 struct initd {
@@ -200,12 +203,12 @@ int rcS(const char *pattern, const char *param, void (*q_empty)(struct runqueue 
 	q.empty_cb = q_empty;
 	q.max_running_tasks = 1;
 
-	return _rc(&q, "/etc/rc.d", pattern, "*", param);
+	return _rc(&q, rc_d_path, pattern, "*", param);
 }
 
 int rc(const char *file, const char *param)
 {
-	return _rc(&r, "/etc/init.d", file, "", param);
+	return _rc(&r, init_d_path, file, "", param);
 }
 
 static void r_empty(struct runqueue *q)

@@ -83,6 +83,8 @@ static int usage(const char *prog)
 		"	-s <path>	Path to ubus socket\n"
 		"	-h <path>	run as hotplug daemon\n"
 		"	-d <level>	Enable debug messages\n"
+		"	-I <path>	Path to init.d directory\n"
+		"	-R <path>	Path to rc.d directory\n"
 		"	-S		Print messages to stdout\n"
 		"\n", prog);
 	return 1;
@@ -99,7 +101,7 @@ int main(int argc, char **argv)
 		unsetenv("DBGLVL");
 	}
 
-	while ((ch = getopt(argc, argv, "d:s:h:S")) != -1) {
+	while ((ch = getopt(argc, argv, "d:s:h:I:R:S")) != -1) {
 		switch (ch) {
 		case 'h':
 			return hotplug_run(optarg);
@@ -108,6 +110,12 @@ int main(int argc, char **argv)
 			break;
 		case 'd':
 			debug = atoi(optarg);
+			break;
+		case 'I':
+			init_d_path = optarg;
+			break;
+		case 'R':
+			rc_d_path = optarg;
 			break;
 		case 'S':
 			ulog_channels = ULOG_STDIO;
