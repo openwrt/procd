@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/mount.h>
+#include <sys/sysmacros.h>
 
 #include <stdlib.h>
 #include <unistd.h>
