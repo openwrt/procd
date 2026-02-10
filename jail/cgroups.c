@@ -672,7 +672,7 @@ static const struct blobmsg_policy oci_linux_cgroups_memory_policy[] = {
 	[OCI_LINUX_CGROUPS_MEMORY_KERNELTCP] = { "kernelTCP", BLOBMSG_CAST_INT64 }, /* signed int64! ignored */
 	[OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS] = { "swappiness", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER] = { "disableOOMKiller", BLOBMSG_TYPE_BOOL },
-	[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY] { "useHierarchy", BLOBMSG_TYPE_BOOL },
+	[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY] = { "useHierarchy", BLOBMSG_TYPE_BOOL },
 };
 
 static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
