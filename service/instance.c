@@ -30,6 +30,7 @@
 #include <syslog.h>
 
 #include <libubox/md5.h>
+#include <libubox/utils.h>
 
 #include "../procd.h"
 #include "../rcS.h"
@@ -570,22 +571,12 @@ instance_add_cgroup(const char *service, const char *instance)
 	if (stat("/sys/fs/cgroup/cgroup.subtree_control", &sb))
 		return -ENOENT;
 
-	mkdir(CGROUP_BASEDIR, 0700);
-
-	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s", CGROUP_BASEDIR,
-		       service);
-	if (ret >= sizeof(cgnamebuf))
-		return -ENAMETOOLONG;
-
-	if (mkdir(cgnamebuf, 0700))
-		return -EPERM;
-
 	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
 		       service, instance);
 	if (ret >= sizeof(cgnamebuf))
 		return -ENAMETOOLONG;
 
-	if (mkdir(cgnamebuf, 0700))
+	if (mkdir_p(cgnamebuf, 0700))
 		return -EPERM;
 
 	if (strlen(cgnamebuf) + strlen(cgroup_procs) >= sizeof(cgnamebuf))
