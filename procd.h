@@ -27,7 +27,10 @@
 
 #define __init __attribute__((constructor))
 
-extern char *ubus_socket;
+extern const char *init_d_path;
+extern const char *rc_d_path;
+
+extern const char *ubus_socket;
 
 void procd_connect_ubus(void);
 void procd_reconnect_ubus(int reconnect);

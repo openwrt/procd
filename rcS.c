@@ -33,6 +33,9 @@
 #include "procd.h"
 #include "rcS.h"
 
+const char *init_d_path = "/etc/init.d";
+const char *rc_d_path = "/etc/rc.d";
+
 static struct runqueue q, r;
 
 struct initd {
@@ -125,7 +128,7 @@ static void q_initd_complete(struct runqueue *q, struct runqueue_task *p)
 	free(s);
 }
 
-static bool find_runqueue_list_entry(struct list_head *list, char *file, char *param)
+static bool find_runqueue_list_entry(struct list_head *list, const char *file, const char *param)
 {
 	struct initd *s;
 
@@ -135,7 +138,7 @@ static bool find_runqueue_list_entry(struct list_head *list, char *file, char *p
 	return false;
 }
 
-static void add_initd(struct runqueue *q, char *file, char *param)
+static void add_initd(struct runqueue *q, const char *file, const char *param)
 {
 	static const struct runqueue_task_type initd_type = {
 		.run = q_initd_run,
@@ -168,7 +171,7 @@ static void add_initd(struct runqueue *q, char *file, char *param)
 	runqueue_task_add(q, &s->proc.task, false);
 }
 
-static int _rc(struct runqueue *q, char *path, const char *file, char *pattern, char *param)
+static int _rc(struct runqueue *q, const char *path, const char *file, const char *pattern, const char *param)
 {
 	char *dir = alloca(2 + strlen(path) + strlen(file) + strlen(pattern));
 	glob_t gl;
@@ -194,18 +197,18 @@ static int _rc(struct runqueue *q, char *path, const char *file, char *pattern, 
 	return 0;
 }
 
-int rcS(char *pattern, char *param, void (*q_empty)(struct runqueue *))
+int rcS(const char *pattern, const char *param, void (*q_empty)(struct runqueue *))
 {
 	runqueue_init(&q);
 	q.empty_cb = q_empty;
 	q.max_running_tasks = 1;
 
-	return _rc(&q, "/etc/rc.d", pattern, "*", param);
+	return _rc(&q, rc_d_path, pattern, "*", param);
 }
 
-int rc(const char *file, char *param)
+int rc(const char *file, const char *param)
 {
-	return _rc(&r, "/etc/init.d", file, "", param);
+	return _rc(&r, init_d_path, file, "", param);
 }
 
 static void r_empty(struct runqueue *q)
