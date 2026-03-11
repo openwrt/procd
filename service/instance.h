@@ -114,6 +114,7 @@ struct service_instance {
 	struct blob_attr *command;
 	struct blob_attr *trigger;
 	struct blobmsg_list env;
+	struct blob_attr *data_blob;
 	struct blobmsg_list data;
 	struct blobmsg_list netdev;
 	struct blobmsg_list file;

@@ -1603,6 +1603,7 @@ instance_free(struct service_instance *in)
 	watch_del(in);
 	instance_config_cleanup(in);
 	free(in->config);
+	free(in->data_blob);
 	free(in->user);
 	free(in->group);
 	free(in->extroot);

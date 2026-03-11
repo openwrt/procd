@@ -929,8 +929,12 @@ service_handle_set_data(struct ubus_context *ctx, struct ubus_object *obj,
 			return UBUS_STATUS_NOT_FOUND;
 
 		blobmsg_list_free(&in->data);
-		blobmsg_list_fill(&in->data, blobmsg_data(tb[SET_DATA_DATA]),
-				  blobmsg_data_len(tb[SET_DATA_DATA]), false);
+		free(in->data_blob);
+		in->data_blob = blob_memdup(tb[SET_DATA_DATA]);
+		if (!in->data_blob)
+			return UBUS_STATUS_UNKNOWN_ERROR;
+		blobmsg_list_fill(&in->data, blobmsg_data(in->data_blob),
+				  blobmsg_data_len(in->data_blob), false);
 	} else {
 		if (service_update_data(s, tb[SET_DATA_DATA]) < 0)
 			return UBUS_STATUS_UNKNOWN_ERROR;
