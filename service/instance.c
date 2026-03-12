@@ -569,7 +569,7 @@ instance_add_cgroup(const char *service, const char *instance)
 	int fd, ret;
 
 	if (stat("/sys/fs/cgroup/cgroup.subtree_control", &sb))
-		return -ENOENT;
+		return 0;
 
 	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
 		       service, instance);
