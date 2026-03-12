@@ -672,7 +672,7 @@ instance_start(struct service_instance *in)
 		ret = instance_add_cgroup(in->srv->name, in->name);
 		if (ret)
 			ULOG_WARN("failed adding instance cgroup for %s: %s\n",
-				  in->srv->name, strerror(ret));
+				  in->srv->name, strerror(-ret));
 
 		instance_run(in, opipe[1], epipe[1]);
 		return;
