@@ -266,6 +266,7 @@ static void run_netifd(struct uloop_timeout *t)
 	blobmsg_add_string(&req, "/bin/kill", "0");
 	blobmsg_add_string(&req, "/bin/ubus", "0");
 	blobmsg_add_string(&req, "/etc/hotplug.d", "0");
+	blobmsg_add_string(&req, "/lib/config/uci.sh", "0");
 	blobmsg_add_string(&req, "/lib/functions", "0");
 	blobmsg_add_string(&req, "/lib/functions.sh", "0");
 	blobmsg_add_string(&req, "/lib/netifd", "0");
