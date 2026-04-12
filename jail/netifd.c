@@ -275,7 +275,11 @@ static void run_netifd(struct uloop_timeout *t)
 	blobmsg_add_string(&req, "/usr/bin/killall", "0");
 	blobmsg_add_string(&req, "/usr/bin/logger", "0");
 	blobmsg_add_string(&req, "/usr/bin/jshn", "0");
+	blobmsg_add_string(&req, "/usr/bin/ucode", "0");
+	blobmsg_add_string(&req, "/usr/lib/ucode", "0");
 	blobmsg_add_string(&req, "/usr/share/libubox/jshn.sh", "0");
+	blobmsg_add_string(&req, "/usr/share/schema", "0");
+	blobmsg_add_string(&req, "/usr/share/ucode/wifi", "0");
 	blobmsg_add_string(&req, "/sbin/hotplug-call", "0");
 	blobmsg_add_string(&req, "/sbin/udhcpc", "0");
 	blobmsg_close_table(&req, mount);
