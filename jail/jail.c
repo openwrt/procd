@@ -2043,7 +2043,7 @@ static const struct blobmsg_policy oci_devices_policy[] = {
 	[OCI_DEVICES_MINOR] = { "minor", BLOBMSG_TYPE_INT32 },
 	[OCI_DEVICES_FILEMODE] = { "fileMode", BLOBMSG_TYPE_INT32 },
 	[OCI_DEVICES_UID] = { "uid", BLOBMSG_TYPE_INT32 },
-	[OCI_DEVICES_GID] = { "uid", BLOBMSG_TYPE_INT32 },
+	[OCI_DEVICES_GID] = { "gid", BLOBMSG_TYPE_INT32 },
 };
 
 static mode_t resolve_devtype(char *tstr)

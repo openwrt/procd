@@ -759,7 +759,7 @@ instance_console(struct ustream *s, int bytes)
 		if (!buf)
 			break;
 
-		ulog(LOG_INFO, "out: %s\n", buf);
+		DEBUG(LOG_INFO, "out: %s\n", buf);
 
 		/* test if console client is attached */
 		if (in->console_client.fd.fd > -1)
@@ -781,7 +781,7 @@ instance_console_client(struct ustream *s, int bytes)
 		if (!buf)
 			break;
 
-		ulog(LOG_INFO, "in: %s\n", buf);
+		DEBUG(LOG_INFO, "in: %s\n", buf);
 		ustream_write(&in->console.stream, buf, len, false);
 		ustream_consume(s, len);
 	} while (1);
