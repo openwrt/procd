@@ -119,12 +119,22 @@ static const char *system_rootfs_type(void) {
 		return NULL;
 }
 
+#ifdef __riscv
+static void system_board_riscv(const char *isa)
+{
+	char buf[512];
+
+	snprintf(buf, sizeof(buf), "RISC-V (%s)", isa);
+	blobmsg_add_string(&b, "system", buf);
+}
+#endif
+
 static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
                  struct ubus_request_data *req, const char *method,
                  struct blob_attr *msg)
 {
 	void *c;
-	char line[256];
+	char line[512];
 	char *key, *val, *next;
 	const char *rootfs_type = system_rootfs_type();
 	struct utsname utsname;
@@ -158,8 +168,7 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 			}
 #elif __riscv
 			if (!strcasecmp(key, "isa")) {
-				snprintf(line, sizeof(line), "RISC-V (%s)", val);
-				blobmsg_add_string(&b, "system", line);
+				system_board_riscv(val);
 				break;
 			}
 #else
