@@ -120,9 +120,14 @@ static const char *system_rootfs_type(void) {
 }
 
 #ifdef __riscv
-static void system_board_riscv(const char *isa)
+static void system_board_riscv(char *isa)
 {
 	char buf[512];
+	char *p;
+
+	for (p = isa; *p; p++)
+		if (*p == '_')
+			*p = ' ';
 
 	snprintf(buf, sizeof(buf), "RISC-V (%s)", isa);
 	blobmsg_add_string(&b, "system", buf);
