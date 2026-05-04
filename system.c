@@ -158,6 +158,11 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 			}
 #elif __riscv
 			if (!strcasecmp(key, "isa")) {
+				char *tmp = val;
+				while (*tmp++)
+					if (*tmp == '_')
+						*tmp = ' ';
+
 				char buf[512];
 				snprintf(buf, sizeof(buf), "RISC-V (%s)", val);
 				blobmsg_add_string(&b, "system", buf);
