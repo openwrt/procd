@@ -145,18 +145,20 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 			key = strtok(line, "\t:");
 			val = strtok(NULL, "\t\n");
 
-			if (!key || !val)
+			if (!key || !val || strlen(val) < 3)
 				continue;
+
+			val += 2;
 
 #ifdef __aarch64__
 			if (!strcasecmp(key, "CPU revision")) {
-				snprintf(line, sizeof(line), "ARMv8 Processor rev %lu", strtoul(val + 2, NULL, 16));
+				snprintf(line, sizeof(line), "ARMv8 Processor rev %lu", strtoul(val, NULL, 16));
 				blobmsg_add_string(&b, "system", line);
 				break;
 			}
 #elif __riscv
 			if (!strcasecmp(key, "isa")) {
-				snprintf(line, sizeof(line), "RISC-V (%s)", val + 2);
+				snprintf(line, sizeof(line), "RISC-V (%s)", val);
 				blobmsg_add_string(&b, "system", line);
 				break;
 			}
@@ -166,11 +168,11 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 			    !strcasecmp(key, "cpu") ||
 			    !strcasecmp(key, "model name"))
 			{
-				strtoul(val + 2, &key, 0);
+				strtoul(val, &key, 0);
 
-				if (key == (val + 2) || *key != 0)
+				if (key == (val) || *key != 0)
 				{
-					blobmsg_add_string(&b, "system", val + 2);
+					blobmsg_add_string(&b, "system", val);
 					break;
 				}
 			}
@@ -200,13 +202,15 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 			key = strtok(line, "\t:");
 			val = strtok(NULL, "\t\n");
 
-			if (!key || !val)
+			if (!key || !val || strlen(val) < 3)
 				continue;
+
+			val += 2;
 
 			if (!strcasecmp(key, "machine") ||
 			    !strcasecmp(key, "hardware"))
 			{
-				blobmsg_add_string(&b, "model", val + 2);
+				blobmsg_add_string(&b, "model", val);
 				break;
 			}
 		}
