@@ -386,6 +386,7 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	blob_buf_init(&b, 0);
 
 	blobmsg_add_u32(&b, "localtime", now + tm->tm_gmtoff);
+	blobmsg_add_u32(&b, "unixtime", now);
 
 #ifdef linux
 	blobmsg_add_u32(&b, "uptime",    info.uptime);
