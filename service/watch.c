@@ -67,7 +67,7 @@ static void watch_subscribe_cb(struct ubus_context *ctx, struct ubus_event_handl
 void
 watch_add(const char *_name, void *id)
 {
-	int len = strlen(_name);
+	size_t len = strlen(_name);
 	char *name;
 	struct watch_object *o = calloc_a(sizeof(*o), &name, len + 1);
 
