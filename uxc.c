@@ -73,34 +73,33 @@ struct settings {
 	struct blob_attr *volumes;
 };
 
-enum uxc_cmd {
-	CMD_ATTACH,
-	CMD_LIST,
-	CMD_BOOT,
-	CMD_START,
-	CMD_STATE,
-	CMD_KILL,
-	CMD_ENABLE,
-	CMD_DISABLE,
-	CMD_DELETE,
-	CMD_CREATE,
-	CMD_UNKNOWN
-};
-
-#define OPT_ARGS "ab:fjm:p:t:vVw:"
-static struct option long_options[] = {
+static const struct option create_opts[] = {
 	{"autostart",		no_argument,		0,	'a'	},
-	{"console",		no_argument,		0,	'c'	},
 	{"bundle",		required_argument,	0,	'b'	},
-	{"force",		no_argument,		0,	'f'	},
-	{"json",		no_argument,		0,	'j'	},
 	{"mounts",		required_argument,	0,	'm'	},
 	{"pid-file",		required_argument,	0,	'p'	},
-	{"signal",		required_argument,	0,	's'	},
 	{"temp-overlay-size",	required_argument,	0,	't'	},
 	{"write-overlay-path",	required_argument,	0,	'w'	},
-	{"verbose",		no_argument,		0,	'v'	},
-	{"version",		no_argument,		0,	'V'	},
+	{0,			0,			0,	0	}
+};
+
+static const struct option start_opts[] = {
+	{"console",		no_argument,		0,	'c'	},
+	{0,			0,			0,	0	}
+};
+
+static const struct option kill_opts[] = {
+	{"signal",		required_argument,	0,	's'	},
+	{0,			0,			0,	0	}
+};
+
+static const struct option delete_opts[] = {
+	{"force",		no_argument,		0,	'f'	},
+	{0,			0,			0,	0	}
+};
+
+static const struct option list_opts[] = {
+	{"json",		no_argument,		0,	'j'	},
 	{0,			0,			0,	0	}
 };
 
@@ -1526,21 +1525,42 @@ static int get_signum(const char *name)
 
 int main(int argc, char **argv)
 {
-	enum uxc_cmd cmd = CMD_UNKNOWN;
 	int ret = -EINVAL;
-	char *bundle = NULL;
-	char *pidfile = NULL;
-	char *tmprwsize = NULL;
-	char *writepath = NULL;
-	char *requiredmounts = NULL;
-	signed char autostart = -1;
-	bool force = false;
-	bool console = false;
-	int signal = SIGTERM;
-	int c;
+	const char *verb;
+	int verb_argc, c, i;
+	char **verb_argv;
 
-	if (argc < 2)
+	for (i = 1; i < argc; ++i) {
+		const char *a = argv[i];
+
+		if (a[0] != '-')
+			break;
+
+		if (!strcmp(a, "--")) {
+			++i;
+			break;
+		}
+
+		if (!strcmp(a, "-V") || !strcmp(a, "--version")) {
+			printf("uxc %s\nspec: %s\n", UXC_VERSION, OCI_VERSION_STRING);
+			return 0;
+		}
+
+		if (!strcmp(a, "-v") || !strcmp(a, "--verbose")) {
+			verbose = true;
+			continue;
+		}
+
+		fprintf(stderr, "uxc: unknown option '%s'\n", a);
 		return usage();
+	}
+
+	if (i >= argc)
+		return usage();
+
+	verb = argv[i];
+	verb_argc = argc - i;
+	verb_argv = argv + i;
 
 	ctx = ubus_connect(NULL);
 	if (!ctx)
@@ -1562,167 +1582,116 @@ int main(int argc, char **argv)
 	if (ret)
 		goto settings_avl_out;
 
-	while (true) {
-		int option_index = 0;
-		c = getopt_long(argc, argv, OPT_ARGS, long_options, &option_index);
-		if (c == -1)
-			break;
+	optind = 1;
+	opterr = 1;
 
-		switch (c) {
-			case 'a':
-				autostart = 1;
-				break;
+	if (!strcmp(verb, "list")) {
+		while ((c = getopt_long(verb_argc, verb_argv, "j", list_opts, NULL)) != -1) {
+			switch (c) {
+			case 'j': json_output = true; break;
+			default: goto usage_out;
+			}
+		}
+		if (optind != verb_argc)
+			goto usage_out;
+		ret = uxc_list();
+	} else if (!strcmp(verb, "attach")) {
+		if (verb_argc != 2)
+			goto usage_out;
+		ret = uxc_attach(verb_argv[1]);
+	} else if (!strcmp(verb, "boot")) {
+		if (verb_argc != 1)
+			goto usage_out;
+		ret = uxc_boot();
+	} else if (!strcmp(verb, "start")) {
+		bool console = false;
 
-			case 'b':
-				bundle = optarg;
-				break;
+		while ((c = getopt_long(verb_argc, verb_argv, "c", start_opts, NULL)) != -1) {
+			switch (c) {
+			case 'c': console = true; break;
+			default: goto usage_out;
+			}
+		}
+		if (optind != verb_argc - 1)
+			goto usage_out;
+		ret = uxc_start(verb_argv[optind], console);
+	} else if (!strcmp(verb, "state")) {
+		if (verb_argc != 2)
+			goto usage_out;
+		ret = uxc_state(verb_argv[1]);
+	} else if (!strcmp(verb, "kill")) {
+		int signal = SIGTERM;
 
-			case 'c':
-				console = true;
-				break;
-
-			case 'f':
-				force = true;
-				break;
-
-			case 'j':
-				json_output = true;
-				break;
-
-			case 'p':
-				pidfile = optarg;
-				break;
-
+		while ((c = getopt_long(verb_argc, verb_argv, "s:", kill_opts, NULL)) != -1) {
+			switch (c) {
 			case 's':
 				signal = get_signum(optarg);
 				if (signal < 0)
 					goto usage_out;
 				break;
-
-			case 't':
-				tmprwsize = optarg;
-				break;
-
-			case 'v':
-				verbose = true;
-				break;
-
-			case 'V':
-				printf("uxc %s\n", UXC_VERSION);
-				exit(0);
-
-			case 'w':
-				writepath = optarg;
-				break;
-
-			case 'm':
-				requiredmounts = optarg;
-				break;
+			default: goto usage_out;
+			}
 		}
-	}
-
-	if (optind == argc)
-		goto usage_out;
-
-	if (!strcmp("list", argv[optind]))
-		cmd = CMD_LIST;
-	else if (!strcmp("attach", argv[optind]))
-		cmd = CMD_ATTACH;
-	else if (!strcmp("boot", argv[optind]))
-		cmd = CMD_BOOT;
-	else if(!strcmp("start", argv[optind]))
-		cmd = CMD_START;
-	else if(!strcmp("state", argv[optind]))
-		cmd = CMD_STATE;
-	else if(!strcmp("kill", argv[optind]))
-		cmd = CMD_KILL;
-	else if(!strcmp("enable", argv[optind]))
-		cmd = CMD_ENABLE;
-	else if(!strcmp("disable", argv[optind]))
-		cmd = CMD_DISABLE;
-	else if(!strcmp("delete", argv[optind]))
-		cmd = CMD_DELETE;
-	else if(!strcmp("create", argv[optind]))
-		cmd = CMD_CREATE;
-
-	switch (cmd) {
-		case CMD_ATTACH:
-			if (optind != argc - 2)
-				goto usage_out;
-
-			ret = uxc_attach(argv[optind + 1]);
-			break;
-
-		case CMD_LIST:
-			ret = uxc_list();
-			break;
-
-		case CMD_BOOT:
-			ret = uxc_boot();
-			break;
-
-		case CMD_START:
-			if (optind != argc - 2)
-				goto usage_out;
-
-			ret = uxc_start(argv[optind + 1], console);
-			break;
-
-		case CMD_STATE:
-			if (optind != argc - 2)
-				goto usage_out;
-
-			ret = uxc_state(argv[optind + 1]);
-			break;
-
-		case CMD_KILL:
-			if (optind > argc - 2)
-				goto usage_out;
-
-			ret = uxc_kill(argv[optind + 1], signal);
-			break;
-
-		case CMD_ENABLE:
-			if (optind != argc - 2)
-				goto usage_out;
-
-			ret = uxc_set(argv[optind + 1], NULL, 1, NULL, NULL, NULL, NULL);
-			break;
-
-		case CMD_DISABLE:
-			if (optind != argc - 2)
-				goto usage_out;
-
-			ret = uxc_set(argv[optind + 1], NULL, 0, NULL, NULL, NULL, NULL);
-			break;
-
-		case CMD_DELETE:
-			if (optind != argc - 2)
-				goto usage_out;
-
-			ret = uxc_delete(argv[optind + 1], force);
-			break;
-
-		case CMD_CREATE:
-			if (optind != argc - 2)
-				goto usage_out;
-
-			ret = uxc_exists(argv[optind + 1]);
-			if (ret)
-				goto runtime_out;
-
-			ret = uxc_set(argv[optind + 1], bundle, autostart, pidfile, tmprwsize, writepath, requiredmounts);
-			if (ret < 0)
-				goto runtime_out;
-
-			if (ret > 0)
-				reload_conf();
-
-			ret = uxc_create(argv[optind + 1], false);
-			break;
-
-		default:
+		if (optind != verb_argc - 1)
 			goto usage_out;
+		ret = uxc_kill(verb_argv[optind], signal);
+	} else if (!strcmp(verb, "enable")) {
+		if (verb_argc != 2)
+			goto usage_out;
+		ret = uxc_set(verb_argv[1], NULL, 1, NULL, NULL, NULL, NULL);
+	} else if (!strcmp(verb, "disable")) {
+		if (verb_argc != 2)
+			goto usage_out;
+		ret = uxc_set(verb_argv[1], NULL, 0, NULL, NULL, NULL, NULL);
+	} else if (!strcmp(verb, "delete")) {
+		bool force = false;
+
+		while ((c = getopt_long(verb_argc, verb_argv, "f", delete_opts, NULL)) != -1) {
+			switch (c) {
+			case 'f': force = true; break;
+			default: goto usage_out;
+			}
+		}
+		if (optind != verb_argc - 1)
+			goto usage_out;
+		ret = uxc_delete(verb_argv[optind], force);
+	} else if (!strcmp(verb, "create")) {
+		char *bundle = NULL, *pidfile = NULL;
+		char *tmprwsize = NULL, *writepath = NULL, *requiredmounts = NULL;
+		signed char autostart = -1;
+		char *name;
+
+		while ((c = getopt_long(verb_argc, verb_argv, "ab:m:p:t:w:",
+					create_opts, NULL)) != -1) {
+			switch (c) {
+			case 'a': autostart = 1; break;
+			case 'b': bundle = optarg; break;
+			case 'm': requiredmounts = optarg; break;
+			case 'p': pidfile = optarg; break;
+			case 't': tmprwsize = optarg; break;
+			case 'w': writepath = optarg; break;
+			default: goto usage_out;
+			}
+		}
+		if (optind != verb_argc - 1)
+			goto usage_out;
+		name = verb_argv[optind];
+
+		ret = uxc_exists(name);
+		if (ret)
+			goto runtime_out;
+
+		ret = uxc_set(name, bundle, autostart, pidfile,
+			      tmprwsize, writepath, requiredmounts);
+		if (ret < 0)
+			goto runtime_out;
+		if (ret > 0)
+			reload_conf();
+
+		ret = uxc_create(name, false);
+	} else {
+		fprintf(stderr, "uxc: unknown command '%s'\n", verb);
+		goto usage_out;
 	}
 
 	goto runtime_out;
