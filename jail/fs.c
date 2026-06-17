@@ -126,11 +126,20 @@ unsigned long detect_atime_flag(const char *mountpoint)
 #define MOUNT_ATTR_NODIRATIME	0x00000080
 #endif
 
+int sys_openat2(int dfd, const char *path, struct open_how *how, size_t size)
+{
+	return syscall(SYS_openat2, dfd, path, how, size);
+}
+
+static int jailroot_dirfd = -1;
+
 static unsigned int idmap_host_offset;
+
 void jail_set_idmap_offset(unsigned int offset)
 {
 	idmap_host_offset = offset;
 }
+
 static int write_mappings_file(pid_t pid, const char *which, struct blob_attr *mappings)
 {
 	enum {
@@ -419,11 +428,14 @@ void jail_fs_set_userns(bool enabled)
 	fs_userns = enabled;
 }
 
+static bool mount_opts_has(const char *opts, const char *needle);
+
 static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
 		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner)
 {
 	struct stat s;
 	char new[PATH_MAX];
+	char tmpfs_data[512];
 	const char *mount_data;
 	char *source = (char *)orig_source;
 	int fd, ret = 0;
@@ -470,9 +482,21 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	if (!is_bind || (source && S_ISDIR(s.st_mode))) {
 		mkdir_p(new, 0755);
 	} else if (is_bind && source) {
+		const char *target_rel = target ? target : source;
+		struct open_how how = {
+			.flags = O_CREAT | O_WRONLY | O_TRUNC | O_EXCL | O_CLOEXEC,
+			.mode = 0644,
+			.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+		};
+
+		assert(target_rel);
 		mkdir_p(dirname(new), 0755);
 		snprintf(new, sizeof(new), "%s%s", root, target?target:source);
-		fd = open(new, O_CREAT|O_WRONLY|O_TRUNC|O_EXCL, 0644);
+		while (*target_rel == '/')
+			++target_rel;
+		fd = (jailroot_dirfd >= 0)
+		     ? sys_openat2(jailroot_dirfd, target_rel, &how, sizeof(how))
+		     : open(new, O_CREAT|O_WRONLY|O_TRUNC|O_EXCL|O_CLOEXEC, 0644);
 		if (fd >= 0)
 			close(fd);
 
@@ -496,6 +520,14 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	}
 
 	mount_data = optstr;
+	if (filesystemtype && !strcmp(filesystemtype, "tmpfs") && !fs_userns &&
+	    !mount_opts_has(optstr ?: "", "swap") && !mount_opts_has(optstr ?: "", "noswap")) {
+		if (optstr && *optstr)
+			snprintf(tmpfs_data, sizeof(tmpfs_data), "%s,noswap", optstr);
+		else
+			snprintf(tmpfs_data, sizeof(tmpfs_data), "noswap");
+		mount_data = tmpfs_data;
+	}
 
 	const char *hack_fstype = ((!filesystemtype || strcmp(filesystemtype, "cgroup"))?filesystemtype:"cgroup2");
 	if (mount(source?:(is_bind?new:NULL), new, hack_fstype?:"none", mountflags, mount_data)) {
@@ -682,6 +714,37 @@ int add_mount_fd(int fd, const char *target, int error)
 	DEBUG("adding mount fd:%d %s bind(1) ro(?) err(%d)\n", fd, target, error != 0);
 
 	return 0;
+}
+
+int add_mount_volume(const char *source, const char *target, int error)
+{
+	struct mount *m;
+	int ret;
+
+	ret = add_mount(source, target, NULL,
+			MS_BIND | MS_NOEXEC | MS_NOSUID | MS_NODEV, 0, NULL, error);
+	if (ret && ret != EEXIST)
+		return ret;
+
+	m = avl_find_element(&mounts, target, m, avl);
+	if (m)
+		m->volume = true;
+
+	return ret;
+}
+
+char *resolve_mount_source(const char *source)
+{
+	char *real;
+
+	if (!source)
+		return NULL;
+
+	if (source[0] != '/')
+		return strdup(source);
+
+	real = realpath(source, NULL);
+	return real ? real : strdup(source);
 }
 
 enum {
@@ -876,6 +939,24 @@ static bool is_proc_or_sys_path(const char *path)
 	return false;
 }
 
+static bool mount_opts_has(const char *opts, const char *needle)
+{
+	size_t nlen = strlen(needle);
+	const char *p = opts;
+
+	while (p && *p) {
+		const char *end = strchr(p, ',');
+		size_t plen = end ? (size_t)(end - p) : strlen(p);
+
+		if (plen == nlen && !strncmp(p, needle, nlen))
+			return true;
+		if (!end)
+			break;
+		p = end + 1;
+	}
+	return false;
+}
+
 int parseOCImount(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_MOUNT_MAX];
@@ -883,6 +964,7 @@ int parseOCImount(struct blob_attr *msg)
 	unsigned long propagation_flags = 0;
 	char *mount_data = NULL;
 	char *destination, *abs_destination = NULL;
+	char *rsrc = NULL;
 	bool idmap = false, idmap_recursive = false;
 	int ret, err = -1;
 
@@ -919,10 +1001,15 @@ int parseOCImount(struct blob_attr *msg)
 		return EPERM;
 	}
 
-	ret = add_mount(tb[OCI_MOUNT_SOURCE] ? blobmsg_get_string(tb[OCI_MOUNT_SOURCE]) : NULL,
+	if (tb[OCI_MOUNT_SOURCE])
+		rsrc = resolve_mount_source(blobmsg_get_string(tb[OCI_MOUNT_SOURCE]));
+
+	ret = add_mount(rsrc,
 		  destination,
 		  tb[OCI_MOUNT_TYPE] ? blobmsg_get_string(tb[OCI_MOUNT_TYPE]) : NULL,
 		  mount_flags, propagation_flags, mount_data, err);
+
+	free(rsrc);
 
 	if (!ret && (idmap || tb[OCI_MOUNT_UIDMAPPINGS] || tb[OCI_MOUNT_GIDMAPPINGS])) {
 		struct mount *m = avl_find_element(&mounts, destination, m, avl);
@@ -1013,6 +1100,11 @@ static int idmap_mount_target(const char *root, struct mount *m, char *target, s
 {
 	struct stat s;
 	const char *target_rel;
+	struct open_how how = {
+		.flags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC,
+		.mode = 0644,
+		.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+	};
 	int fd;
 
 	snprintf(target, tlen, "%s%s", root, m->target);
@@ -1034,7 +1126,9 @@ static int idmap_mount_target(const char *root, struct mount *m, char *target, s
 	snprintf(target, tlen, "%s%s", root, m->target);
 	while (*target_rel == '/')
 		++target_rel;
-	fd = open(target, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644);
+	fd = (jailroot_dirfd >= 0)
+	     ? sys_openat2(jailroot_dirfd, target_rel, &how, sizeof(how))
+	     : open(target, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644);
 	if (fd >= 0)
 		close(fd);
 
@@ -1279,32 +1373,88 @@ int jail_idmap_assign(bool have_extroot, bool have_overlay, const int *fds, int 
 	return i;
 }
 
-int mount_all(const char *jailroot) {
+void mount_stage_dev(const char *jail_dev)
+{
+	struct mount *m;
+	struct stat s;
+	char path[PATH_MAX];
+	bool is_dir;
+	int fd;
+
+	avl_for_each_element(&mounts, m, avl) {
+		if (strncmp(m->target, "/dev/", 5))
+			continue;
+		if (m->source == (void *)(-1))
+			continue;
+
+		snprintf(path, sizeof(path), "%s%s", jail_dev, m->target + 4);
+
+		is_dir = !(m->mountflags & MS_BIND) ||
+			 (m->source && !stat(m->source, &s) && S_ISDIR(s.st_mode));
+		if (is_dir) {
+			mkdir_p(path, 0755);
+		} else {
+			mkdir_p(dirname(strdupa(path)), 0755);
+			fd = open(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644);
+			if (fd >= 0)
+				close(fd);
+		}
+	}
+}
+
+int mount_all(const char *jailroot, const char *jail_dev) {
 	struct library *l;
 	struct mount *m;
+	char devtarget[PATH_MAX];
+	int ret = 0;
 
 	build_noafile();
+
+	jailroot_dirfd = open(jailroot, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	if (jailroot_dirfd < 0)
+		ERROR("mount_all: open(%s, O_PATH|O_DIRECTORY): %m\n", jailroot);
 
 	avl_for_each_element(&libraries, l, avl)
 		add_mount_bind(l->path, 1, -1);
 
 	avl_for_each_element(&mounts, m, avl) {
-		if (m->idmap_treefd >= 0) {
-			if (do_move_idmap_mount(jailroot, m))
-				return -1;
+		if (jail_dev && m->filesystemtype && !strcmp(m->filesystemtype, "tmpfs") &&
+		    !strcmp(m->target, "/dev")) {
+			snprintf(devtarget, sizeof(devtarget), "%s%s", jailroot, m->target);
+			mkdir_p(devtarget, 0755);
+			if (mount(jail_dev, devtarget, NULL, MS_BIND | MS_REC, NULL)) {
+				ERROR("mount(MS_BIND, %s -> %s): %m\n", jail_dev, devtarget);
+				ret = -1;
+				goto out;
+			}
+		} else if (m->idmap_treefd >= 0) {
+			if (do_move_idmap_mount(jailroot, m)) {
+				ret = -1;
+				goto out;
+			}
 		} else if (m->idmap) {
-			if (do_idmap_mount(jailroot, m))
-				return -1;
+			if (do_idmap_mount(jailroot, m)) {
+				ret = -1;
+				goto out;
+			}
 		} else if (m->source_fd >= 0) {
-			if (do_mount_fd(jailroot, m->source_fd, m->target, m->error))
-				return -1;
+			if (do_mount_fd(jailroot, m->source_fd, m->target, m->error)) {
+				ret = -1;
+				goto out;
+			}
 		} else if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags,
 				    m->propflags, m->optstr, m->error, m->inner)) {
-			return -1;
+			ret = -1;
+			goto out;
 		}
 	}
 
-	return 0;
+out:
+	if (jailroot_dirfd >= 0) {
+		close(jailroot_dirfd);
+		jailroot_dirfd = -1;
+	}
+	return ret;
 }
 
 void mount_free(void) {

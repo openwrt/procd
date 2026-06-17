@@ -50,6 +50,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <limits.h>
+#include <linux/close_range.h>
 #include <linux/filter.h>
 #include <linux/landlock.h>
 #include <linux/limits.h>
@@ -99,7 +100,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:lm:M:n:NoO:pP:r:R:sS:uU:w:t:T:yY:Z"
+#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:lm:M:n:NoO:pP:r:R:sS:uU:V:w:t:T:yY:Z"
 
 struct hook_execvpe {
 	char *file;
@@ -218,6 +219,9 @@ static struct {
 } opts;
 
 static struct blob_buf ocibuf;
+
+static char **volume_sources;
+static int num_volume_sources;
 
 extern int pivot_root(const char *new_root, const char *put_old);
 
@@ -596,9 +600,8 @@ static int create_dev_console(const char *jail_root)
 
 	snprintf(dev_console_path, sizeof(dev_console_path), "%s/dev/console", jail_root);
 	dev_console_dummy = creat(dev_console_path, 0620);
-	if (dev_console_dummy < 0)
-		return 1;
-	close(dev_console_dummy);
+	if (dev_console_dummy >= 0)
+		close(dev_console_dummy);
 
 	snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", console_slave_fd);
 	if (mount(fdpath, dev_console_path, "bind", MS_BIND, NULL))
@@ -783,6 +786,9 @@ static int apply_sysctl(const char *jail_root)
 	(((y)&0x000000ffULL)) )
 #endif
 
+static char jail_dev[] = "/tmp/ujail-dev-XXXXXX";
+static bool jail_dev_staged;
+
 static struct mknod_args default_devices[] = {
 	{ .path = "/dev/null", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 3) },
 	{ .path = "/dev/zero", .mode = (S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH), .dev = makedev(1, 5) },
@@ -793,92 +799,105 @@ static struct mknod_args default_devices[] = {
 	{ 0 },
 };
 
-static int create_devices(void)
+static int prepare_jail_dev(void)
 {
 	struct mknod_args **cur, *curdef;
-	char *path, *tmp;
-	int ret;
+	uid_t base = (opts.namespace & CLONE_NEWUSER) ? opts.root_map_uid : 0;
+	mode_t oldmask = umask(0);
+	char path[PATH_MAX], *tmp;
+	int consfd;
 
-	if (!opts.devices)
-		goto only_default_devices;
+	if (mkdtemp(jail_dev) == NULL) {
+		ERROR("mkdtemp(%s) failed: %m\n", jail_dev);
+		return errno;
+	}
+	jail_dev_staged = true;
 
-	cur = opts.devices;
+	if (mount("tmpfs", jail_dev, "tmpfs", MS_NOSUID | MS_NOATIME, "mode=0755")) {
+		ERROR("tmpfs mount for /dev failed: %m\n");
+		return errno;
+	}
 
-	while (*cur) {
-		path = (*cur)->path;
+	if (mount(NULL, jail_dev, NULL, MS_PRIVATE, NULL)) {
+		ERROR("making /dev tmpfs private failed: %m\n");
+		return errno;
+	}
+
+	for (cur = opts.devices; cur && *cur; ++cur) {
 		/* don't allow devices outside of /dev */
-		if (strncmp(path, "/dev", 4))
+		if (strncmp((*cur)->path, "/dev", 4))
 			return EPERM;
 
-		if (opts.setns.user != -1) {
-			++cur;
-			continue;
-		}
+		snprintf(path, sizeof(path), "%s%s", jail_dev, (*cur)->path + 4);
 
 		/* make sure parent folder exists */
 		tmp = strrchr(path, '/');
 		if (!tmp)
 			return EINVAL;
-
 		*tmp = '\0';
-		if (strcmp(path, "/dev")) {
-			DEBUG("creating directory %s\n", path);
-
-			if (mkdir_p(path, 0755))
-				return errno;
-		}
+		if (strcmp(path, jail_dev) && mkdir_p(path, 0755))
+			return errno;
 		*tmp = '/';
 
-		DEBUG("creating %s (mode=%08o)\n", path, (*cur)->mode);
-
-		/* create device */
 		if (mknod(path, (*cur)->mode, (*cur)->dev))
 			return errno;
-
-		/* change owner, if needed */
-		if (((*cur)->uid || (*cur)->gid) &&
-		    chown(path, (*cur)->uid, (*cur)->gid))
+		if (chown(path, base + (*cur)->uid, base + (*cur)->gid))
 			return errno;
-
-		++cur;
 	}
 
-only_default_devices:
-	curdef = default_devices;
-	while(curdef->path) {
-		DEBUG("creating %s (mode=%08o)\n", curdef->path, curdef->mode);
-		if (mknod(curdef->path, curdef->mode, curdef->dev)) {
-			++curdef;
-			continue; /* may already exist, eg. due to a bind-mount */
-		}
-		if ((curdef->uid || curdef->gid) &&
-		    chown(curdef->path, curdef->uid, curdef->gid))
+	for (curdef = default_devices; curdef->path; ++curdef) {
+		snprintf(path, sizeof(path), "%s%s", jail_dev, curdef->path + 4);
+		if (mknod(path, curdef->mode, curdef->dev))
 			return errno;
-
-		++curdef;
+		if (chown(path, base + curdef->uid, base + curdef->gid))
+			return errno;
 	}
 
 	/* Dev symbolic links as defined in OCI spec */
-	ret = symlink("/dev/pts/ptmx", "/dev/ptmx");
-	if (ret < 0)
+	snprintf(path, sizeof(path), "%s/ptmx", jail_dev);
+	if (symlink("/dev/pts/ptmx", path))
 		WARNING("symlink() failed to create link to /dev/pts/ptmx");
 
-	ret = symlink("/proc/self/fd", "/dev/fd");
-	if (ret < 0)
+	snprintf(path, sizeof(path), "%s/fd", jail_dev);
+	if (symlink("/proc/self/fd", path))
 		WARNING("symlink() failed to create link to /proc/self/fd");
 
-	ret = symlink("/proc/self/fd/0", "/dev/stdin");
-	if (ret < 0)
+	snprintf(path, sizeof(path), "%s/stdin", jail_dev);
+	if (symlink("/proc/self/fd/0", path))
 		WARNING("symlink() failed to create link to /proc/self/fd/0");
 
-	ret = symlink("/proc/self/fd/1", "/dev/stdout");
-	if (ret < 0)
+	snprintf(path, sizeof(path), "%s/stdout", jail_dev);
+	if (symlink("/proc/self/fd/1", path))
 		WARNING("symlink() failed to create link to /proc/self/fd/1");
 
-	ret = symlink("/proc/self/fd/2", "/dev/stderr");
-	if (ret < 0)
+	snprintf(path, sizeof(path), "%s/stderr", jail_dev);
+	if (symlink("/proc/self/fd/2", path))
 		WARNING("symlink() failed to create link to /proc/self/fd/2");
 
+	snprintf(path, sizeof(path), "%s/pts", jail_dev);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/shm", jail_dev);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/mqueue", jail_dev);
+	mkdir(path, 0755);
+
+	if (opts.console) {
+		snprintf(path, sizeof(path), "%s/console", jail_dev);
+		consfd = creat(path, 0620);
+		if (consfd < 0)
+			WARNING("creat() failed to stage /dev/console: %m\n");
+		else
+			close(consfd);
+	}
+
+	mount_stage_dev(jail_dev);
+
+	if (mount(NULL, jail_dev, NULL, MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NOATIME, NULL)) {
+		ERROR("read-only remount of /dev staging failed: %m\n");
+		return errno;
+	}
+
+	umask(oldmask);
 	return 0;
 }
 
@@ -1218,174 +1237,10 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	{
-	/* fds stay open until mount_all() performs the /proc/self/fd/N
-	 * binds below; closing early would drop or swap the source */
-	int *held_fds = NULL;
-	size_t n_devices = 0, n_custom = 0, i;
-	int fail = 0;
-
-	if (opts.setns.user != -1) {
-		struct mknod_args *curdef;
-
-		if (opts.devices) {
-			struct mknod_args **cur;
-
-			for (cur = opts.devices; *cur; cur++)
-				n_custom++;
-		}
-
-		for (curdef = default_devices; curdef->path; curdef++)
-			n_devices++;
-
-		n_devices += n_custom;
-
-		held_fds = malloc(n_devices * sizeof(int));
-		if (!held_fds) {
-			ERROR("out of memory validating devices\n");
-			return -1;
-		}
-		for (i = 0; i < n_devices; i++)
-			held_fds[i] = -1;
-
-		if (opts.devices) {
-			struct mknod_args **cur;
-
-			for (i = 0, cur = opts.devices; *cur && !fail; cur++, i++) {
-				struct stat st;
-
-				if (strncmp((*cur)->path, "/dev", 4)) {
-					ERROR("custom device %s is outside of /dev; "
-					      "refusing to bind-mount it\n",
-					      (*cur)->path);
-					fail = 1;
-					break;
-				}
-
-				held_fds[i] = open((*cur)->path, O_PATH | O_CLOEXEC);
-				if (held_fds[i] < 0) {
-					ERROR("custom device %s requested but not found "
-					      "on the host; it cannot be created under "
-					      "CLONE_NEWUSER (no privilege to mknod)\n",
-					      (*cur)->path);
-					fail = 1;
-					break;
-				}
-
-				if (fstat(held_fds[i], &st)) {
-					ERROR("custom device %s: fstat() failed: %m\n",
-					      (*cur)->path);
-					fail = 1;
-					break;
-				}
-
-				if (((*cur)->mode & S_IFMT) &&
-				    (st.st_mode & S_IFMT) != ((*cur)->mode & S_IFMT)) {
-					ERROR("custom device %s exists on the host but "
-					      "is not the requested node type; its "
-					      "major:minor/mode/owner cannot be enforced "
-					      "under CLONE_NEWUSER\n",
-					      (*cur)->path);
-					fail = 1;
-					break;
-				}
-
-				if (((*cur)->mode & S_IFMT) == S_IFCHR ||
-				    ((*cur)->mode & S_IFMT) == S_IFBLK) {
-					if ((*cur)->dev && st.st_rdev != (*cur)->dev) {
-						ERROR("custom device %s exists on the host "
-						      "but its major:minor (%u:%u) does not "
-						      "match the requested %u:%u; refusing "
-						      "to bind-mount a different device than "
-						      "configured\n", (*cur)->path,
-						      major(st.st_rdev), minor(st.st_rdev),
-						      major((*cur)->dev), minor((*cur)->dev));
-						fail = 1;
-						break;
-					}
-				}
-
-				{
-					int tree;
-					struct ujail_mount_attr attr = { .attr_set = MOUNT_ATTR_RDONLY };
-
-					tree = sys_open_tree(held_fds[i], "", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH);
-					if (tree < 0) {
-						ERROR("open_tree() on custom device %s failed: %m\n", (*cur)->path);
-						fail = 1;
-						break;
-					}
-					close(held_fds[i]);
-					held_fds[i] = tree;
-
-					if (sys_mount_setattr(tree, "", AT_EMPTY_PATH, &attr, sizeof(attr))) {
-						ERROR("mount_setattr() on custom device %s failed: %m\n", (*cur)->path);
-						fail = 1;
-						break;
-					}
-				}
-				if (add_mount_fd(held_fds[i], (*cur)->path, -1)) {
-					ERROR("could not queue bind-mount for mandatory "
-					      "custom device %s; refusing to start with "
-					      "a requested device missing\n",
-					      (*cur)->path);
-					fail = 1;
-					break;
-				}
-			}
-		}
-
-		if (!fail) {
-			size_t j = 0;
-
-			for (curdef = default_devices; curdef->path; curdef++, j++) {
-				int tree;
-				struct ujail_mount_attr attr = { .attr_set = MOUNT_ATTR_RDONLY };
-
-				held_fds[n_custom + j] = open(curdef->path, O_PATH | O_CLOEXEC);
-				if (held_fds[n_custom + j] < 0) {
-					WARNING("could not open default device %s; "
-						"it will be unavailable in the jail\n",
-						curdef->path);
-					continue;
-				}
-
-				tree = sys_open_tree(held_fds[n_custom + j], "", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH);
-				if (tree < 0) {
-					WARNING("open_tree() on default device %s failed; "
-						"it will be unavailable in the jail\n", curdef->path);
-					continue;
-				}
-				close(held_fds[n_custom + j]);
-				held_fds[n_custom + j] = tree;
-
-				if (sys_mount_setattr(tree, "", AT_EMPTY_PATH, &attr, sizeof(attr))) {
-					WARNING("mount_setattr() on default device %s failed; "
-						"it will be unavailable in the jail\n", curdef->path);
-					continue;
-				}
-
-				if (add_mount_fd(held_fds[n_custom + j], curdef->path, 0))
-					WARNING("could not queue bind-mount for default "
-						"device %s; it will be unavailable in "
-						"the jail\n", curdef->path);
-			}
-		}
-	}
-
 	jail_fs_set_userns((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1));
 
-	if (!fail && mount_all(jail_root)) {
+	if (mount_all(jail_root, jail_dev)) {
 		ERROR("mount_all() failed\n");
-		fail = 1;
-	}
-
-	for (i = 0; i < n_devices; i++)
-		if (held_fds && held_fds[i] >= 0)
-			close(held_fds[i]);
-	free(held_fds);
-
-	if (fail)
 		return -1;
 	}
 
@@ -1425,6 +1280,12 @@ static void free_and_exit(int ret)
 		cgroups_free();
 	}
 
+	if (!exit_from_child && jail_dev_staged) {
+		umount2(jail_dev, MNT_DETACH);
+		rmdir(jail_dev);
+		jail_dev_staged = false;
+	}
+
 	if (!exit_from_child && parent_ctx)
 		ubus_free(parent_ctx);
 
@@ -1439,15 +1300,16 @@ static void remask_after_unshare(void);
 static void remount_proc_sys_after_unshare(void);
 static void enter_jail_fs(void)
 {
-	char dirbuf[sizeof(jail_root) + 4];
-
-	snprintf(dirbuf, sizeof(dirbuf), "%s/old", jail_root);
-	if (mkdir(dirbuf, 0755)) {
-		ERROR("mkdir(%s) failed: %m\n", dirbuf);
+	if (chdir(jail_root)) {
+		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
 		free_and_exit(-1);
 	}
-	if (pivot_root(jail_root, dirbuf) == -1) {
-		ERROR("pivot_root(%s, %s) failed: %m\n", jail_root, dirbuf);
+	if (pivot_root(".", ".") == -1) {
+		ERROR("pivot_root(%s) failed: %m\n", jail_root);
+		free_and_exit(-1);
+	}
+	if (umount2(".", MNT_DETACH)) {
+		ERROR("umount2() of the old root failed: %m\n");
 		free_and_exit(-1);
 	}
 	if (chdir("/")) {
@@ -1455,23 +1317,6 @@ static void enter_jail_fs(void)
 		free_and_exit(-1);
 	}
 
-	snprintf(dirbuf, sizeof(dirbuf), "/old%s", jail_root);
-	umount2(dirbuf, MNT_DETACH);
-	rmdir(dirbuf);
-	if (opts.tmpoverlaysize) {
-		char tmpdirbuf[sizeof(tmpovdir) + 4];
-		snprintf(tmpdirbuf, sizeof(tmpdirbuf), "/old%s", tmpovdir);
-		umount2(tmpdirbuf, MNT_DETACH);
-		rmdir(tmpdirbuf);
-	}
-
-	umount2("/old", MNT_DETACH);
-	rmdir("/old");
-
-	if (create_devices()) {
-		ERROR("create_devices() failed\n");
-		free_and_exit(-1);
-	}
 	if (opts.ronly)
 		mount(NULL, "/", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
 
@@ -2040,6 +1885,7 @@ static void usage(void)
 	fprintf(stderr, "  -F\t\tjail has cgroups namespace\n");
 	fprintf(stderr, "  -r <file>\treadonly files that should be staged\n");
 	fprintf(stderr, "  -w <file>\twriteable files that should be staged\n");
+	fprintf(stderr, "  -V <src:dest>\tbind <src> at <dest> as a noexec,nosuid,nodev volume\n");
 	fprintf(stderr, "  -p\t\tjail has /proc\n");
 	fprintf(stderr, "  -s\t\tjail has /sys\n");
 	fprintf(stderr, "  -l\t\tjail has /dev/log\n");
@@ -2979,6 +2825,7 @@ static void post_start_hook(void)
 
 	uloop_end();
 	free_opts(false);
+	syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC);
 	if (jail_ptrace_seccomp() && ptrace(PTRACE_TRACEME, 0, 0, 0)) {
 		ERROR("PTRACE_TRACEME failed: %m\n");
 		exit(EXIT_FAILURE);
@@ -5258,6 +5105,7 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 				ERROR("exec: chdir(%s): %m\n", cwd);
 				_exit(127);
 			}
+			syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC);
 			if (env)
 				execvpe(args[0], args, env);
 			else
@@ -5412,7 +5260,11 @@ jail_writepid(pid_t pid)
 
 static int checkpath(const char *path)
 {
-	int dirfd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	struct open_how how = {
+		.flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+		.resolve = RESOLVE_NO_MAGICLINKS,
+	};
+	int dirfd = sys_openat2(AT_FDCWD, path, &how, sizeof(how));
 	if (dirfd < 0) {
 		ERROR("path %s open failed %m\n", path);
 		return -1;
@@ -5420,6 +5272,45 @@ static int checkpath(const char *path)
 	close(dirfd);
 
 	return 0;
+}
+
+static void prime_jail_mount(const char *path)
+{
+	int fd;
+
+	if (!path)
+		return;
+
+	fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (fd >= 0)
+		close(fd);
+}
+
+static int add_volume_source(const char *source)
+{
+	char **tmp;
+
+	tmp = realloc(volume_sources, (num_volume_sources + 1) * sizeof(*volume_sources));
+	if (!tmp)
+		return -ENOMEM;
+
+	volume_sources = tmp;
+	volume_sources[num_volume_sources] = strdup(source);
+	if (!volume_sources[num_volume_sources])
+		return -ENOMEM;
+
+	++num_volume_sources;
+	return 0;
+}
+
+static void add_volume(const char *source, const char *dest)
+{
+	char *real;
+
+	real = resolve_mount_source(source);
+	add_volume_source(real ? real : source);
+	add_mount_volume(real ? real : source, dest, 0);
+	free(real);
 }
 
 static struct ubus_method container_methods[] = {
@@ -5548,7 +5439,8 @@ int main(int argc, char **argv)
 			jail_join_ns(optarg);
 			break;
 		case 'r':
-			opts.namespace |= CLONE_NEWNS;
+			if (!opts.ocibundle)
+				opts.namespace |= CLONE_NEWNS;
 			tmp = strchr(optarg, ':');
 			if (tmp) {
 				*(tmp++) = '\0';
@@ -5558,7 +5450,8 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 'w':
-			opts.namespace |= CLONE_NEWNS;
+			if (!opts.ocibundle)
+				opts.namespace |= CLONE_NEWNS;
 			tmp = strchr(optarg, ':');
 			if (tmp) {
 				*(tmp++) = '\0';
@@ -5566,6 +5459,15 @@ int main(int argc, char **argv)
 			} else {
 				add_path_and_deps(optarg, 0, 0, 0);
 			}
+			break;
+		case 'V':
+			tmp = strchr(optarg, ':');
+			if (!tmp) {
+				ERROR("volume needs a src:dest pair: %s\n", optarg);
+				return -1;
+			}
+			*(tmp++) = '\0';
+			add_volume(optarg, tmp);
 			break;
 		case 'u':
 			opts.namespace |= CLONE_NEWNS;
@@ -6015,6 +5917,11 @@ static void post_main(struct uloop_timeout *t)
 			timens_fd = -1;
 		}
 
+		if ((opts.namespace & CLONE_NEWNS) && prepare_jail_dev()) {
+			ERROR("prepare_jail_dev() failed\n");
+			free_and_exit(EXIT_FAILURE);
+		}
+
 		if (opts.namespace & CLONE_NEWUSER) {
 			if (opts.overlaydir) {
 				if (chown(opts.overlaydir, opts.root_map_uid, opts.root_map_uid)) {
@@ -6096,6 +6003,11 @@ static void post_main(struct uloop_timeout *t)
 				cargs.cgroup = (__u64)init_cgroup_fd;
 			}
 		}
+
+		prime_jail_mount(opts.extroot);
+		prime_jail_mount(opts.overlaydir);
+		for (size_t i = 0; i < (size_t)num_volume_sources; i++)
+			prime_jail_mount(volume_sources[i]);
 
 		jail_process.pid = jail_clone3(&cargs);
 		if (init_cgroup_fd >= 0)

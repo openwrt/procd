@@ -16,12 +16,14 @@
 #include <fcntl.h>
 #include <sys/mount.h>
 #include <linux/mount.h>
+#include <linux/openat2.h>
 #include <libubox/blobmsg.h>
 
 #include "../container.h"
 
 #define JAIL_NOAFILE "/dev/.ujailnoafile"
 
+int sys_openat2(int dfd, const char *path, struct open_how *how, size_t size);
 int build_userns_fd(struct blob_attr *uidmappings, struct blob_attr *gidmappings);
 int jail_idmap_build(const char *extroot,
 		     struct blob_attr *uidmap, struct blob_attr *gidmap,
@@ -37,6 +39,8 @@ int add_mount(const char *source, const char *target, const char *filesystemtype
 int add_mount_inner(const char *source, const char *target, const char *filesystemtype,
 	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error);
 int add_mount_bind(const char *path, int readonly, int error);
+int add_mount_volume(const char *source, const char *target, int error);
+char *resolve_mount_source(const char *source);
 int add_mount_fd(int fd, const char *target, int error);
 int mask_path_now(const char *path);
 
@@ -76,7 +80,8 @@ static inline int add_path_and_deps(const char *path, int readonly, int error, i
 	return add_2paths_and_deps(path, path, readonly, error, lib);
 }
 
-int mount_all(const char *jailroot);
+void mount_stage_dev(const char *jail_dev);
+int mount_all(const char *jailroot, const char *jail_dev);
 void mount_list_init(void);
 void mount_free(void);
 void jail_fs_set_userns(bool enabled);
