@@ -216,6 +216,8 @@ static struct {
 	} ioprio;
 	unsigned long mdwe_flags;
 	struct landlock_config landlock;
+	bool private_ubus;
+	bool private_netifd;
 } opts;
 
 static struct blob_buf ocibuf;
@@ -881,6 +883,14 @@ static int prepare_jail_dev(void)
 	snprintf(path, sizeof(path), "%s/mqueue", jail_dev);
 	mkdir(path, 0755);
 
+	if ((opts.namespace & CLONE_NEWNET) && opts.private_netifd) {
+		snprintf(path, sizeof(path), "%s/resolv.conf.d", jail_dev);
+		mkdir(path, 0755);
+		snprintf(path, sizeof(path), "%s/resolv.conf", jail_dev);
+		if (symlink("/dev/resolv.conf.d/resolv.conf.auto", path))
+			WARNING("symlink() failed to create /dev/resolv.conf: %m\n");
+	}
+
 	if (opts.console) {
 		snprintf(path, sizeof(path), "%s/console", jail_dev);
 		consfd = creat(path, 0620);
@@ -1203,7 +1213,7 @@ static int build_jail_fs(void)
 			ERROR("mkdtemp(%s) failed: %m\n", jail_root);
 			return -1;
 		}
-		if (mount("tmpfs", tmpovdir, "tmpfs", MS_NOATIME,
+		if (mount("tmpfs", tmpovdir, "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID | MS_NODEV,
 			  mountoptsstr)) {
 			ERROR("failed to mount tmpfs for overlay (size=%s)\n", opts.tmpoverlaysize);
 			return -1;
@@ -1247,22 +1257,29 @@ static int build_jail_fs(void)
 	if (opts.console)
 		create_dev_console(jail_root);
 
-	/* make sure /etc/resolv.conf exists if in new network namespace */
-	if (opts.namespace & CLONE_NEWNET) {
-		char jailetc[PATH_MAX], jaillink[PATH_MAX];
+	if ((opts.namespace & CLONE_NEWNET) && opts.private_netifd) {
+		char jailetc[PATH_MAX], devresolv[PATH_MAX], etcresolv[PATH_MAX];
+		struct stat rcst;
+		int treefd;
 
-		snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
-		if (mkdir_p(jailetc, 0755)) {
-			ERROR("mkdir(%s) failed: %m\n", jailetc);
-			return -1;
+		snprintf(devresolv, PATH_MAX, "%s/dev/resolv.conf", jail_root);
+		snprintf(etcresolv, PATH_MAX, "%s/etc/resolv.conf", jail_root);
+		if (stat(etcresolv, &rcst) && (overlaydir || !opts.ronly)) {
+			snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
+			mkdir_p(jailetc, 0755);
+			close(creat(etcresolv, 0644));
 		}
-		snprintf(jaillink, PATH_MAX, "%s/etc/resolv.conf", jail_root);
-		if (overlaydir)
-			unlink(jaillink);
-
-		ret = symlink("../dev/resolv.conf.d/resolv.conf.auto", jaillink);
-		if (ret < 0)
-			WARNING("symlink() failed to create link to ../dev/resolv.conf.d/resolv.conf.auto");
+		if (!stat(etcresolv, &rcst)) {
+			treefd = sys_open_tree(AT_FDCWD, devresolv,
+					       OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_SYMLINK_NOFOLLOW);
+			if (treefd < 0) {
+				WARNING("open_tree(/dev/resolv.conf) failed: %m\n");
+			} else {
+				if (sys_move_mount(treefd, "", AT_FDCWD, etcresolv, MOVE_MOUNT_F_EMPTY_PATH))
+					WARNING("move_mount onto /etc/resolv.conf failed: %m\n");
+				close(treefd);
+			}
+		}
 	}
 
 	run_hooks(opts.hooks.createContainer, enter_jail_fs);
@@ -4281,6 +4298,12 @@ static int parseOCI(const char *jsonfile)
 					LANDLOCK_ACCESS_FS_REMOVE_DIR);
 				if (res)
 					goto errout;
+			} else if (!strcmp(name, "org.openwrt.procd.ubus")) {
+				opts.private_ubus = !strcmp(val, "true") || !strcmp(val, "1");
+			} else if (!strcmp(name, "org.openwrt.procd.netifd")) {
+				opts.private_netifd = !strcmp(val, "true") || !strcmp(val, "1");
+				if (opts.private_netifd)
+					opts.private_ubus = true;
 			} else if (!strcmp(name, "org.openwrt.cgroup.memory.pct")) {
 				pct = strtol(val, &pct_end, 10);
 				if (pct_end == val || pct < 1 || pct > 100) {
@@ -4301,6 +4324,13 @@ static int parseOCI(const char *jsonfile)
 		if (opts.landlock.n > 0)
 			opts.no_new_privs = 1;
 	}
+
+	if (opts.private_netifd && mount_is_defined("/etc/resolv.conf")) {
+		ERROR("bundle bind-mounts /etc/resolv.conf but the container has its own netifd\n");
+		res = EINVAL;
+		goto errout;
+	}
+
 errout:
 	blob_buf_free(&ocibuf);
 
@@ -5808,15 +5838,19 @@ static void post_main(struct uloop_timeout *t)
 			if (opts.setns.ns == -1) {
 				if (!(opts.namespace & CLONE_NEWNET)) {
 					add_mount_bind("/etc/resolv.conf", 1, 0);
-				} else {
-					/* new mount namespace to provide /dev/resolv.conf.d */
-					char hostdir[PATH_MAX];
+				} else if (opts.private_netifd) {
+					char hostdir[PATH_MAX], hostresolv[PATH_MAX];
+					int hostresolvfd;
 
 					snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
 					if (mkdir_p(hostdir, 0755)) {
 						ERROR("mkdir(%s) failed: %m\n", hostdir);
 						free_and_exit(-1);
 					}
+					snprintf(hostresolv, PATH_MAX, "%s/resolv.conf.auto", hostdir);
+					hostresolvfd = open(hostresolv, O_WRONLY | O_CREAT, 0644);
+					if (hostresolvfd >= 0)
+						close(hostresolvfd);
 					add_mount(hostdir, "/dev/resolv.conf.d", NULL,
 						MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, 0);
 				}

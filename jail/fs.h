@@ -72,6 +72,7 @@ int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mo
 #define AT_EMPTY_PATH 0x1000
 #endif
 int parseOCImount(struct blob_attr *msg);
+bool mount_is_defined(const char *target);
 int add_2paths_and_deps(const char *path, const char *path2, int readonly, int error, int lib);
 unsigned long detect_atime_flag(const char *mountpoint);
 

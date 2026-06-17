@@ -1044,6 +1044,15 @@ int parseOCImount(struct blob_attr *msg)
 	return ret;
 }
 
+bool mount_is_defined(const char *target)
+{
+	struct mount *m;
+
+	m = avl_find_element(&mounts, target, m, avl);
+
+	return m != NULL;
+}
+
 static void build_noafile(void) {
 	int fd;
 
