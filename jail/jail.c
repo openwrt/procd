@@ -48,6 +48,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <linux/filter.h>
+#include <linux/landlock.h>
 #include <linux/limits.h>
 #include <linux/nsfs.h>
 #include <linux/sched.h>
@@ -59,6 +60,7 @@
 #include "elf.h"
 #include "fs.h"
 #include "jail.h"
+#include "landlock.h"
 #include "log.h"
 #include "seccomp-oci.h"
 #include "cgroups.h"
@@ -194,6 +196,7 @@ static struct {
 		int priority;
 	} ioprio;
 	unsigned long mdwe_flags;
+	struct landlock_config landlock;
 } opts;
 
 static struct blob_buf ocibuf;
@@ -320,6 +323,7 @@ static void free_opts(bool parent) {
 	free(opts.uidmap);
 	free(opts.gidmap);
 	free(opts.annotations);
+	landlock_config_free(&opts.landlock);
 	free(opts.netdevices);
 	free(opts.extroot);
 	free(opts.overlaydir);
@@ -2684,6 +2688,11 @@ static void post_start_hook(void)
 	if (opts.cwd && chdir(opts.cwd))
 		free_and_exit(EXIT_FAILURE);
 
+	if (opts.landlock.n > 0 && landlock_apply(&opts.landlock)) {
+		ERROR("landlock_apply failed\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
 	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp))
 		free_and_exit(EXIT_FAILURE);
 
@@ -3986,6 +3995,31 @@ static int parseOCI(const char *jsonfile)
 					res = ENOTSUP;
 					goto errout;
 				}
+			} else if (!strcmp(name, "org.openwrt.ujail.landlock.ro")) {
+				res = landlock_config_add_paths(&opts.landlock, val,
+					LANDLOCK_ACCESS_FS_READ_FILE |
+					LANDLOCK_ACCESS_FS_READ_DIR);
+				if (res)
+					goto errout;
+			} else if (!strcmp(name, "org.openwrt.ujail.landlock.rx")) {
+				res = landlock_config_add_paths(&opts.landlock, val,
+					LANDLOCK_ACCESS_FS_READ_FILE |
+					LANDLOCK_ACCESS_FS_READ_DIR |
+					LANDLOCK_ACCESS_FS_EXECUTE);
+				if (res)
+					goto errout;
+			} else if (!strcmp(name, "org.openwrt.ujail.landlock.rw")) {
+				res = landlock_config_add_paths(&opts.landlock, val,
+					LANDLOCK_ACCESS_FS_READ_FILE |
+					LANDLOCK_ACCESS_FS_READ_DIR |
+					LANDLOCK_ACCESS_FS_WRITE_FILE |
+					LANDLOCK_ACCESS_FS_TRUNCATE |
+					LANDLOCK_ACCESS_FS_MAKE_REG |
+					LANDLOCK_ACCESS_FS_MAKE_DIR |
+					LANDLOCK_ACCESS_FS_REMOVE_FILE |
+					LANDLOCK_ACCESS_FS_REMOVE_DIR);
+				if (res)
+					goto errout;
 			} else if (!strcmp(name, "org.openwrt.cgroup.memory.pct")) {
 				pct = strtol(val, &pct_end, 10);
 				if (pct_end == val || pct < 1 || pct > 100) {
@@ -4002,6 +4036,9 @@ static int parseOCI(const char *jsonfile)
 				cgroups_set_memory_limit(memtotal * pct / 100);
 			}
 		}
+
+		if (opts.landlock.n > 0)
+			opts.no_new_privs = 1;
 	}
 errout:
 	blob_buf_free(&ocibuf);
