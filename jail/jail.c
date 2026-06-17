@@ -50,6 +50,7 @@
 #include <linux/filter.h>
 #include <linux/limits.h>
 #include <linux/nsfs.h>
+#include <linux/sched.h>
 #include <linux/securebits.h>
 #include <signal.h>
 #include <inttypes.h>
@@ -79,7 +80,6 @@
 #define CLONE_NEWTIME 0x00000080
 #endif
 
-#define STACK_SIZE	(1024 * 1024)
 #define OPT_ARGS	"cC:d:De:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
 
 #define OCI_VERSION_STRING "1.0.2"
@@ -191,7 +191,12 @@ extern int pivot_root(const char *new_root, const char *put_old);
 
 int debug = 0;
 
-static char child_stack[STACK_SIZE];
+static long jail_clone3(struct clone_args *args)
+{
+	return syscall(SYS_clone3, args, sizeof(*args));
+}
+
+static int jail_process_pidfd = -1;
 
 static struct ubus_context *parent_ctx;
 
@@ -1159,8 +1164,10 @@ static int build_jail_fs(void)
 static bool exit_from_child;
 static void free_and_exit(int ret)
 {
-	if (!exit_from_child && opts.ocibundle)
+	if (!exit_from_child && opts.ocibundle) {
+		cgroups_destroy();
 		cgroups_free();
+	}
 
 	if (!exit_from_child && parent_ctx)
 		ubus_free(parent_ctx);
@@ -1837,10 +1844,17 @@ static struct uloop_process jail_process = {
 	.cb = jail_process_handler,
 };
 
+static int jail_pidfd_send_signal(int sig)
+{
+	if (jail_process_pidfd < 0)
+		return kill(jail_process.pid, sig);
+	return syscall(SYS_pidfd_send_signal, jail_process_pidfd, sig, NULL, 0);
+}
+
 static void jail_process_timeout_cb(struct uloop_timeout *t)
 {
 	DEBUG("jail process failed to stop, sending SIGKILL\n");
-	kill(jail_process.pid, SIGKILL);
+	jail_pidfd_send_signal(SIGKILL);
 }
 
 static void jail_handle_signal(int signo)
@@ -1855,7 +1869,7 @@ static void jail_handle_signal(int signo)
 
 	if (jail_running) {
 		DEBUG("forwarding signal %d to the jailed process\n", signo);
-		kill(jail_process.pid, signo);
+		jail_pidfd_send_signal(signo);
 		/* set timeout to send SIGKILL jail process in case SIGTERM doesn't succeed */
 		if (signo == SIGTERM)
 			uloop_timeout_set(&jail_process_timeout, opts.term_timeout * 1000);
@@ -4129,13 +4143,14 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 		DEBUG("cgroup.kill unavailable (%d), falling back to per-pid kill\n", rc);
 	}
 
-	if (kill(jail_process.pid, sig) == 0)
+	if (jail_pidfd_send_signal(sig) == 0)
 		return 0;
 
 	switch (errno) {
 	case EINVAL: return UBUS_STATUS_INVALID_ARGUMENT;
 	case EPERM:  return UBUS_STATUS_PERMISSION_DENIED;
 	case ESRCH:  return UBUS_STATUS_NOT_FOUND;
+	case EBADF:  return UBUS_STATUS_UNKNOWN_ERROR;
 	}
 
 	return UBUS_STATUS_UNKNOWN_ERROR;
@@ -4707,6 +4722,9 @@ static void post_main(struct uloop_timeout *t)
 
 	parent_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
 
+	if (opts.ocibundle)
+		cgroups_create();
+
 	if (has_namespaces()) {
 		if (opts.namespace & CLONE_NEWNS) {
 			if (!opts.extroot && (opts.user || opts.group)) {
@@ -4852,7 +4870,24 @@ static void post_main(struct uloop_timeout *t)
 		 * CLONE_NEWUSER is excluded here; the child creates its own
 		 * later, in enter_userns(). See exec_jail() for why.
 		 */
-		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | (opts.namespace & ~(CLONE_NEWCGROUP | CLONE_NEWUSER | CLONE_NEWTIME)), NULL);
+		int init_cgroup_fd = -1;
+		struct clone_args cargs = {
+			.flags = (opts.namespace & ~(CLONE_NEWCGROUP | CLONE_NEWUSER | CLONE_NEWTIME)) | CLONE_PIDFD,
+			.pidfd = (__u64)(uintptr_t)&jail_process_pidfd,
+			.exit_signal = SIGCHLD,
+		};
+
+		if (opts.ocibundle) {
+			init_cgroup_fd = cgroups_open_dir();
+			if (init_cgroup_fd >= 0) {
+				cargs.flags |= CLONE_INTO_CGROUP;
+				cargs.cgroup = (__u64)init_cgroup_fd;
+			}
+		}
+
+		jail_process.pid = jail_clone3(&cargs);
+		if (init_cgroup_fd >= 0)
+			close(init_cgroup_fd);
 	} else {
 		jail_process.pid = fork();
 	}
@@ -4902,8 +4937,10 @@ static void post_main(struct uloop_timeout *t)
 		close(pipes[0]);
 		set_oom_score_adj();
 
-		if (opts.ocibundle)
-			cgroups_apply(jail_process.pid);
+		if (opts.ocibundle) {
+			cgroups_configure();
+			cgroups_attach_pid(jail_process.pid);
+		}
 
 		if (opts.namespace & CLONE_NEWNET)
 			jail_network_start(parent_ctx, opts.name, jail_process.pid);
@@ -5065,7 +5102,7 @@ static void post_poststart(void)
 
 	if (jail_running) {
 		DEBUG("killing jail process\n");
-		kill(jail_process.pid, SIGTERM);
+		jail_pidfd_send_signal(SIGTERM);
 		uloop_timeout_set(&jail_process_timeout, 1000);
 		uloop_run();
 	}
@@ -5085,6 +5122,10 @@ static void poststop(void) {
 
 static void post_poststop(void)
 {
+	if (jail_process_pidfd >= 0) {
+		close(jail_process_pidfd);
+		jail_process_pidfd = -1;
+	}
 	free_opts(true);
 	if (parent_ctx)
 		ubus_free(parent_ctx);

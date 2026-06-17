@@ -168,13 +168,39 @@ int cgroups_reclaim(int64_t bytes, int32_t swappiness)
 	return ret;
 }
 
-void cgroups_apply(pid_t pid)
+int cgroups_attach_pid(pid_t pid)
+{
+	char *ent;
+	int fd, ret = 0;
+	size_t len;
+
+	if (!cgroup_path)
+		return -ENODEV;
+
+	len = strlen(cgroup_path) + strlen("/cgroup.procs") + 1;
+	ent = malloc(len);
+	if (!ent)
+		return -ENOMEM;
+
+	snprintf(ent, len, "%s/cgroup.procs", cgroup_path);
+	fd = open(ent, O_WRONLY);
+	if (fd < 0) {
+		ret = -errno;
+		free(ent);
+		return ret;
+	}
+
+	if (dprintf(fd, "%d", pid) < 0)
+		ret = -errno;
+
+	close(fd);
+	free(ent);
+	return ret;
+}
+
+static void cgroups_compute_subtree_control(char *out, size_t outlen)
 {
 	struct cgval *valp;
-	char *cdir, *ent;
-	int fd;
-	size_t maxlen = strlen("cgroup.subtree_control");
-
 	bool cpuset = false,
 	     cpu = false,
 	     hugetlb = false,
@@ -182,17 +208,12 @@ void cgroups_apply(pid_t pid)
 	     memory = false,
 	     pids = false,
 	     rdma = false;
+	char *p;
 
-	char subtree_control[64] = { 0 };
+	out[0] = '\0';
 
-	DEBUG("using cgroup path %s\n", cgroup_path);
-	mkdir_p(cgroup_path, 0700);
-
-	/* find which controllers need to be enabled */
 	avl_for_each_element(&cgvals, valp, avl) {
-		ent = (char *)valp->avl.key;
-		if (strlen(ent) > maxlen)
-			maxlen = strlen(ent);
+		const char *ent = (const char *)valp->avl.key;
 
 		if (!strncmp("cpuset.", ent, 7))
 			cpuset = true;
@@ -210,36 +231,71 @@ void cgroups_apply(pid_t pid)
 			rdma = true;
 	}
 
-	maxlen += strlen(cgroup_path) + 2;
-
 	if (cpuset)
-		strcat(subtree_control, "+cpuset ");
+		strncat(out, "+cpuset ", outlen - strlen(out) - 1);
 
 	if (cpu)
-		strcat(subtree_control, "+cpu ");
+		strncat(out, "+cpu ", outlen - strlen(out) - 1);
 
 	if (hugetlb)
-		strcat(subtree_control, "+hugetlb ");
+		strncat(out, "+hugetlb ", outlen - strlen(out) - 1);
 
 	if (io)
-		strcat(subtree_control, "+io ");
+		strncat(out, "+io ", outlen - strlen(out) - 1);
 
 	if (memory)
-		strcat(subtree_control, "+memory ");
+		strncat(out, "+memory ", outlen - strlen(out) - 1);
 
 	if (pids)
-		strcat(subtree_control, "+pids ");
+		strncat(out, "+pids ", outlen - strlen(out) - 1);
 
 	if (rdma)
-		strcat(subtree_control, "+rdma ");
+		strncat(out, "+rdma ", outlen - strlen(out) - 1);
 
-	/* remove trailing space (length is > 0) */
-	ent = strchr(subtree_control, '\0');
-	if (ent > subtree_control) {
-		ent -= 1;
-		*ent = '\0';
+	p = strchr(out, '\0');
+	if (p > out && p[-1] == ' ')
+		p[-1] = '\0';
+}
+
+void cgroups_destroy(void)
+{
+	char *sep;
+
+	if (!cgroup_path)
+		return;
+
+	cgroups_kill_all();
+
+	(void)rmdir(cgroup_path);
+
+	sep = strrchr(cgroup_path, '/');
+	if (sep && sep != cgroup_path) {
+		*sep = '\0';
+		(void)rmdir(cgroup_path);
+		*sep = '/';
+	}
+}
+
+void cgroups_create(void)
+{
+	char subtree_control[64] = { 0 };
+	char *cdir, *ent;
+	size_t maxlen;
+	int fd;
+
+	if (!cgroup_path)
+		return;
+
+	DEBUG("creating cgroup %s\n", cgroup_path);
+	mkdir_p(cgroup_path, 0700);
+
+	cgroups_compute_subtree_control(subtree_control, sizeof(subtree_control));
+	if (!subtree_control[0]) {
+		DEBUG("no cgroup controllers requested, skipping subtree_control walk\n");
+		return;
 	}
 
+	maxlen = strlen(cgroup_path) + strlen("/cgroup.subtree_control") + 1;
 	ent = malloc(maxlen);
 	if (!ent)
 		exit(ENOMEM);
@@ -252,18 +308,38 @@ void cgroups_apply(pid_t pid)
 		DEBUG(" * %s\n", ent);
 		if ((fd = open(ent, O_WRONLY)) < 0) {
 			ERROR("can't open %s: %m\n", ent);
+			*cdir = '/';
 			continue;
 		}
-
-		if (write(fd, subtree_control, strlen(subtree_control)) == -1) {
+		if (write(fd, subtree_control, strlen(subtree_control)) == -1)
 			ERROR("can't write to %s: %m\n", ent);
-			close(fd);
-			continue;
-		}
-
 		close(fd);
 		*cdir = '/';
 	}
+	free(ent);
+}
+
+void cgroups_configure(void)
+{
+	struct cgval *valp;
+	char *ent;
+	size_t maxlen = 0;
+	int fd, dirfd;
+
+	if (!cgroup_path)
+		return;
+
+	avl_for_each_element(&cgvals, valp, avl) {
+		size_t klen = strlen((char *)valp->avl.key);
+
+		if (klen > maxlen)
+			maxlen = klen;
+	}
+	maxlen += strlen(cgroup_path) + 2;
+
+	ent = malloc(maxlen);
+	if (!ent)
+		exit(ENOMEM);
 
 	avl_for_each_element(&cgvals, valp, avl) {
 		DEBUG("applying cgroup2 %s=\"%s\"\n", (char *)valp->avl.key, valp->val);
@@ -273,30 +349,26 @@ void cgroups_apply(pid_t pid)
 			ERROR("can't open %s: %m\n", ent);
 			continue;
 		}
-		if (dprintf(fd, "%s", valp->val) < 0) {
+		if (dprintf(fd, "%s", valp->val) < 0)
 			ERROR("can't write to %s: %m\n", ent);
-		};
 		close(fd);
 	}
+	free(ent);
 
-	int dirfd = open(cgroup_path, O_DIRECTORY);
+	dirfd = open(cgroup_path, O_DIRECTORY);
 	if (dirfd < 0) {
 		ERROR("can't open %s: %m\n", cgroup_path);
 	} else {
 		attach_cgroups_ebpf(dirfd);
 		close(dirfd);
 	}
+}
 
-	snprintf(ent, maxlen, "%s/%s", cgroup_path, "cgroup.procs");
-	fd = open(ent, O_WRONLY);
-	if (fd < 0) {
-		ERROR("can't open %s: %m\n", cgroup_path);
-	} else {
-		dprintf(fd, "%d", pid);
-		close(fd);
-	}
-
-	free(ent);
+void cgroups_apply(pid_t pid)
+{
+	cgroups_create();
+	cgroups_configure();
+	cgroups_attach_pid(pid);
 }
 
 enum {
@@ -806,6 +878,13 @@ int cgroups_open_attr(const char *attr)
 
 	snprintf(path, sizeof(path), "%s/%s", cgroup_path, attr);
 	return open(path, O_RDONLY | O_CLOEXEC);
+}
+
+int cgroups_open_dir(void)
+{
+	if (!cgroup_path)
+		return -1;
+	return open(cgroup_path, O_PATH | O_DIRECTORY | O_CLOEXEC);
 }
 
 void cgroups_set_memory_limit(int64_t bytes)
