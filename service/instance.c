@@ -877,9 +877,9 @@ instance_exit(struct uloop_process *p, int ret)
 								in->srv->name, in->name, in->respawn_count, runtime);
 			in->restart = in->respawn = 0;
 			in->halt = 1;
-			service_event("instance.fail", in->srv->name, in->name);
+			service_event_instance_exit("instance.fail", in);
 		} else {
-			service_event("instance.respawn", in->srv->name, in->name);
+			service_event_instance_exit("instance.respawn", in);
 			uloop_timeout_set(&in->timeout, in->respawn_timeout * 1000);
 		}
 	}

@@ -1152,6 +1152,28 @@ void service_event(const char *type, const char *service, const char *instance)
 	ubus_event_bcast(type, "service", service, "instance", instance);
 }
 
+void service_event_instance_exit(const char *type, struct service_instance *in)
+{
+	if (!ctx)
+		return;
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "service", in->srv->name);
+	blobmsg_add_string(&b, "instance", in->name);
+	blobmsg_add_u32(&b, "pid", in->proc.pid);
+	blobmsg_add_u32(&b, "exit_code", in->exit_code);
+	blobmsg_add_u32(&b, "respawn_count", in->respawn_count);
+	if (in->command) {
+		struct blob_attr *cur;
+		int rem;
+		void *a = blobmsg_open_array(&b, "command");
+		blobmsg_for_each_attr(cur, in->command, rem)
+			blobmsg_add_string(&b, NULL, blobmsg_get_string(cur));
+		blobmsg_close_array(&b, a);
+	}
+	ubus_notify(ctx, &main_object, type, b.head, -1);
+}
+
 static struct ubus_method container_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
