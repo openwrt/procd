@@ -43,6 +43,7 @@
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
 
+#include "../jail/seccomp-oci.h"
 #include "../syscall-names.h"
 
 #define _offsetof(a, b) __builtin_offsetof(a,b)
@@ -86,7 +87,7 @@ static struct tracee tracer;
 static int syscall_count[SYSCALL_COUNT];
 static int violation_count;
 static struct blob_buf b;
-static int debug;
+int debug;
 char *json = NULL;
 int ptrace_restart;
 
@@ -362,14 +363,10 @@ int main(int argc, char **argv, char **envp)
 			newenv = 1;
 			break;
 		case SECCOMP_TRACE:
-			preload = "/lib/libpreload-seccomp.so";
-			newenv = 2;
-			if (asprintf(&_envp[1], "SECCOMP_FILE=%s", json ? json : "") < 0)
-				ULOG_ERR("failed to allocate SECCOMP_FILE env: %m\n");
-
-			kill(getpid(), SIGSTOP);
-			break;
+			ULOG_ERR("seccomp-trace is no longer supported\n");
+			return -1;
 		}
+
 		if (asprintf(&_envp[0], "LD_PRELOAD=%s%s%s", preload,
 			     old_preload ? ":" : "",
 			      old_preload ? old_preload : "") < 0)

@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/personality.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
@@ -58,6 +59,7 @@
 #include <signal.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <sys/ptrace.h>
 
 #include "capabilities.h"
 #include "elf.h"
@@ -66,6 +68,7 @@
 #include "landlock.h"
 #include "log.h"
 #include "seccomp-oci.h"
+#include "seccomp-inject.h"
 #include "cgroups.h"
 #include "netifd.h"
 
@@ -125,6 +128,10 @@ static struct {
 	char *cwd;
 	char *seccomp;
 	struct sock_fprog *ociseccomp;
+	struct sock_fprog *ociseccomp_linker;
+	struct sock_fprog *ociseccomp_init;
+	struct sock_fprog *ociseccomp_delta_entry;
+	struct sock_fprog *ociseccomp_delta_main;
 	char *capabilities;
 	struct jail_capset capset;
 	char *user;
@@ -318,6 +325,26 @@ static void free_opts(bool parent) {
 		if (opts.ociseccomp) {
 			free(opts.ociseccomp->filter);
 			free(opts.ociseccomp);
+		}
+
+		if (opts.ociseccomp_linker) {
+			free(opts.ociseccomp_linker->filter);
+			free(opts.ociseccomp_linker);
+		}
+
+		if (opts.ociseccomp_init) {
+			free(opts.ociseccomp_init->filter);
+			free(opts.ociseccomp_init);
+		}
+
+		if (opts.ociseccomp_delta_entry) {
+			free(opts.ociseccomp_delta_entry->filter);
+			free(opts.ociseccomp_delta_entry);
+		}
+
+		if (opts.ociseccomp_delta_main) {
+			free(opts.ociseccomp_delta_main->filter);
+			free(opts.ociseccomp_delta_main);
 		}
 
 		free_oci_envp(opts.jail_argv);
@@ -1917,31 +1944,14 @@ static int apply_rlimits(void)
 }
 
 #define MAX_ENVP	64
-static char** build_envp(const char *seccomp, char **ocienvp)
+static char** build_envp(char **ocienvp)
 {
 	static char *envp[MAX_ENVP];
-	static char preload_var[PATH_MAX];
-	static char seccomp_var[PATH_MAX];
-	static char seccomp_debug_var[20];
 	static char debug_var[] = "LD_DEBUG=all";
 	static char container_var[] = "container=ujail";
-	const char *preload_lib = find_lib("libpreload-seccomp.so");
 	char **addenv;
 
 	int count = 0;
-
-	if (seccomp && !preload_lib) {
-		ERROR("failed to add preload-lib to env\n");
-		return NULL;
-	}
-	if (seccomp) {
-		snprintf(seccomp_var, sizeof(seccomp_var), "SECCOMP_FILE=%s", seccomp);
-		envp[count++] = seccomp_var;
-		snprintf(seccomp_debug_var, sizeof(seccomp_debug_var), "SECCOMP_DEBUG=%2d", debug);
-		envp[count++] = seccomp_debug_var;
-		snprintf(preload_var, sizeof(preload_var), "LD_PRELOAD=%s", preload_lib);
-		envp[count++] = preload_var;
-	}
 
 	envp[count++] = container_var;
 
@@ -1957,6 +1967,54 @@ static char** build_envp(const char *seccomp, char **ocienvp)
 		}
 	}
 	return envp;
+}
+
+static int build_oci_seccomp(struct blob_attr *msg)
+{
+	opts.ociseccomp = parseOCIlinuxseccomp(msg, NULL);
+	if (!opts.ociseccomp)
+		return -1;
+
+	if (!seccomp_profile_covers(opts.ociseccomp, seccomp_init_base)) {
+		opts.ociseccomp_init = parseOCIlinuxseccomp(msg, seccomp_init_base);
+		if (!opts.ociseccomp_init)
+			return -1;
+	}
+
+	if (!seccomp_profile_covers(opts.ociseccomp, seccomp_linker_base)) {
+		opts.ociseccomp_linker = parseOCIlinuxseccomp(msg, seccomp_linker_base);
+		if (!opts.ociseccomp_linker)
+			return -1;
+
+		opts.ociseccomp_delta_entry = seccomp_deny_delta(seccomp_loader_files,
+				opts.ociseccomp);
+		opts.ociseccomp_delta_main = seccomp_deny_delta(seccomp_init_base,
+				opts.ociseccomp);
+	}
+
+	return 0;
+}
+
+static int seccomp_compile_file(const char *json_path)
+{
+	struct blob_buf b = { 0 };
+	int rc;
+
+	blob_buf_init(&b, 0);
+	if (!blobmsg_add_json_from_file(&b, json_path)) {
+		ERROR("seccomp: failed to load %s\n", json_path);
+		blob_buf_free(&b);
+		return -1;
+	}
+
+	rc = build_oci_seccomp(b.head);
+	blob_buf_free(&b);
+	if (rc) {
+		ERROR("seccomp: failed to parse %s\n", json_path);
+		return -1;
+	}
+
+	return 0;
 }
 
 static void usage(void)
@@ -2896,7 +2954,7 @@ static void post_start_hook(void)
 		free_and_exit(EXIT_FAILURE);
 	}
 
-	char **envp = build_envp(opts.seccomp, opts.envp);
+	char **envp = build_envp(opts.envp);
 	if (!envp)
 		free_and_exit(EXIT_FAILURE);
 
@@ -2908,12 +2966,18 @@ static void post_start_hook(void)
 		free_and_exit(EXIT_FAILURE);
 	}
 
-	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp, opts.name, opts.ocibundle))
+	if (opts.ociseccomp && seccomp_oci_needs_inproc() &&
+	    applyOCIlinuxseccomp(opts.ociseccomp_linker ?: opts.ociseccomp, opts.name, opts.ocibundle))
 		free_and_exit(EXIT_FAILURE);
 
 	uloop_end();
 	free_opts(false);
-	INFO("exec-ing %s\n", *opts.jail_argv);
+	if (opts.ociseccomp && !seccomp_oci_needs_inproc() &&
+	    ptrace(PTRACE_TRACEME, 0, 0, 0)) {
+		ERROR("PTRACE_TRACEME failed: %m\n");
+		exit(EXIT_FAILURE);
+	}
+	DEBUG("exec-ing %s\n", *opts.jail_argv);
 	if (opts.envp) { /* respect PATH if potentially set in ENV */
 		environ = envp;
 		execvpe(*opts.jail_argv, opts.jail_argv, envp);
@@ -4106,8 +4170,7 @@ static int parseOCIlinux(struct blob_attr *msg)
 	}
 
 	if (tb[OCI_LINUX_SECCOMP]) {
-		opts.ociseccomp = parseOCIlinuxseccomp(tb[OCI_LINUX_SECCOMP]);
-		if (!opts.ociseccomp)
+		if (build_oci_seccomp(tb[OCI_LINUX_SECCOMP]))
 			return EINVAL;
 	}
 
@@ -5754,8 +5817,9 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (opts.namespace && opts.seccomp && add_path_and_deps("libpreload-seccomp.so", 1, -1, 1)) {
-		ERROR("failed to load libpreload-seccomp.so\n");
+	if (opts.seccomp && !opts.ociseccomp &&
+	    seccomp_compile_file(opts.seccomp)) {
+		ERROR("failed to compile seccomp filter %s\n", opts.seccomp);
 		opts.seccomp = 0;
 		if (opts.require_jail) {
 			ret=-1;
@@ -6218,6 +6282,145 @@ static void post_create_runtime(void)
 		pipe_send_start_container(NULL);
 }
 
+static bool seccomp_target_is_static(pid_t pid)
+{
+	unsigned long pair[2];
+	bool dynamic = false;
+	char path[32];
+	FILE *f;
+
+	snprintf(path, sizeof(path), "/proc/%d/auxv", (int)pid);
+	f = fopen(path, "rb");
+	if (!f)
+		return false;
+
+	while (fread(pair, sizeof(pair), 1, f) == 1) {
+		if (pair[0] == 0)
+			break;
+		if (pair[0] == 7 && pair[1])
+			dynamic = true;
+	}
+	fclose(f);
+	return !dynamic;
+}
+
+static bool seccomp_main_trackable(pid_t pid)
+{
+	unsigned long at_entry, lsm;
+	int main_argidx;
+
+	if (seccomp_marker_addrs(pid, &at_entry, &lsm, &main_argidx))
+		return false;
+
+	return lsm != 0;
+}
+
+static int jail_seccomp_handshake(void)
+{
+	int status, mrc;
+
+	if (!opts.ociseccomp || seccomp_oci_needs_inproc())
+		return 0;
+
+	while (waitpid(jail_process.pid, &status, 0) < 0) {
+		if (errno == EINTR)
+			continue;
+		ERROR("seccomp-inject: waitpid: %m\n");
+		return -1;
+	}
+
+	if (!WIFSTOPPED(status)) {
+		ERROR("seccomp-inject: jail exited before entrypoint exec\n");
+		uloop_process_delete(&jail_process);
+		jail_process_handler(&jail_process, status);
+		return -1;
+	}
+
+	if (seccomp_target_is_static(jail_process.pid)) {
+		if (opts.ociseccomp_init &&
+		    seccomp_main_trackable(jail_process.pid)) {
+			if (seccomp_inject(jail_process.pid, opts.ociseccomp_init)) {
+				ERROR("seccomp-inject: failed to arm init filter\n");
+				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+				return -1;
+			}
+			if (seccomp_run_to_main(jail_process.pid)) {
+				ERROR("seccomp-inject: failed to reach main\n");
+				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+				return -1;
+			}
+			if (opts.ociseccomp_delta_main &&
+			    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_main)) {
+				ERROR("seccomp-inject: failed to arm main delta\n");
+				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+				return -1;
+			}
+		} else if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
+			ERROR("seccomp-inject: failed to arm filter\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+		if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
+			ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
+			return -1;
+		}
+		return 0;
+	}
+
+	if (!opts.ociseccomp_linker) {
+		if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
+			ERROR("seccomp-inject: failed to arm filter\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+		if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
+			ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
+			return -1;
+		}
+		return 0;
+	}
+
+	if (seccomp_inject(jail_process.pid, opts.ociseccomp_linker)) {
+		ERROR("seccomp-inject: failed to arm linker filter\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	if (seccomp_run_to_entry(jail_process.pid)) {
+		ERROR("seccomp-inject: failed to reach entry point\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	if (opts.ociseccomp_delta_entry &&
+	    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_entry)) {
+		ERROR("seccomp-inject: failed to arm entry delta\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	mrc = seccomp_run_to_main_from_entry(jail_process.pid);
+	if (mrc < 0) {
+		ERROR("seccomp-inject: failed to reach main\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	if (opts.ociseccomp_delta_main &&
+	    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_main)) {
+		ERROR("seccomp-inject: failed to arm main delta\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
+		ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
+		return -1;
+	}
+
+	return 0;
+}
+
 static void pipe_send_start_container(struct uloop_timeout *t)
 {
 	char sig_buf[1];
@@ -6229,6 +6432,9 @@ static void pipe_send_start_container(struct uloop_timeout *t)
 		free_and_exit(-1);
 	}
 	close(pipes[3]);
+
+	if (jail_seccomp_handshake())
+		free_and_exit(-1);
 
 	run_hooks(opts.hooks.poststart, post_poststart);
 }
