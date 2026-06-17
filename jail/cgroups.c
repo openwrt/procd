@@ -101,6 +101,63 @@ void cgroups_free(void)
 	}
 }
 
+static int cgroups_write_attr(const char *attr, const char *val, size_t vlen)
+{
+	char *ent;
+	int fd, ret = 0;
+	size_t len;
+
+	if (!cgroup_path)
+		return -ENODEV;
+
+	len = strlen(cgroup_path) + 1 + strlen(attr) + 1;
+	ent = malloc(len);
+	if (!ent)
+		return -ENOMEM;
+
+	snprintf(ent, len, "%s/%s", cgroup_path, attr);
+	fd = open(ent, O_WRONLY);
+	if (fd < 0) {
+		ret = -errno;
+		free(ent);
+		return ret;
+	}
+
+	if (write(fd, val, vlen) < 0)
+		ret = -errno;
+
+	close(fd);
+	free(ent);
+	return ret;
+}
+
+int cgroups_reclaim(int64_t bytes, int32_t swappiness)
+{
+	char val[64];
+	int len, ret;
+	int attempt;
+
+	if (bytes < 0)
+		return -EINVAL;
+
+	if (swappiness >= 0)
+		len = snprintf(val, sizeof(val), "%" PRId64 " swappiness=%" PRId32,
+			       bytes, swappiness);
+	else
+		len = snprintf(val, sizeof(val), "%" PRId64, bytes);
+	if (len < 0 || len >= (int)sizeof(val))
+		return -EINVAL;
+
+	for (attempt = 0; attempt < 2; ++attempt) {
+		ret = cgroups_write_attr("memory.reclaim", val, len);
+		if (ret != -EINTR)
+			break;
+	}
+	if (ret == -ENOENT)
+		ret = -ENODEV;
+	return ret;
+}
+
 void cgroups_apply(pid_t pid)
 {
 	struct cgval *valp;
@@ -694,6 +751,52 @@ static const struct blobmsg_policy oci_linux_cgroups_memory_policy[] = {
 	[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY] = { "useHierarchy", BLOBMSG_TYPE_BOOL },
 	[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE] = { "checkBeforeUpdate", BLOBMSG_TYPE_BOOL },
 };
+
+static int64_t read_int64_file(const char *path)
+{
+	char buf[32];
+	char *end;
+	int64_t v;
+	int fd;
+	ssize_t n;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	do {
+		n = read(fd, buf, sizeof(buf) - 1);
+	} while (n < 0 && errno == EINTR);
+	close(fd);
+	if (n <= 0)
+		return -1;
+	buf[n] = '\0';
+	v = strtoll(buf, &end, 10);
+	if (end == buf || (*end != '\0' && *end != '\n'))
+		return -1;
+	return v;
+}
+
+int64_t cgroups_read_int64(const char *attr)
+{
+	char path[PATH_MAX];
+
+	if (!cgroup_path)
+		return -1;
+
+	snprintf(path, sizeof(path), "%s/%s", cgroup_path, attr);
+	return read_int64_file(path);
+}
+
+int cgroups_open_attr(const char *attr)
+{
+	char path[PATH_MAX];
+
+	if (!cgroup_path)
+		return -1;
+
+	snprintf(path, sizeof(path), "%s/%s", cgroup_path, attr);
+	return open(path, O_RDONLY | O_CLOEXEC);
+}
 
 void cgroups_set_memory_limit(int64_t bytes)
 {

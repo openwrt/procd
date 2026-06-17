@@ -14,9 +14,15 @@
 #ifndef _JAIL_CGROUPS_H
 #define _JAIL_CGROUPS_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 void cgroups_init(const char *p);
 int parseOCIlinuxcgroups(struct blob_attr *msg);
 void cgroups_apply(pid_t pid);
+int cgroups_reclaim(int64_t bytes, int32_t swappiness);
+int64_t cgroups_read_int64(const char *attr);
+int cgroups_open_attr(const char *attr);
 void cgroups_free(void);
 void cgroups_prepare(void);
 void cgroups_set_memory_limit(int64_t bytes);

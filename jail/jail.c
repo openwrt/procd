@@ -4032,8 +4032,45 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_add_string(&bb, "id", opts.name);
 	blobmsg_add_string(&bb, "status", statusstr);
 	if (jail_oci_state == OCI_STATE_CREATED ||
-	    jail_oci_state == OCI_STATE_RUNNING)
+	    jail_oci_state == OCI_STATE_RUNNING) {
+		int64_t v;
+
 		blobmsg_add_u32(&bb, "pid", jail_process.pid);
+
+		v = cgroups_read_int64("memory.peak");
+		if (v >= 0)
+			blobmsg_add_u64(&bb, "memoryPeak", (uint64_t)v);
+		v = cgroups_read_int64("memory.swap.peak");
+		if (v >= 0)
+			blobmsg_add_u64(&bb, "memorySwapPeak", (uint64_t)v);
+		v = cgroups_read_int64("pids.peak");
+		if (v >= 0)
+			blobmsg_add_u64(&bb, "pidsPeak", (uint64_t)v);
+
+		int events_fd = cgroups_open_attr("memory.events.local");
+		if (events_fd >= 0) {
+			char ebuf[1024], *line, *next;
+			ssize_t en = read(events_fd, ebuf, sizeof(ebuf) - 1);
+
+			close(events_fd);
+			if (en > 0) {
+				void *sub = blobmsg_open_table(&bb, "memoryEventsLocal");
+
+				ebuf[en] = '\0';
+				next = ebuf;
+				while ((line = strsep(&next, "\n"))) {
+					char *space = strchr(line, ' ');
+
+					if (!space)
+						continue;
+					*space = '\0';
+					blobmsg_add_u64(&bb, line,
+							strtoull(space + 1, NULL, 10));
+				}
+				blobmsg_close_table(&bb, sub);
+			}
+		}
+	}
 
 	blobmsg_add_string(&bb, "bundle", opts.ocibundle);
 
@@ -4083,6 +4120,58 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_UNKNOWN_ERROR;
 }
 
+enum {
+	CONTAINER_RECLAIM_ATTR_BYTES,
+	CONTAINER_RECLAIM_ATTR_SWAPPINESS,
+	__CONTAINER_RECLAIM_ATTR_MAX,
+};
+
+static const struct blobmsg_policy container_reclaim_attrs[__CONTAINER_RECLAIM_ATTR_MAX] = {
+	[CONTAINER_RECLAIM_ATTR_BYTES]      = { "bytes",      BLOBMSG_CAST_INT64 },
+	[CONTAINER_RECLAIM_ATTR_SWAPPINESS] = { "swappiness", BLOBMSG_TYPE_INT32 },
+};
+
+static int
+container_handle_reclaim(struct ubus_context *ctx, struct ubus_object *obj,
+			 struct ubus_request_data *req, const char *method,
+			 struct blob_attr *msg)
+{
+	struct blob_attr *tb[__CONTAINER_RECLAIM_ATTR_MAX];
+	int64_t bytes;
+	int32_t swappiness = -1;
+	int rc;
+
+	if (jail_oci_state != OCI_STATE_CREATED &&
+	    jail_oci_state != OCI_STATE_RUNNING)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	if (!msg)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	blobmsg_parse(container_reclaim_attrs, __CONTAINER_RECLAIM_ATTR_MAX, tb,
+		      blobmsg_data(msg), blobmsg_data_len(msg));
+	if (!tb[CONTAINER_RECLAIM_ATTR_BYTES])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	bytes = blobmsg_cast_s64(tb[CONTAINER_RECLAIM_ATTR_BYTES]);
+	if (tb[CONTAINER_RECLAIM_ATTR_SWAPPINESS]) {
+		uint32_t s = blobmsg_get_u32(tb[CONTAINER_RECLAIM_ATTR_SWAPPINESS]);
+		if (s > 200)
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		swappiness = (int32_t)s;
+	}
+
+	rc = cgroups_reclaim(bytes, swappiness);
+	if (rc == 0)
+		return UBUS_STATUS_OK;
+	if (rc == -EAGAIN)
+		return UBUS_STATUS_TIMEOUT;
+	if (rc == -EINVAL)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	if (rc == -ENODEV)
+		return UBUS_STATUS_NOT_SUPPORTED;
+	return UBUS_STATUS_UNKNOWN_ERROR;
+}
+
 static int
 jail_writepid(pid_t pid)
 {
@@ -4122,6 +4211,7 @@ static struct ubus_method container_methods[] = {
 	UBUS_METHOD_NOARG("start", handle_start),
 	UBUS_METHOD_NOARG("state", handle_state),
 	UBUS_METHOD("kill", container_handle_kill, container_kill_attrs),
+	UBUS_METHOD("reclaim", container_handle_reclaim, container_reclaim_attrs),
 };
 
 static struct ubus_object_type container_object_type =
