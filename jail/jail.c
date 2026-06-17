@@ -288,6 +288,7 @@ static void free_opts(bool parent) {
 static int mount_overlay(char *jail_root, char *overlaydir) {
 	char *upperdir, *workdir, *optsstr, *upperetc, *upperresolvconf;
 	const char mountoptsformat[] = "lowerdir=%s,upperdir=%s,workdir=%s";
+	const char mountoptsformat_userns[] = "lowerdir=%s,upperdir=%s,workdir=%s,userxattr";
 	int ret = -1, fd;
 
 	if (asprintf(&upperdir, "%s%s", overlaydir, "/upper") < 0)
@@ -296,7 +297,9 @@ static int mount_overlay(char *jail_root, char *overlaydir) {
 	if (asprintf(&workdir, "%s%s", overlaydir, "/work") < 0)
 		goto upper_printf;
 
-	if (asprintf(&optsstr, mountoptsformat, jail_root, upperdir, workdir) < 0)
+	if (asprintf(&optsstr,
+		     (opts.namespace & CLONE_NEWUSER) ? mountoptsformat_userns : mountoptsformat,
+		     jail_root, upperdir, workdir) < 0)
 		goto work_printf;
 
 	if (mkdir_p(upperdir, 0755) || mkdir_p(workdir, 0755))
