@@ -394,6 +394,7 @@ static int usage(void) {
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
 	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
+	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
 	printf("\tresume <conf>\t\t\t\tthaw a previously paused container <conf>\n");
 	printf("\texec <conf> [--process <file>] [-d] [-p <pid-file>] [-- cmd args]\n");
@@ -417,6 +418,7 @@ enum {
 	CONF_INITENV,
 	CONF_HOSTS_FILE,
 	CONF_PROVISION,
+	CONF_ORIGIN,
 	__CONF_MAX,
 };
 
@@ -435,6 +437,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_INITENV] = { .name = "initenv", .type = BLOBMSG_TYPE_TABLE },
 	[CONF_HOSTS_FILE] = { .name = "hosts-file", .type = BLOBMSG_TYPE_STRING },
 	[CONF_PROVISION] = { .name = "provision", .type = BLOBMSG_TYPE_ARRAY },
+	[CONF_ORIGIN] = { .name = "origin", .type = BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -2009,6 +2012,7 @@ static int uxc_boot(const char *mountpoint)
 	static struct blob_buf req;
 	int rem, ret = 0;
 	char *name;
+	const char *imgvol;
 	unsigned int id;
 	bool autostart;
 
@@ -2067,8 +2071,18 @@ static int uxc_boot(const char *mountpoint)
 			continue;
 
 		name = strdup(blobmsg_get_string(tb[CONF_NAME]));
-		if (uxc_exists(name))
+		if (uxc_exists(name)) {
+			free(name);
 			continue;
+		}
+
+		imgvol = uvol_volume_name(blobmsg_get_string(tb[CONF_PATH]));
+		if (imgvol && uvol_status(imgvol)) {
+			ERROR("uxc: %s image %s missing (interrupted upgrade?); run 'apk fix %s'\n",
+			      name, imgvol, name);
+			free(name);
+			continue;
+		}
 
 		if (uxc_create(name, true, NULL, false, NULL))
 			++ret;
@@ -2261,6 +2275,56 @@ static void reap_data_volumes(const char *container, struct blob_attr *vols)
 	}
 }
 
+static bool uxc_registered(const char *name)
+{
+	struct blob_attr *cur, *tb[__CONF_MAX];
+	int rem;
+
+	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
+		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+		if (tb[CONF_NAME] && !strcmp(name, blobmsg_get_string(tb[CONF_NAME])))
+			return true;
+	}
+
+	return false;
+}
+
+static void reconcile_purge(const char *name, const char *statedir)
+{
+	char *rm[] = { "/bin/rm", "-rf", (char *)statedir, NULL };
+	char path[PATH_MAX];
+
+	snprintf(path, sizeof(path), "%s/settings/%s.json", UXC_VOL_CONFDIR, name);
+	unlink(path);
+
+	run_uvol_argv(rm);
+	fprintf(stderr, "uxc: reconcile: purged orphaned state for %s\n", name);
+}
+
+static int uxc_reconcile(void)
+{
+	char glob_pat[PATH_MAX];
+	const char *name;
+	glob_t gl;
+	int i, ret = 0;
+
+	snprintf(glob_pat, sizeof(glob_pat), "%s/state/*", UXC_VOL_CONFDIR);
+	if (glob(glob_pat, GLOB_NOSORT, NULL, &gl))
+		return 0;
+
+	for (i = 0; i < gl.gl_pathc; i++) {
+		name = strrchr(gl.gl_pathv[i], '/');
+		name = name ? name + 1 : gl.gl_pathv[i];
+		if (uxc_registered(name))
+			continue;
+		reconcile_purge(name, gl.gl_pathv[i]);
+		++ret;
+	}
+
+	globfree(&gl);
+	return ret;
+}
+
 static int uxc_delete(char *name, bool force, bool volumes)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -2290,6 +2354,11 @@ static int uxc_delete(char *name, bool force, bool volumes)
 
 	if (!cfname)
 		return -ENOENT;
+
+	if (tb[CONF_ORIGIN] && !strcmp(blobmsg_get_string(tb[CONF_ORIGIN]), "package")) {
+		fprintf(stderr, "uxc: %s is provided by a package; use 'apk del' to remove it\n", name);
+		return -EPERM;
+	}
 
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
 
@@ -2569,7 +2638,12 @@ next_global:
 	} else if (!strcmp(verb, "boot")) {
 		if (verb_argc != 1 && verb_argc != 2)
 			goto usage_out;
+		uxc_reconcile();
 		ret = uxc_boot(verb_argc == 2 ? verb_argv[1] : NULL);
+	} else if (!strcmp(verb, "reconcile")) {
+		if (verb_argc != 1)
+			goto usage_out;
+		ret = uxc_reconcile();
 	} else if (!strcmp(verb, "start")) {
 		bool console = false;
 
