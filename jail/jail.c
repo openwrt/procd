@@ -80,6 +80,16 @@
 #define CLONE_NEWTIME 0x00000080
 #endif
 
+#ifndef PR_SET_MDWE
+#define PR_SET_MDWE 65
+#endif
+#ifndef PR_MDWE_REFUSE_EXEC_GAIN
+#define PR_MDWE_REFUSE_EXEC_GAIN (1UL << 0)
+#endif
+#ifndef PR_MDWE_NO_INHERIT
+#define PR_MDWE_NO_INHERIT (1UL << 1)
+#endif
+
 #define OPT_ARGS	"cC:d:De:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
 
 #define OCI_VERSION_STRING "1.0.2"
@@ -183,6 +193,7 @@ static struct {
 		int class;
 		int priority;
 	} ioprio;
+	unsigned long mdwe_flags;
 } opts;
 
 static struct blob_buf ocibuf;
@@ -2661,6 +2672,11 @@ static void post_start_hook(void)
 		close(parent_pidfd);
 	}
 
+	if (opts.mdwe_flags && prctl(PR_SET_MDWE, opts.mdwe_flags, 0, 0, 0)) {
+		ERROR("prctl(PR_SET_MDWE, 0x%lx) failed: %m\n", opts.mdwe_flags);
+		free_and_exit(EXIT_FAILURE);
+	}
+
 	char **envp = build_envp(opts.seccomp, opts.envp);
 	if (!envp)
 		free_and_exit(EXIT_FAILURE);
@@ -3949,7 +3965,28 @@ static int parseOCI(const char *jsonfile)
 
 			val = blobmsg_get_string(acur);
 
-			if (!strcmp(name, "org.openwrt.cgroup.memory.pct")) {
+			if (!strcmp(name, "org.openwrt.ujail.mdwe")) {
+				while (val && *val) {
+					size_t tlen;
+					const char *comma = strchr(val, ',');
+
+					tlen = comma ? (size_t)(comma - val) : strlen(val);
+					if (tlen == strlen("refuse_exec_gain") &&
+					    !strncmp(val, "refuse_exec_gain", tlen))
+						opts.mdwe_flags |= PR_MDWE_REFUSE_EXEC_GAIN;
+					else if (tlen == strlen("no_inherit") &&
+						 !strncmp(val, "no_inherit", tlen))
+						opts.mdwe_flags |= PR_MDWE_NO_INHERIT;
+					val = comma ? comma + 1 : NULL;
+				}
+
+				if ((opts.mdwe_flags & PR_MDWE_NO_INHERIT) &&
+				    !(opts.mdwe_flags & PR_MDWE_REFUSE_EXEC_GAIN)) {
+					ERROR("mdwe: no_inherit requires refuse_exec_gain\n");
+					res = ENOTSUP;
+					goto errout;
+				}
+			} else if (!strcmp(name, "org.openwrt.cgroup.memory.pct")) {
 				pct = strtol(val, &pct_end, 10);
 				if (pct_end == val || pct < 1 || pct > 100) {
 					ERROR("cgroup.memory.pct: invalid value '%s'\n", val);
