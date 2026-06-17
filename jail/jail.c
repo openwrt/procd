@@ -21,8 +21,13 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/ioctl.h>
+#include <sys/personality.h>
 #include <sys/syscall.h>
+#include <sys/socket.h>
 #include <poll.h>
+#include <linux/rtnetlink.h>
+#include <net/if.h>
 
 /* musl only defined 15 limit types, make sure all 16 are supported */
 #ifndef RLIMIT_RTTIME
@@ -70,6 +75,10 @@
 #define CLONE_NEWCGROUP 0x02000000
 #endif
 
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x00000080
+#endif
+
 #define STACK_SIZE	(1024 * 1024)
 #define OPT_ARGS	"cC:d:De:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
 
@@ -98,6 +107,7 @@ struct mknod_args {
 static struct {
 	char *name;
 	char *hostname;
+	char *domainname;
 	char **jail_argv;
 	char *cwd;
 	char *seccomp;
@@ -124,9 +134,7 @@ static struct {
 		int uts;
 		int user;
 		int cgroup;
-#ifdef CLONE_NEWTIME
 		int time;
-#endif
 	} setns;
 	int procfs;
 	int ronly;
@@ -157,7 +165,23 @@ static struct {
 	char **oci_deferred_readonly;
 	bool immediately;
 	struct blob_attr *annotations;
+	struct blob_attr *netdevices;
 	int term_timeout;
+	struct {
+		bool set;
+		uint32_t policy;
+		uint64_t flags;
+		int32_t nice;
+		uint32_t priority;
+		uint64_t runtime;
+		uint64_t deadline;
+		uint64_t period;
+	} scheduler;
+	struct {
+		bool set;
+		int class;
+		int priority;
+	} ioprio;
 } opts;
 
 static struct blob_buf ocibuf;
@@ -182,9 +206,7 @@ return ((opts.setns.pid != -1) ||
 	(opts.setns.uts != -1) ||
 	(opts.setns.user != -1) ||
 	(opts.setns.cgroup != -1) ||
-#ifdef CLONE_NEWTIME
 	(opts.setns.time != -1) ||
-#endif
 	opts.namespace);
 }
 
@@ -276,10 +298,12 @@ static void free_opts(bool parent) {
 	free_sysctl();
 	free_devices();
 	free(opts.hostname);
+	free(opts.domainname);
 	free(opts.cwd);
 	free(opts.uidmap);
 	free(opts.gidmap);
 	free(opts.annotations);
+	free(opts.netdevices);
 	free(opts.extroot);
 	free(opts.overlaydir);
 	free_hooklist(opts.hooks.createRuntime);
@@ -1753,10 +1777,8 @@ static int* get_namespace_fd(const unsigned int nstype)
 			return &opts.setns.user;
 		case CLONE_NEWCGROUP:
 			return &opts.setns.cgroup;
-#ifdef CLONE_NEWTIME
 		case CLONE_NEWTIME:
 			return &opts.setns.time;
-#endif
 		default:
 			return NULL;
 	}
@@ -1863,6 +1885,359 @@ static void signals_init(void)
 		sigaction(i, &s, NULL);
 	}
 }
+
+enum {
+	OCI_PROCESS_SCHEDULER_POLICY,
+	OCI_PROCESS_SCHEDULER_NICE,
+	OCI_PROCESS_SCHEDULER_PRIORITY,
+	OCI_PROCESS_SCHEDULER_FLAGS,
+	OCI_PROCESS_SCHEDULER_RUNTIME,
+	OCI_PROCESS_SCHEDULER_DEADLINE,
+	OCI_PROCESS_SCHEDULER_PERIOD,
+	__OCI_PROCESS_SCHEDULER_MAX,
+};
+
+static const struct blobmsg_policy oci_process_scheduler_policy[] = {
+	[OCI_PROCESS_SCHEDULER_POLICY] = { "policy", BLOBMSG_TYPE_STRING },
+	[OCI_PROCESS_SCHEDULER_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
+	[OCI_PROCESS_SCHEDULER_PRIORITY] = { "priority", BLOBMSG_TYPE_INT32 },
+	[OCI_PROCESS_SCHEDULER_FLAGS] = { "flags", BLOBMSG_TYPE_ARRAY },
+	[OCI_PROCESS_SCHEDULER_RUNTIME] = { "runtime", BLOBMSG_CAST_INT64 },
+	[OCI_PROCESS_SCHEDULER_DEADLINE] = { "deadline", BLOBMSG_CAST_INT64 },
+	[OCI_PROCESS_SCHEDULER_PERIOD] = { "period", BLOBMSG_CAST_INT64 },
+};
+
+#ifndef SCHED_DEADLINE
+#define SCHED_DEADLINE 6
+#endif
+
+#ifndef SCHED_FLAG_RESET_ON_FORK
+#define SCHED_FLAG_RESET_ON_FORK 0x01
+#endif
+
+#ifndef SCHED_FLAG_RECLAIM
+#define SCHED_FLAG_RECLAIM 0x02
+#endif
+
+#ifndef SCHED_FLAG_DL_OVERRUN
+#define SCHED_FLAG_DL_OVERRUN 0x04
+#endif
+
+struct procd_sched_attr {
+	uint32_t size;
+	uint32_t sched_policy;
+	uint64_t sched_flags;
+	int32_t  sched_nice;
+	uint32_t sched_priority;
+	uint64_t sched_runtime;
+	uint64_t sched_deadline;
+	uint64_t sched_period;
+};
+
+static int parseOCIprocessscheduler(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_PROCESS_SCHEDULER_MAX];
+	struct blob_attr *cur;
+	const char *policy;
+	int rem;
+
+	blobmsg_parse(oci_process_scheduler_policy, __OCI_PROCESS_SCHEDULER_MAX, tb,
+		      blobmsg_data(msg), blobmsg_len(msg));
+
+	if (!tb[OCI_PROCESS_SCHEDULER_POLICY])
+		return ENODATA;
+
+	policy = blobmsg_get_string(tb[OCI_PROCESS_SCHEDULER_POLICY]);
+	if (!strcmp(policy, "SCHED_OTHER"))
+		opts.scheduler.policy = SCHED_OTHER;
+	else if (!strcmp(policy, "SCHED_FIFO"))
+		opts.scheduler.policy = SCHED_FIFO;
+	else if (!strcmp(policy, "SCHED_RR"))
+		opts.scheduler.policy = SCHED_RR;
+	else if (!strcmp(policy, "SCHED_BATCH"))
+		opts.scheduler.policy = SCHED_BATCH;
+	else if (!strcmp(policy, "SCHED_IDLE"))
+		opts.scheduler.policy = SCHED_IDLE;
+	else if (!strcmp(policy, "SCHED_DEADLINE"))
+		opts.scheduler.policy = SCHED_DEADLINE;
+	else
+		return EINVAL;
+
+	if (tb[OCI_PROCESS_SCHEDULER_NICE])
+		opts.scheduler.nice = blobmsg_get_u32(tb[OCI_PROCESS_SCHEDULER_NICE]);
+
+	if (tb[OCI_PROCESS_SCHEDULER_PRIORITY]) {
+		int32_t prio = (int32_t)blobmsg_get_u32(tb[OCI_PROCESS_SCHEDULER_PRIORITY]);
+
+		if (prio < 0) {
+			ERROR("scheduler: priority %d out of range\n", prio);
+			return EINVAL;
+		}
+		if ((opts.scheduler.policy == SCHED_FIFO || opts.scheduler.policy == SCHED_RR) &&
+		    (prio < 1 || prio > 99)) {
+			ERROR("scheduler: priority %d outside 1..99 for FIFO/RR\n", prio);
+			return EINVAL;
+		}
+		opts.scheduler.priority = prio;
+	}
+
+	if (tb[OCI_PROCESS_SCHEDULER_RUNTIME])
+		opts.scheduler.runtime = blobmsg_cast_u64(tb[OCI_PROCESS_SCHEDULER_RUNTIME]);
+
+	if (tb[OCI_PROCESS_SCHEDULER_DEADLINE])
+		opts.scheduler.deadline = blobmsg_cast_u64(tb[OCI_PROCESS_SCHEDULER_DEADLINE]);
+
+	if (tb[OCI_PROCESS_SCHEDULER_PERIOD])
+		opts.scheduler.period = blobmsg_cast_u64(tb[OCI_PROCESS_SCHEDULER_PERIOD]);
+
+	if (tb[OCI_PROCESS_SCHEDULER_FLAGS]) {
+		if (blobmsg_check_array(tb[OCI_PROCESS_SCHEDULER_FLAGS], BLOBMSG_TYPE_STRING) < 0)
+			return EINVAL;
+		blobmsg_for_each_attr(cur, tb[OCI_PROCESS_SCHEDULER_FLAGS], rem) {
+			const char *flag = blobmsg_get_string(cur);
+			if (!strcmp(flag, "SCHED_FLAG_RESET_ON_FORK"))
+				opts.scheduler.flags |= SCHED_FLAG_RESET_ON_FORK;
+			else if (!strcmp(flag, "SCHED_FLAG_RECLAIM"))
+				opts.scheduler.flags |= SCHED_FLAG_RECLAIM;
+			else if (!strcmp(flag, "SCHED_FLAG_DL_OVERRUN"))
+				opts.scheduler.flags |= SCHED_FLAG_DL_OVERRUN;
+			else
+				return EINVAL;
+		}
+	}
+
+	opts.scheduler.set = true;
+	return 0;
+}
+
+static int applyOCIprocessscheduler(void)
+{
+	struct procd_sched_attr attr = {
+		.size = sizeof(attr),
+		.sched_policy = opts.scheduler.policy,
+		.sched_flags = opts.scheduler.flags,
+		.sched_nice = opts.scheduler.nice,
+		.sched_priority = opts.scheduler.priority,
+		.sched_runtime = opts.scheduler.runtime,
+		.sched_deadline = opts.scheduler.deadline,
+		.sched_period = opts.scheduler.period,
+	};
+
+	if (syscall(SYS_sched_setattr, 0, &attr, 0)) {
+		ERROR("sched_setattr: %m\n");
+		return errno;
+	}
+
+	return 0;
+}
+
+enum {
+	OCI_PROCESS_IOPRIORITY_CLASS,
+	OCI_PROCESS_IOPRIORITY_PRIORITY,
+	__OCI_PROCESS_IOPRIORITY_MAX,
+};
+
+static const struct blobmsg_policy oci_process_iopriority_policy[] = {
+	[OCI_PROCESS_IOPRIORITY_CLASS] = { "class", BLOBMSG_TYPE_STRING },
+	[OCI_PROCESS_IOPRIORITY_PRIORITY] = { "priority", BLOBMSG_TYPE_INT32 },
+};
+
+#ifndef IOPRIO_WHO_PROCESS
+#define IOPRIO_WHO_PROCESS 1
+#endif
+
+#ifndef IOPRIO_CLASS_RT
+#define IOPRIO_CLASS_RT 1
+#endif
+
+#ifndef IOPRIO_CLASS_BE
+#define IOPRIO_CLASS_BE 2
+#endif
+
+#ifndef IOPRIO_CLASS_SHIFT
+#define IOPRIO_CLASS_SHIFT 13
+#endif
+
+#ifndef IOPRIO_CLASS_IDLE
+#define IOPRIO_CLASS_IDLE 3
+#endif
+
+static int parseOCIprocessiopriority(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_PROCESS_IOPRIORITY_MAX];
+	const char *class;
+	int priority;
+
+	blobmsg_parse(oci_process_iopriority_policy, __OCI_PROCESS_IOPRIORITY_MAX, tb,
+		      blobmsg_data(msg), blobmsg_len(msg));
+
+	if (!tb[OCI_PROCESS_IOPRIORITY_CLASS] || !tb[OCI_PROCESS_IOPRIORITY_PRIORITY])
+		return ENODATA;
+
+	class = blobmsg_get_string(tb[OCI_PROCESS_IOPRIORITY_CLASS]);
+	if (!strcmp(class, "IOPRIO_CLASS_RT"))
+		opts.ioprio.class = IOPRIO_CLASS_RT;
+	else if (!strcmp(class, "IOPRIO_CLASS_BE"))
+		opts.ioprio.class = IOPRIO_CLASS_BE;
+	else if (!strcmp(class, "IOPRIO_CLASS_IDLE"))
+		opts.ioprio.class = IOPRIO_CLASS_IDLE;
+	else
+		return EINVAL;
+
+	priority = blobmsg_get_u32(tb[OCI_PROCESS_IOPRIORITY_PRIORITY]);
+	if (priority < 0 || priority > 7)
+		return EINVAL;
+
+	opts.ioprio.priority = priority;
+	opts.ioprio.set = true;
+	return 0;
+}
+
+static int applyOCIprocessiopriority(void)
+{
+	int ioprio = (opts.ioprio.class << IOPRIO_CLASS_SHIFT) | opts.ioprio.priority;
+
+	if (syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, ioprio)) {
+		ERROR("ioprio_set: %m\n");
+		return errno;
+	}
+
+	return 0;
+}
+
+static int move_netdev_to_ns(int netns_fd, const char *host_name, const char *new_name)
+{
+	struct {
+		struct nlmsghdr hdr;
+		struct ifinfomsg ifi;
+		char attrbuf[256];
+	} req = { 0 };
+	struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+	struct rtattr *rta;
+	int sock, ifindex;
+	char buf[4096];
+	ssize_t n;
+
+	int saved_err;
+
+	ifindex = if_nametoindex(host_name);
+	if (!ifindex) {
+		ERROR("netDevices: interface %s not found\n", host_name);
+		return ENODEV;
+	}
+
+	sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+	if (sock < 0) {
+		ERROR("netDevices: socket(AF_NETLINK): %m\n");
+		return errno;
+	}
+	if (bind(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		saved_err = errno;
+		ERROR("netDevices: bind: %m\n");
+		close(sock);
+		errno = saved_err;
+		return saved_err;
+	}
+
+	req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(req.ifi));
+	req.hdr.nlmsg_type = RTM_NEWLINK;
+	req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	req.hdr.nlmsg_seq = 1;
+	req.ifi.ifi_family = AF_UNSPEC;
+	req.ifi.ifi_index = ifindex;
+
+	rta = (struct rtattr *)((char *)&req + NLMSG_ALIGN(req.hdr.nlmsg_len));
+	rta->rta_type = IFLA_NET_NS_FD;
+	rta->rta_len = RTA_LENGTH(sizeof(int));
+	memcpy(RTA_DATA(rta), &netns_fd, sizeof(int));
+	req.hdr.nlmsg_len = NLMSG_ALIGN(req.hdr.nlmsg_len) + RTA_ALIGN(rta->rta_len);
+
+	if (new_name) {
+		size_t namelen = strlen(new_name) + 1;
+		rta = (struct rtattr *)((char *)&req + NLMSG_ALIGN(req.hdr.nlmsg_len));
+		rta->rta_type = IFLA_IFNAME;
+		rta->rta_len = RTA_LENGTH(namelen);
+		memcpy(RTA_DATA(rta), new_name, namelen);
+		req.hdr.nlmsg_len = NLMSG_ALIGN(req.hdr.nlmsg_len) + RTA_ALIGN(rta->rta_len);
+	}
+
+	if (send(sock, &req, req.hdr.nlmsg_len, 0) < 0) {
+		saved_err = errno;
+		ERROR("netDevices: send: %m\n");
+		close(sock);
+		errno = saved_err;
+		return saved_err;
+	}
+
+	n = recv(sock, buf, sizeof(buf), 0);
+	saved_err = (n < 0) ? errno : 0;
+	close(sock);
+	if (n < 0) {
+		errno = saved_err;
+		ERROR("netDevices: recv: %m\n");
+		return saved_err;
+	}
+
+	if (n < (ssize_t)NLMSG_HDRLEN ||
+	    !NLMSG_OK((struct nlmsghdr *)buf, (size_t)n)) {
+		ERROR("netDevices: short or malformed nlmsg (%zd bytes)\n", n);
+		return EIO;
+	}
+
+	struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+	if (nh->nlmsg_type == NLMSG_ERROR) {
+		struct nlmsgerr *err = NLMSG_DATA(nh);
+		if (err->error) {
+			ERROR("netDevices: kernel rejected move of %s: %s\n",
+			      host_name, strerror(-err->error));
+			return -err->error;
+		}
+	}
+
+	return 0;
+}
+
+static int move_netdevs_into_jail(pid_t pid)
+{
+	enum {
+		OCI_LINUX_NETDEVICES_NAME,
+		__OCI_LINUX_NETDEVICES_MAX,
+	};
+	static const struct blobmsg_policy policy[] = {
+		[OCI_LINUX_NETDEVICES_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	};
+	struct blob_attr *cur, *tb[__OCI_LINUX_NETDEVICES_MAX];
+	char path[64];
+	int rem, netns_fd, ret = 0;
+
+	if (!opts.netdevices)
+		return 0;
+
+	snprintf(path, sizeof(path), "/proc/%d/ns/net", pid);
+	netns_fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (netns_fd < 0) {
+		ERROR("netDevices: open(%s): %m\n", path);
+		return errno;
+	}
+
+	blobmsg_for_each_attr(cur, opts.netdevices, rem) {
+		const char *host_name = blobmsg_name(cur);
+		const char *new_name = NULL;
+
+		blobmsg_parse(policy, __OCI_LINUX_NETDEVICES_MAX, tb,
+			      blobmsg_data(cur), blobmsg_len(cur));
+		if (tb[OCI_LINUX_NETDEVICES_NAME])
+			new_name = blobmsg_get_string(tb[OCI_LINUX_NETDEVICES_NAME]);
+
+		ret = move_netdev_to_ns(netns_fd, host_name, new_name);
+		if (ret)
+			break;
+	}
+
+	close(netns_fd);
+	return ret;
+}
+
 
 static void pre_exec_jail(struct uloop_timeout *t);
 static struct uloop_timeout pre_exec_timeout = {
@@ -1973,9 +2348,17 @@ static int exec_jail(void *arg)
 		}
 	}
 
-	if (opts.namespace && opts.hostname && strlen(opts.hostname) > 0
+	if (((opts.namespace & CLONE_NEWUTS) || opts.setns.uts != -1)
+			&& opts.hostname && strlen(opts.hostname) > 0
 			&& sethostname(opts.hostname, strlen(opts.hostname))) {
 		ERROR("sethostname(%s) failed: %m\n", opts.hostname);
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if (((opts.namespace & CLONE_NEWUTS) || opts.setns.uts != -1)
+			&& opts.domainname && strlen(opts.domainname) > 0
+			&& setdomainname(opts.domainname, strlen(opts.domainname))) {
+		ERROR("setdomainname(%s) failed: %m\n", opts.domainname);
 		free_and_exit(EXIT_FAILURE);
 	}
 
@@ -2025,6 +2408,12 @@ static void post_jail_fs(void)
 static void post_start_hook(void)
 {
 	int pw_uid, pw_gid, gr_gid;
+
+	if (opts.scheduler.set && applyOCIprocessscheduler())
+		free_and_exit(EXIT_FAILURE);
+
+	if (opts.ioprio.set && applyOCIprocessiopriority())
+		free_and_exit(EXIT_FAILURE);
 
 	/*
 	 * make sure setuid/setgid won't drop capabilities in case capabilities
@@ -2549,26 +2938,36 @@ static int parseOCIrlimit(struct blob_attr *msg)
 };
 
 enum {
+	OCI_PROCESS_APPARMORPROFILE,
 	OCI_PROCESS_ARGS,
 	OCI_PROCESS_CAPABILITIES,
 	OCI_PROCESS_CWD,
 	OCI_PROCESS_ENV,
+	OCI_PROCESS_EXECCPUAFFINITY,
+	OCI_PROCESS_IOPRIORITY,
 	OCI_PROCESS_OOMSCOREADJ,
 	OCI_PROCESS_NONEWPRIVILEGES,
 	OCI_PROCESS_RLIMITS,
+	OCI_PROCESS_SCHEDULER,
+	OCI_PROCESS_SELINUXLABEL,
 	OCI_PROCESS_TERMINAL,
 	OCI_PROCESS_USER,
 	__OCI_PROCESS_MAX,
 };
 
 static const struct blobmsg_policy oci_process_policy[] = {
+	[OCI_PROCESS_APPARMORPROFILE] = { "apparmorProfile", BLOBMSG_TYPE_STRING },
 	[OCI_PROCESS_ARGS] = { "args", BLOBMSG_TYPE_ARRAY },
 	[OCI_PROCESS_CAPABILITIES] = { "capabilities", BLOBMSG_TYPE_TABLE },
 	[OCI_PROCESS_CWD] = { "cwd", BLOBMSG_TYPE_STRING },
 	[OCI_PROCESS_ENV] = { "env", BLOBMSG_TYPE_ARRAY },
+	[OCI_PROCESS_EXECCPUAFFINITY] = { "execCPUAffinity", BLOBMSG_TYPE_TABLE },
+	[OCI_PROCESS_IOPRIORITY] = { "ioPriority", BLOBMSG_TYPE_TABLE },
 	[OCI_PROCESS_OOMSCOREADJ] = { "oomScoreAdj", BLOBMSG_TYPE_INT32 },
 	[OCI_PROCESS_NONEWPRIVILEGES] = { "noNewPrivileges", BLOBMSG_TYPE_BOOL },
 	[OCI_PROCESS_RLIMITS] = { "rlimits", BLOBMSG_TYPE_ARRAY },
+	[OCI_PROCESS_SCHEDULER] = { "scheduler", BLOBMSG_TYPE_TABLE },
+	[OCI_PROCESS_SELINUXLABEL] = { "selinuxLabel", BLOBMSG_TYPE_STRING },
 	[OCI_PROCESS_TERMINAL] = { "terminal", BLOBMSG_TYPE_BOOL },
 	[OCI_PROCESS_USER] = { "user", BLOBMSG_TYPE_TABLE },
 };
@@ -2581,6 +2980,16 @@ static int parseOCIprocess(struct blob_attr *msg)
 
 	blobmsg_parse(oci_process_policy, __OCI_PROCESS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
+	if (tb[OCI_PROCESS_APPARMORPROFILE]) {
+		ERROR("process.apparmorProfile is not supported\n");
+		return ENOTSUP;
+	}
+
+	if (tb[OCI_PROCESS_SELINUXLABEL]) {
+		ERROR("process.selinuxLabel is not supported\n");
+		return ENOTSUP;
+	}
+
 	if (!tb[OCI_PROCESS_ARGS])
 		return ENOENT;
 
@@ -2590,6 +2999,18 @@ static int parseOCIprocess(struct blob_attr *msg)
 
 	if (tb[OCI_PROCESS_TERMINAL])
 		opts.console = blobmsg_get_bool(tb[OCI_PROCESS_TERMINAL]);
+
+	if (tb[OCI_PROCESS_SCHEDULER]) {
+		res = parseOCIprocessscheduler(tb[OCI_PROCESS_SCHEDULER]);
+		if (res)
+			return res;
+	}
+
+	if (tb[OCI_PROCESS_IOPRIORITY]) {
+		res = parseOCIprocessiopriority(tb[OCI_PROCESS_IOPRIORITY]);
+		if (res)
+			return res;
+	}
 
 	if (tb[OCI_PROCESS_NONEWPRIVILEGES])
 		opts.no_new_privs = blobmsg_get_bool(tb[OCI_PROCESS_NONEWPRIVILEGES]);
@@ -2654,10 +3075,8 @@ static int resolve_nstype(char *type) {
 		return CLONE_NEWUSER;
 	else if (!strcmp("cgroup", type))
 		return CLONE_NEWCGROUP;
-#ifdef CLONE_NEWTIME
 	else if (!strcmp("time", type))
 		return CLONE_NEWTIME;
-#endif
 	else
 		return 0;
 }
@@ -3013,6 +3432,10 @@ enum {
 	OCI_LINUX_MASKEDPATHS,
 	OCI_LINUX_READONLYPATHS,
 	OCI_LINUX_ROOTFSPROPAGATION,
+	OCI_LINUX_PERSONALITY,
+	OCI_LINUX_NETDEVICES,
+	OCI_LINUX_MEMORYPOLICY,
+	OCI_LINUX_MOUNTLABEL,
 	__OCI_LINUX_MAX,
 };
 
@@ -3028,6 +3451,10 @@ static const struct blobmsg_policy oci_linux_policy[] = {
 	[OCI_LINUX_MASKEDPATHS] = { "maskedPaths", BLOBMSG_TYPE_ARRAY },
 	[OCI_LINUX_READONLYPATHS] = { "readonlyPaths", BLOBMSG_TYPE_ARRAY },
 	[OCI_LINUX_ROOTFSPROPAGATION] = { "rootfsPropagation", BLOBMSG_TYPE_STRING },
+	[OCI_LINUX_PERSONALITY] = { "personality", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_NETDEVICES] = { "netDevices", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_MEMORYPOLICY] = { "memoryPolicy", BLOBMSG_TYPE_TABLE },
+	[OCI_LINUX_MOUNTLABEL] = { "mountLabel", BLOBMSG_TYPE_STRING },
 };
 
 static int append_deferred_path(char ***list, const char *path)
@@ -3054,6 +3481,53 @@ static int append_deferred_path(char ***list, const char *path)
 	return 0;
 }
 
+enum {
+	OCI_LINUX_PERSONALITY_DOMAIN,
+	OCI_LINUX_PERSONALITY_FLAGS,
+	__OCI_LINUX_PERSONALITY_MAX,
+};
+
+static const struct blobmsg_policy oci_linux_personality_policy[] = {
+	[OCI_LINUX_PERSONALITY_DOMAIN] = { "domain", BLOBMSG_TYPE_STRING },
+	[OCI_LINUX_PERSONALITY_FLAGS] = { "flags", BLOBMSG_TYPE_ARRAY },
+};
+
+static int parseOCIlinuxpersonality(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_LINUX_PERSONALITY_MAX];
+	const char *domain;
+	unsigned long requested, current;
+
+	blobmsg_parse(oci_linux_personality_policy, __OCI_LINUX_PERSONALITY_MAX, tb,
+		      blobmsg_data(msg), blobmsg_len(msg));
+
+	if (tb[OCI_LINUX_PERSONALITY_FLAGS] &&
+	    blobmsg_len(tb[OCI_LINUX_PERSONALITY_FLAGS])) {
+		ERROR("linux.personality.flags is not supported\n");
+		return ENOTSUP;
+	}
+
+	if (!tb[OCI_LINUX_PERSONALITY_DOMAIN])
+		return ENODATA;
+
+	domain = blobmsg_get_string(tb[OCI_LINUX_PERSONALITY_DOMAIN]);
+	if (!strcmp(domain, "LINUX"))
+		requested = PER_LINUX;
+	else if (!strcmp(domain, "LINUX32"))
+		requested = PER_LINUX32;
+	else
+		return EINVAL;
+
+	current = personality(0xFFFFFFFF) & PER_MASK;
+	if (requested != current) {
+		ERROR("linux.personality '%s' differs from current; cross-personality execution is not supported\n",
+		      domain);
+		return ENOTSUP;
+	}
+
+	return 0;
+}
+
 static int parseOCIlinux(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_MAX];
@@ -3064,6 +3538,26 @@ static int parseOCIlinux(struct blob_attr *msg)
 	char cgfullpath[256] = "/sys/fs/cgroup";
 
 	blobmsg_parse(oci_linux_policy, __OCI_LINUX_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
+
+	if (tb[OCI_LINUX_PERSONALITY]) {
+		res = parseOCIlinuxpersonality(tb[OCI_LINUX_PERSONALITY]);
+		if (res)
+			return res;
+	}
+
+
+	if (tb[OCI_LINUX_NETDEVICES])
+		opts.netdevices = blob_memdup(tb[OCI_LINUX_NETDEVICES]);
+
+	if (tb[OCI_LINUX_MEMORYPOLICY]) {
+		ERROR("linux.memoryPolicy is not supported on OpenWrt\n");
+		return ENOTSUP;
+	}
+
+	if (tb[OCI_LINUX_MOUNTLABEL]) {
+		ERROR("linux.mountLabel is not supported\n");
+		return ENOTSUP;
+	}
 
 	if (tb[OCI_LINUX_NAMESPACES]) {
 		blobmsg_for_each_attr(cur, tb[OCI_LINUX_NAMESPACES], rem) {
@@ -3175,6 +3669,7 @@ static int parseOCIlinux(struct blob_attr *msg)
 enum {
 	OCI_VERSION,
 	OCI_HOSTNAME,
+	OCI_DOMAINNAME,
 	OCI_PROCESS,
 	OCI_ROOT,
 	OCI_MOUNTS,
@@ -3187,6 +3682,7 @@ enum {
 static const struct blobmsg_policy oci_policy[] = {
 	[OCI_VERSION] = { "ociVersion", BLOBMSG_TYPE_STRING },
 	[OCI_HOSTNAME] = { "hostname", BLOBMSG_TYPE_STRING },
+	[OCI_DOMAINNAME] = { "domainname", BLOBMSG_TYPE_STRING },
 	[OCI_PROCESS] = { "process", BLOBMSG_TYPE_TABLE },
 	[OCI_ROOT] = { "root", BLOBMSG_TYPE_TABLE },
 	[OCI_MOUNTS] = { "mounts", BLOBMSG_TYPE_ARRAY },
@@ -3224,6 +3720,9 @@ static int parseOCI(const char *jsonfile)
 
 	if (tb[OCI_HOSTNAME])
 		opts.hostname = strdup(blobmsg_get_string(tb[OCI_HOSTNAME]));
+
+	if (tb[OCI_DOMAINNAME])
+		opts.domainname = strdup(blobmsg_get_string(tb[OCI_DOMAINNAME]));
 
 	if (!tb[OCI_PROCESS]) {
 		res=ENODATA;
@@ -3445,9 +3944,6 @@ static struct uloop_timeout post_main_timeout = {
 };
 static int netns_fd;
 static int pidns_fd;
-#ifdef CLONE_NEWTIME
-static int timens_fd;
-#endif
 static void post_create_runtime(void);
 
 struct env_e {
@@ -3481,9 +3977,7 @@ int main(int argc, char **argv)
 	opts.setns.uts = -1;
 	opts.setns.user = -1;
 	opts.setns.cgroup = -1;
-#ifdef CLONE_NEWTIME
 	opts.setns.time = -1;
-#endif
 
 	/* default 5 seconds timeout after SIGTERM before SIGKILL is sent */
 	opts.term_timeout = 5;
@@ -3941,14 +4435,6 @@ static void post_main(struct uloop_timeout *t)
 			pidns_fd = -1;
 		}
 
-#ifdef CLONE_NEWTIME
-		if (opts.setns.time != -1) {
-			timens_fd = ns_open_pid("time", getpid());
-			setns_open(CLONE_NEWTIME);
-		} else {
-			timens_fd = -1;
-		}
-#endif
 
 		if (opts.namespace & CLONE_NEWUSER) {
 			if (opts.overlaydir) {
@@ -3995,12 +4481,6 @@ static void post_main(struct uloop_timeout *t)
 			setns(pidns_fd, CLONE_NEWPID);
 			close(pidns_fd);
 		}
-#ifdef CLONE_NEWTIME
-		if (timens_fd != -1) {
-			setns(timens_fd, CLONE_NEWTIME);
-			close(timens_fd);
-		}
-#endif
 		if (opts.setns.net != -1)
 			close(opts.setns.net);
 		if (opts.setns.ns != -1)
@@ -4029,6 +4509,11 @@ static void post_main(struct uloop_timeout *t)
 
 		if (opts.namespace & CLONE_NEWNET)
 			jail_network_start(parent_ctx, opts.name, jail_process.pid);
+
+		if (opts.netdevices &&
+		    ((opts.namespace & CLONE_NEWNET) || opts.setns.net != -1) &&
+		    move_netdevs_into_jail(jail_process.pid))
+			free_and_exit(-1);
 
 		if (jail_writepid(jail_process.pid)) {
 			ERROR("failed to write pidfile: %m\n");
