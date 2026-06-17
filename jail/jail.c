@@ -4018,6 +4018,8 @@ static int parseOCIlinux(struct blob_attr *msg)
 	int res = 0;
 	char *cgpath;
 	char cgfullpath[256] = "/sys/fs/cgroup";
+	char cgleaf[200];
+	char *cgsep;
 
 	blobmsg_parse(oci_linux_policy, __OCI_LINUX_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
@@ -4161,13 +4163,18 @@ static int parseOCIlinux(struct blob_attr *msg)
 			strcat(cgfullpath, cgpath);
 		}
 	} else {
-		strcat(cgfullpath, "/containers/");
-		if (2 * strlen(opts.name) + 2 >= (sizeof(cgfullpath) - strlen(cgfullpath)))
+		cgsep = strchr(opts.name, '.');
+		if (cgsep)
+			snprintf(cgleaf, sizeof(cgleaf), "/containers/%.*s/%s.%d",
+				 (int)(cgsep - opts.name), opts.name, cgsep + 1, (int)getpid());
+		else
+			snprintf(cgleaf, sizeof(cgleaf), "/containers/%s/%s.%d",
+				 opts.name, opts.name, (int)getpid());
+
+		if (strlen(cgleaf) >= sizeof(cgfullpath) - strlen(cgfullpath))
 			return E2BIG;
 
-		strcat(cgfullpath, opts.name); /* should be container name rather than jail name */
-		strcat(cgfullpath, "/");
-		strcat(cgfullpath, opts.name); /* should be container instance name rather than jail name */
+		strcat(cgfullpath, cgleaf);
 	}
 
 	cgroups_init(cgfullpath);
