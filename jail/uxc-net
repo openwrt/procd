@@ -519,6 +519,14 @@ let routed_up = function(name, ann, m) {
 
 	fw_uci_create(name, ann, net);
 
+	write_injail(name, "config interface 'lan'\n" +
+		"\toption device 'eth0'\n" +
+		"\toption proto 'static'\n" +
+		"\toption ipaddr '" + net.container + "'\n" +
+		"\toption netmask '255.255.255.254'\n" +
+		"\toption gateway '" + gw_ip + "'\n" +
+		"\toption dns '" + gw_ip + "'\n");
+
 	return 0;
 };
 
@@ -646,6 +654,9 @@ let do_down = function(name, bundle) {
 	if (ann == null)
 		ann = {};
 
+	let configured = !!fs.stat(injail_path(name));
+	fs.unlink(injail_path(name));
+
 	let attach = parse_attach(ann);
 	let bh = parse_backhaul(ann);
 
@@ -659,6 +670,8 @@ let do_down = function(name, bundle) {
 	if (attach.kind == "bridged")
 		return bridged_down(name, attach);
 
+	if (!configured)
+		return 0;
 	return routed_down(name);
 };
 

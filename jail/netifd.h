@@ -13,9 +13,11 @@
 
 #ifndef _JAIL_NETIFD_H
 #define _JAIL_NETIFD_H
+#include <stdbool.h>
 #include <libubus.h>
 
-int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t new_ns_pid);
-int jail_network_stop(void);
+int jail_network_attach(struct ubus_context *ctx, const char *name, pid_t pid);
+int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t new_ns_pid, bool start_netifd);
+int jail_network_teardown(void);
 
 #endif

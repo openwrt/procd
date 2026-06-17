@@ -218,6 +218,7 @@ static struct {
 	struct landlock_config landlock;
 	bool private_ubus;
 	bool private_netifd;
+	bool jail_network_started;
 } opts;
 
 static struct blob_buf ocibuf;
@@ -1292,6 +1293,11 @@ static bool jail_ptrace_seccomp(void);
 
 static void free_and_exit(int ret)
 {
+	if (!exit_from_child && opts.jail_network_started) {
+		jail_network_teardown();
+		opts.jail_network_started = false;
+	}
+
 	if (!exit_from_child && opts.ocibundle) {
 		cgroups_destroy();
 		cgroups_free();
@@ -4266,13 +4272,6 @@ static int parseOCI(const char *jsonfile)
 						opts.mdwe_flags |= PR_MDWE_NO_INHERIT;
 					val = comma ? comma + 1 : NULL;
 				}
-
-				if ((opts.mdwe_flags & PR_MDWE_NO_INHERIT) &&
-				    !(opts.mdwe_flags & PR_MDWE_REFUSE_EXEC_GAIN)) {
-					ERROR("mdwe: no_inherit requires refuse_exec_gain\n");
-					res = ENOTSUP;
-					goto errout;
-				}
 			} else if (!strcmp(name, "org.openwrt.ujail.landlock.ro")) {
 				res = landlock_config_add_paths(&opts.landlock, val,
 					LANDLOCK_ACCESS_FS_READ_FILE |
@@ -4318,6 +4317,13 @@ static int parseOCI(const char *jsonfile)
 					goto errout;
 				}
 				cgroups_set_memory_limit(memtotal * pct / 100);
+			}
+
+			if ((opts.mdwe_flags & PR_MDWE_NO_INHERIT) &&
+			    !(opts.mdwe_flags & PR_MDWE_REFUSE_EXEC_GAIN)) {
+				ERROR("mdwe: no_inherit requires refuse_exec_gain\n");
+				res = ENOTSUP;
+				goto errout;
 			}
 		}
 
@@ -5367,7 +5373,6 @@ static void post_main(struct uloop_timeout *t);
 static struct uloop_timeout post_main_timeout = {
 	.cb = post_main,
 };
-static int netns_fd;
 static int pidns_fd;
 static int timens_fd;
 static void post_create_runtime(void);
@@ -5800,6 +5805,30 @@ static void post_prestart(void)
 	run_hooks(opts.hooks.createRuntime, post_create_runtime);
 }
 
+static int run_uxc_net(const char *action)
+{
+	char *argv[] = { "/sbin/uxc-net", opts.name, (char *)action, opts.ocibundle, NULL };
+	pid_t pid;
+	int status;
+
+	if (!opts.ocibundle || !opts.name)
+		return 0;
+
+	pid = fork();
+	if (pid == 0) {
+		execv(argv[0], argv);
+		ERROR("failed to execv uxc-net: %m\n");
+		_exit(127);
+	} else if (pid < 0) {
+		ERROR("uxc-net fork error: %m\n");
+		return -1;
+	}
+
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
+
+	return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
 static void post_main(struct uloop_timeout *t)
 {
 	if (apply_rlimits()) {
@@ -6112,8 +6141,17 @@ static void post_main(struct uloop_timeout *t)
 			jail_chown_writable_surfaces();
 		}
 
-		if (opts.namespace & CLONE_NEWNET)
-			jail_network_start(parent_ctx, opts.name, jail_process.pid);
+		if ((opts.namespace & CLONE_NEWNET) && opts.name && opts.ocibundle)
+			run_uxc_net("up");
+
+		if ((opts.namespace & CLONE_NEWNET) && opts.name)
+			jail_network_attach(parent_ctx, opts.name, jail_process.pid);
+
+		if ((opts.namespace & CLONE_NEWNET) && opts.private_ubus) {
+			if (!jail_network_start(parent_ctx, opts.name, jail_process.pid,
+						opts.private_netifd))
+				opts.jail_network_started = true;
+		}
 
 		if (opts.netdevices &&
 		    ((opts.namespace & CLONE_NEWNET) || opts.setns.net != -1) &&
@@ -6501,11 +6539,12 @@ static void post_poststart(void)
 
 static void post_poststop(void);
 static void poststop(void) {
-	if (opts.namespace & CLONE_NEWNET) {
-		setns(netns_fd, CLONE_NEWNET);
-		jail_network_stop();
-		close(netns_fd);
+	if (opts.jail_network_started) {
+		jail_network_teardown();
+		opts.jail_network_started = false;
 	}
+	if ((opts.namespace & CLONE_NEWNET) && opts.name && opts.ocibundle)
+		run_uxc_net("down");
 	run_hooks(opts.hooks.poststop, post_poststop);
 }
 
