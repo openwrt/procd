@@ -18,6 +18,8 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 
+#define OCI_VERSION_STRING "1.3.0"
+
 #define PROCD_NOAFILE_DIR "/tmp/.ujail"
 #define PROCD_NOAFILE PROCD_NOAFILE_DIR "/noafile"
 

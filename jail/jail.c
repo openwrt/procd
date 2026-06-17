@@ -4270,8 +4270,9 @@ static int parseOCI(const char *jsonfile)
 		goto errout;
 	}
 
-	if (strncmp("1.0", blobmsg_get_string(tb[OCI_VERSION]), 3)) {
-		ERROR("unsupported ociVersion %s\n", blobmsg_get_string(tb[OCI_VERSION]));
+	const char *ociver = blobmsg_get_string(tb[OCI_VERSION]);
+	if (strncmp("1.", ociver, 2) || ociver[2] < '1' || ociver[2] > '3') {
+		ERROR("unsupported ociVersion %s\n", ociver);
 		res=ENOTSUP;
 		goto errout;
 	}
