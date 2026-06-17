@@ -1874,6 +1874,7 @@ static int parent_pidfd = -1;
 static int exec_jail(void *arg)
 {
 	char buf[1];
+	ssize_t n;
 
 	exit_from_child = true;
 	prctl(PR_SET_SECUREBITS, 0);
@@ -1922,7 +1923,10 @@ static int exec_jail(void *arg)
 		return EXIT_FAILURE;
 	}
 	close(pipes[1]);
-	if (read(pipes[2], buf, 1) < 1) {
+	do {
+		n = read(pipes[2], buf, 1);
+	} while (n < 0 && errno == EINTR);
+	if (n < 1) {
 		ERROR("can't read from parent\n");
 		return EXIT_FAILURE;
 	}
@@ -2000,8 +2004,12 @@ static void post_start_hook(void);
 static void post_jail_fs(void)
 {
 	char buf[1];
+	ssize_t n;
 
-	if (read(pipes[2], buf, 1) < 1) {
+	do {
+		n = read(pipes[2], buf, 1);
+	} while (n < 0 && errno == EINTR);
+	if (n < 1) {
 		ERROR("can't read from parent\n");
 		free_and_exit(EXIT_FAILURE);
 	}
