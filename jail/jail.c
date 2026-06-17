@@ -1842,8 +1842,22 @@ static void signals_init(void)
 
 		if (!sigismember(&sigmask, i))
 			continue;
-		if ((i == SIGCHLD) || (i == SIGPIPE) || (i == SIGSEGV) || (i == SIGSTOP) || (i == SIGKILL))
+		switch (i) {
+		case SIGCHLD:
+		case SIGPIPE:
+		case SIGKILL:
+		case SIGSTOP:
+		case SIGSEGV:
+		case SIGBUS:
+		case SIGFPE:
+		case SIGILL:
+		case SIGSYS:
+		case SIGABRT:
+		case SIGTRAP:
 			continue;
+		default:
+			break;
+		}
 
 		s.sa_handler = jail_handle_signal;
 		sigaction(i, &s, NULL);
