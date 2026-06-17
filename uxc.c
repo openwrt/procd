@@ -265,6 +265,7 @@ enum {
 	CONF_TEMP_OVERLAY_SIZE,
 	CONF_WRITE_OVERLAY_PATH,
 	CONF_VOLUMES,
+	CONF_IDMAP_OFFSET,
 	__CONF_MAX,
 };
 
@@ -277,6 +278,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_TEMP_OVERLAY_SIZE] = { .name = "temp-overlay-size", .type = BLOBMSG_TYPE_STRING },
 	[CONF_WRITE_OVERLAY_PATH] = { .name = "write-overlay-path", .type = BLOBMSG_TYPE_STRING },
 	[CONF_VOLUMES] = { .name = "volumes", .type = BLOBMSG_TYPE_ARRAY },
+	[CONF_IDMAP_OFFSET] = { .name = "idmap-offset", .type = BLOBMSG_TYPE_STRING },
 };
 
 static int conf_load(bool load_settings)
@@ -975,6 +977,8 @@ static int uxc_create(char *name, bool immediately)
 	if (pidfile)
 		blobmsg_add_string(&req, "pidfile", pidfile);
 
+	if (tb[CONF_IDMAP_OFFSET])
+		blobmsg_add_string(&req, "idmap_offset", blobmsg_get_string(tb[CONF_IDMAP_OFFSET]));
 	blobmsg_close_table(&req, j);
 
 	if (writepath)

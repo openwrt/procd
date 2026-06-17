@@ -92,7 +92,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"cC:d:De:EfFG:h:ij:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
+#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
 
 #define OCI_VERSION_STRING "1.0.2"
 
@@ -134,6 +134,9 @@ static struct {
 	char **envp;
 	char *uidmap;
 	char *gidmap;
+	struct blob_attr *uidmappings;
+	struct blob_attr *gidmappings;
+	unsigned int idmap_offset;
 	char *pidfile;
 	struct sysctl_val **sysctl;
 	int no_new_privs;
@@ -322,6 +325,8 @@ static void free_opts(bool parent) {
 	free(opts.cwd);
 	free(opts.uidmap);
 	free(opts.gidmap);
+	free(opts.uidmappings);
+	free(opts.gidmappings);
 	free(opts.annotations);
 	landlock_config_free(&opts.landlock);
 	free(opts.netdevices);
@@ -782,6 +787,89 @@ static ssize_t xwrite_byte(int fd, char byte)
 
 static char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
 static mode_t old_umask;
+#define JAIL_IDMAP_MAX_FDS 64
+
+static int idmap_fds[JAIL_IDMAP_MAX_FDS];
+static int num_idmap_fds;
+static int extroot_idmap_fd = -1;
+static int overlay_idmap_fd = -1;
+
+static bool jail_idmap_active(void)
+{
+	return (opts.namespace & CLONE_NEWUSER) && opts.uidmap;
+}
+
+static int sock_send_fds(int sock, char tag, const int *fds, int nfds)
+{
+	struct msghdr msg = { 0 };
+	struct iovec iov;
+	char cmsgbuf[CMSG_SPACE(JAIL_IDMAP_MAX_FDS * sizeof(int))];
+	struct cmsghdr *cmsg;
+	char data[1];
+	ssize_t n;
+
+	data[0] = tag;
+	iov.iov_base = data;
+	iov.iov_len = 1;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+
+	if (nfds > 0) {
+		msg.msg_control = cmsgbuf;
+		msg.msg_controllen = CMSG_SPACE(nfds * sizeof(int));
+		cmsg = CMSG_FIRSTHDR(&msg);
+		cmsg->cmsg_level = SOL_SOCKET;
+		cmsg->cmsg_type = SCM_RIGHTS;
+		cmsg->cmsg_len = CMSG_LEN(nfds * sizeof(int));
+		memcpy(CMSG_DATA(cmsg), fds, nfds * sizeof(int));
+	}
+
+	do {
+		n = sendmsg(sock, &msg, MSG_NOSIGNAL);
+	} while (n < 0 && errno == EINTR);
+
+	return (n == 1) ? 0 : -1;
+}
+
+static int sock_recv_fds(int sock, char *tag, int *fds, int maxfds)
+{
+	struct msghdr msg = { 0 };
+	struct iovec iov;
+	char cmsgbuf[CMSG_SPACE(JAIL_IDMAP_MAX_FDS * sizeof(int))];
+	struct cmsghdr *cmsg;
+	char data[1];
+	ssize_t n;
+	int nfds = 0;
+
+	iov.iov_base = data;
+	iov.iov_len = 1;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = cmsgbuf;
+	msg.msg_controllen = sizeof(cmsgbuf);
+
+	do {
+		n = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+	} while (n < 0 && errno == EINTR);
+
+	if (n < 1)
+		return -1;
+
+	*tag = data[0];
+
+	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+		if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
+			continue;
+		nfds = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+		if (nfds > maxfds)
+			nfds = maxfds;
+		memcpy(fds, CMSG_DATA(cmsg), nfds * sizeof(int));
+		break;
+	}
+
+	return nfds;
+}
+
 static void enter_jail_fs(void);
 
 static size_t path_depth(const char *path)
@@ -939,7 +1027,14 @@ static int build_jail_fs(void)
 	}
 
 	if (opts.extroot) {
-		if (mount(opts.extroot, jail_root, "bind", MS_BIND, NULL)) {
+		if (extroot_idmap_fd >= 0) {
+			if (sys_move_mount(extroot_idmap_fd, "", AT_FDCWD, jail_root, MOVE_MOUNT_F_EMPTY_PATH)) {
+				ERROR("move_mount(idmapped extroot) failed: %m\n");
+				return -1;
+			}
+			close(extroot_idmap_fd);
+			extroot_idmap_fd = -1;
+		} else if (mount(opts.extroot, jail_root, "bind", MS_BIND, NULL)) {
 			ERROR("extroot mount failed %m\n");
 			return -1;
 		}
@@ -971,6 +1066,18 @@ static int build_jail_fs(void)
 		overlaydir = opts.overlaydir;
 
 	if (overlaydir) {
+		if (overlay_idmap_fd >= 0) {
+			if (sys_move_mount(overlay_idmap_fd, "", AT_FDCWD, overlaydir, MOVE_MOUNT_F_EMPTY_PATH)) {
+				ERROR("move_mount(idmapped overlay upper) failed: %m\n");
+				return -1;
+			}
+			close(overlay_idmap_fd);
+			overlay_idmap_fd = -1;
+		} else if (mount(NULL, overlaydir, NULL,
+			  MS_BIND | MS_REMOUNT | MS_NOEXEC | MS_NOSUID | MS_NODEV, NULL)) {
+			WARNING("failed to harden overlay upper %s: %m\n", overlaydir);
+		}
+
 		ret = mount_overlay(jail_root, overlaydir);
 		if (ret)
 			return ret;
@@ -1135,6 +1242,8 @@ static int build_jail_fs(void)
 			}
 		}
 	}
+
+	jail_fs_set_userns((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1));
 
 	if (!fail && mount_all(jail_root)) {
 		ERROR("mount_all() failed\n");
@@ -2398,7 +2507,9 @@ static int parent_pidfd = -1;
 static int exec_jail(void *arg)
 {
 	char buf[1];
-	ssize_t n;
+	char tag;
+	int recv_fds[JAIL_IDMAP_MAX_FDS];
+	int nrecv;
 
 	exit_from_child = true;
 	prctl(PR_SET_SECUREBITS, 0);
@@ -2447,17 +2558,20 @@ static int exec_jail(void *arg)
 		return EXIT_FAILURE;
 	}
 	close(pipes[1]);
-	do {
-		n = read(pipes[2], buf, 1);
-	} while (n < 0 && errno == EINTR);
-	if (n < 1) {
+
+	nrecv = sock_recv_fds(pipes[2], &tag, recv_fds, JAIL_IDMAP_MAX_FDS);
+	if (nrecv < 0) {
 		ERROR("can't read from parent\n");
 		return EXIT_FAILURE;
 	}
-	if (buf[0] != 'O') {
+	if (tag != 'O') {
 		ERROR("parent had an error, child exiting\n");
 		return EXIT_FAILURE;
 	}
+	if (nrecv > 0)
+		jail_idmap_assign(jail_idmap_active() && opts.extroot,
+				  false,
+				  recv_fds, nrecv, &extroot_idmap_fd, &overlay_idmap_fd);
 
 	if (opts.setns.user != -1 && (opts.namespace & CLONE_NEWNS) &&
 	    unshare(CLONE_NEWNS)) {
@@ -3399,7 +3513,7 @@ static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 		/* count length */
 		totallen += snprintf(NULL, 0, "%d %d %d\n",
 			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_CONTAINERID]),
-			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]) + opts.idmap_offset,
 			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_SIZE]));
 	}
 
@@ -3413,13 +3527,13 @@ static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 		blobmsg_parse(oci_linux_uidgidmap_policy, __OCI_LINUX_UIDGIDMAP_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
 
 		get_jail_root_user(is_gidmap, blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_CONTAINERID]),
-			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]) + opts.idmap_offset,
 			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_SIZE]));
 
 		/* write mapping line into pre-allocated string */
 		len = snprintf(&map[pos], totallen + 1, "%d %d %d\n",
 			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_CONTAINERID]),
-			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]),
+			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]) + opts.idmap_offset,
 			 blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_SIZE]));
 		pos += len;
 		totallen -= len;
@@ -3427,12 +3541,68 @@ static int parseOCIuidgidmappings(struct blob_attr *msg, bool is_gidmap)
 
 	assert(totallen == 0);
 
-	if (is_gidmap)
+	if (is_gidmap) {
 		opts.gidmap = map;
-	else
+		free(opts.gidmappings);
+		opts.gidmappings = blob_memdup(msg);
+		if (!opts.gidmappings)
+			return ENOMEM;
+	} else {
 		opts.uidmap = map;
+		free(opts.uidmappings);
+		opts.uidmappings = blob_memdup(msg);
+		if (!opts.uidmappings)
+			return ENOMEM;
+	}
 
 	return 0;
+}
+
+static unsigned int host_id_for(struct blob_attr *mappings, unsigned int cid)
+{
+	struct blob_attr *tb[__OCI_LINUX_UIDGIDMAP_MAX];
+	struct blob_attr *cur;
+	unsigned int base, host, size;
+	int rem;
+
+	if (!mappings)
+		return (unsigned int)-1;
+
+	blobmsg_for_each_attr(cur, mappings, rem) {
+		blobmsg_parse(oci_linux_uidgidmap_policy, __OCI_LINUX_UIDGIDMAP_MAX, tb,
+			      blobmsg_data(cur), blobmsg_len(cur));
+		if (!tb[OCI_LINUX_UIDGIDMAP_CONTAINERID] ||
+		    !tb[OCI_LINUX_UIDGIDMAP_HOSTID] ||
+		    !tb[OCI_LINUX_UIDGIDMAP_SIZE])
+			continue;
+		base = blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_CONTAINERID]);
+		host = blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_HOSTID]);
+		size = blobmsg_get_u32(tb[OCI_LINUX_UIDGIDMAP_SIZE]);
+		if (cid >= base && cid < base + size)
+			return host + (cid - base) + opts.idmap_offset;
+	}
+
+	return (unsigned int)-1;
+}
+
+static void jail_chown_writable_surfaces(void)
+{
+	unsigned int vuid, vgid, ouid, ogid;
+
+	vuid = host_id_for(opts.uidmappings, opts.pw_uid);
+	vgid = host_id_for(opts.gidmappings, opts.pw_gid);
+	if (vuid != (unsigned int)-1 && vgid != (unsigned int)-1)
+		jail_chown_fresh_volumes(vuid, vgid);
+
+	if (!opts.overlaydir)
+		return;
+
+	ouid = host_id_for(opts.uidmappings, 0);
+	ogid = host_id_for(opts.gidmappings, 0);
+	if (ouid != (unsigned int)-1 && ogid != (unsigned int)-1 &&
+	    jail_dir_is_fresh(opts.overlaydir) &&
+	    chown(opts.overlaydir, ouid, ogid))
+		ERROR("chown(fresh overlay %s -> %u:%u): %m\n", opts.overlaydir, ouid, ogid);
 }
 
 enum {
@@ -4554,6 +4724,10 @@ int main(int argc, char **argv)
 		case 'i':
 			opts.immediately = true;
 			break;
+		case 'I':
+			opts.idmap_offset = strtoul(optarg, NULL, 10);
+			jail_set_idmap_offset(opts.idmap_offset);
+			break;
 		case 'P':
 			opts.pidfile = optarg;
 			break;
@@ -4788,7 +4962,10 @@ static void post_main(struct uloop_timeout *t)
 	if (opts.name)
 		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
 
-	if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
+	if (pipe(&pipes[0]) < 0)
+		free_and_exit(-1);
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, &pipes[2]) < 0)
 		free_and_exit(-1);
 
 	if (pipe2(&userns_pipe[0], O_CLOEXEC) < 0 || pipe2(&userns_pipe[2], O_CLOEXEC) < 0)
@@ -5016,6 +5193,18 @@ static void post_main(struct uloop_timeout *t)
 			cgroups_attach_pid(jail_process.pid);
 		}
 
+		if (jail_idmap_active()) {
+			num_idmap_fds = jail_idmap_build(opts.extroot,
+							 opts.uidmappings, opts.gidmappings,
+							 idmap_fds, JAIL_IDMAP_MAX_FDS);
+			if (num_idmap_fds < 0) {
+				ERROR("failed to build idmapped jail mounts\n");
+				free_and_exit(-1);
+			}
+
+			jail_chown_writable_surfaces();
+		}
+
 		if (opts.namespace & CLONE_NEWNET)
 			jail_network_start(parent_ctx, opts.name, jail_process.pid);
 
@@ -5041,18 +5230,18 @@ static void post_main(struct uloop_timeout *t)
 static void post_poststart(void);
 static void post_create_runtime(void)
 {
-	char sig_buf[1];
-
 	if (hook_chain_failed) {
 		ERROR("createRuntime hook failed; aborting container\n");
 		free_and_exit(EXIT_FAILURE);
 	}
 
-	sig_buf[0] = 'O';
-	if (write(pipes[3], sig_buf, 1) < 0) {
+	if (sock_send_fds(pipes[3], 'O', idmap_fds, num_idmap_fds) < 0) {
 		ERROR("can't write to child\n");
 		free_and_exit(-1);
 	}
+
+	while (num_idmap_fds > 0)
+		close(idmap_fds[--num_idmap_fds]);
 
 	/*
 	 * Wait for the child to reach enter_userns() and create its own

@@ -42,6 +42,7 @@ struct jail {
 	char *name;
 	char *hostname;
 	char *pidfile;
+	char *idmap_offset;
 	struct blobmsg_list mount;
 	struct blobmsg_list setns;
 	int argc;

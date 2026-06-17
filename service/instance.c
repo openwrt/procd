@@ -124,6 +124,7 @@ enum {
 	JAIL_ATTR_IMMEDIATELY,
 	JAIL_ATTR_PIDFILE,
 	JAIL_ATTR_SETNS,
+	JAIL_ATTR_IDMAP_OFFSET,
 	__JAIL_ATTR_MAX,
 };
 
@@ -145,6 +146,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_IMMEDIATELY] = { "immediately", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_SETNS] = { "setns", BLOBMSG_TYPE_ARRAY },
+	[JAIL_ATTR_IDMAP_OFFSET] = { "idmap_offset", BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -391,6 +393,10 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = jail->pidfile;
 	}
 
+	if (jail->idmap_offset) {
+		argv[argc++] = "-I";
+		argv[argc++] = jail->idmap_offset;
+	}
 	if (in->bundle) {
 		argv[argc++] = "-J";
 		argv[argc++] = in->bundle;
@@ -1252,6 +1258,10 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->argc += 2;
 	}
 
+	if (tb[JAIL_ATTR_IDMAP_OFFSET]) {
+		jail->idmap_offset = strdup(blobmsg_get_string(tb[JAIL_ATTR_IDMAP_OFFSET]));
+		jail->argc += 2;
+	}
 	if (tb[JAIL_ATTR_SETNS]) {
 		struct blob_attr *cur;
 		int rem;
@@ -1644,6 +1654,7 @@ instance_free(struct service_instance *in)
 	free(in->jail.name);
 	free(in->jail.hostname);
 	free(in->jail.pidfile);
+	free(in->jail.idmap_offset);
 	free(in->seccomp);
 	free(in->capabilities);
 	free(in->pidfile);

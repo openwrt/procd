@@ -15,11 +15,22 @@
 
 #include <fcntl.h>
 #include <sys/mount.h>
+#include <linux/mount.h>
 #include <libubox/blobmsg.h>
 
 #include "../container.h"
 
 #define JAIL_NOAFILE "/dev/.ujailnoafile"
+
+int build_userns_fd(struct blob_attr *uidmappings, struct blob_attr *gidmappings);
+int jail_idmap_build(const char *extroot,
+		     struct blob_attr *uidmap, struct blob_attr *gidmap,
+		     int *fds, int maxfds);
+int jail_idmap_assign(bool have_extroot, bool have_overlay, const int *fds, int nfds,
+		      int *extroot_fd, int *overlay_fd);
+bool jail_dir_is_fresh(const char *path);
+void jail_chown_fresh_volumes(uid_t uid, gid_t gid);
+void jail_set_idmap_offset(unsigned int offset);
 
 int add_mount(const char *source, const char *target, const char *filesystemtype,
 	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error);
@@ -37,6 +48,8 @@ struct ujail_mount_attr {
 	uint64_t attr_set, attr_clr, propagation, userns_fd;
 };
 int sys_open_tree(int dfd, const char *path, unsigned flags);
+int sys_move_mount(int from_dfd, const char *from_path, int to_dfd,
+		   const char *to_path, unsigned flags);
 int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mount_attr *attr, size_t size);
 
 #ifndef OPEN_TREE_CLONE
@@ -66,5 +79,6 @@ static inline int add_path_and_deps(const char *path, int readonly, int error, i
 int mount_all(const char *jailroot);
 void mount_list_init(void);
 void mount_free(void);
+void jail_fs_set_userns(bool enabled);
 
 #endif
