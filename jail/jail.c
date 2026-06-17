@@ -3035,6 +3035,13 @@ static void post_main(struct uloop_timeout *t)
 #endif
 
 		if (opts.namespace & CLONE_NEWUSER) {
+			if (opts.overlaydir) {
+				if (chown(opts.overlaydir, opts.root_map_uid, opts.root_map_uid)) {
+					ERROR("chown(%s, %d, %d) failed: %m\n",
+					      opts.overlaydir, opts.root_map_uid, opts.root_map_uid);
+					free_and_exit(EXIT_FAILURE);
+				}
+			}
 			if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
 				ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
 				free_and_exit(EXIT_FAILURE);
