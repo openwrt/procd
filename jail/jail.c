@@ -150,6 +150,7 @@ static struct {
 	bool set_umask;
 	int require_jail;
 	struct {
+		struct hook_execvpe **prestart;
 		struct hook_execvpe **createRuntime;
 		struct hook_execvpe **createContainer;
 		struct hook_execvpe **startContainer;
@@ -306,6 +307,7 @@ static void free_opts(bool parent) {
 	free(opts.netdevices);
 	free(opts.extroot);
 	free(opts.overlaydir);
+	free_hooklist(opts.hooks.prestart);
 	free_hooklist(opts.hooks.createRuntime);
 	free_hooklist(opts.hooks.createContainer);
 	free_hooklist(opts.hooks.startContainer);
@@ -468,6 +470,7 @@ no_console:
 
 static int hook_running = 0;
 static int hook_return_code = 0;
+static bool hook_chain_failed = false;
 static struct hook_execvpe **current_hook = NULL;
 typedef void (*hook_return_handler)(void);
 static hook_return_handler hook_return_cb = NULL;
@@ -493,6 +496,8 @@ static void hook_process_handler(struct uloop_process *c, int ret)
 		hook_return_code = WTERMSIG(ret);
 		ERROR("hook (%d) exited with signal: %d\n", c->pid, hook_return_code);
 	}
+	if (hook_return_code)
+		hook_chain_failed = true;
 	hook_running = 0;
 	++current_hook;
 	run_hooklist();
@@ -555,8 +560,12 @@ static void run_hooklist(void)
 
 static void run_hooks(struct hook_execvpe **hooklist, hook_return_handler return_cb)
 {
-	if (!hooklist)
+	hook_chain_failed = false;
+
+	if (!hooklist) {
 		return_cb();
+		return;
+	}
 
 	current_hook = hooklist;
 	hook_return_cb = return_cb;
@@ -2746,13 +2755,17 @@ static int parseOCIhooks(struct blob_attr *msg)
 
 	blobmsg_parse(oci_hooks_policy, __OCI_HOOKS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
-	if (tb[OCI_HOOKS_PRESTART])
-		INFO("warning: ignoring deprecated prestart hook\n");
+	if (tb[OCI_HOOKS_PRESTART]) {
+		INFO("notice: deprecated prestart hook present; running it before createRuntime\n");
+		ret = parseOCIhook(&opts.hooks.prestart, tb[OCI_HOOKS_PRESTART]);
+		if (ret)
+			return ret;
+	}
 
 	if (tb[OCI_HOOKS_CREATERUNTIME]) {
 		ret = parseOCIhook(&opts.hooks.createRuntime, tb[OCI_HOOKS_CREATERUNTIME]);
 		if (ret)
-			return ret;
+			goto out_prestart;
 	}
 
 	if (tb[OCI_HOOKS_CREATECONTAINER]) {
@@ -2789,6 +2802,8 @@ out_createcontainer:
 	free_hooklist(opts.hooks.createContainer);
 out_createruntime:
 	free_hooklist(opts.hooks.createRuntime);
+out_prestart:
+	free_hooklist(opts.hooks.prestart);
 
 	return ret;
 };
@@ -4316,6 +4331,15 @@ errout:
 	return ret;
 }
 
+static void post_prestart(void)
+{
+	if (hook_chain_failed) {
+		ERROR("prestart hook failed; aborting container\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+	run_hooks(opts.hooks.createRuntime, post_create_runtime);
+}
+
 static void post_main(struct uloop_timeout *t)
 {
 	if (apply_rlimits()) {
@@ -4526,13 +4550,18 @@ static void post_main(struct uloop_timeout *t)
 		ERROR("failed to clone/fork: %m\n");
 		free_and_exit(EXIT_FAILURE);
 	}
-	run_hooks(opts.hooks.createRuntime, post_create_runtime);
+	run_hooks(opts.hooks.prestart, post_prestart);
 }
 
 static void post_poststart(void);
 static void post_create_runtime(void)
 {
 	char sig_buf[1];
+
+	if (hook_chain_failed) {
+		ERROR("createRuntime hook failed; aborting container\n");
+		free_and_exit(EXIT_FAILURE);
+	}
 
 	sig_buf[0] = 'O';
 	if (write(pipes[3], sig_buf, 1) < 0) {
@@ -4655,9 +4684,13 @@ static void pipe_send_start_container(struct uloop_timeout *t)
 
 static void post_poststart(void)
 {
-	uloop_run(); /* idle here while jail is running */
+	if (hook_chain_failed)
+		ERROR("poststart hook failed; stopping container\n");
+	else
+		uloop_run(); /* idle here while jail is running */
+
 	if (jail_running) {
-		DEBUG("uloop interrupted, killing jail process\n");
+		DEBUG("killing jail process\n");
 		kill(jail_process.pid, SIGTERM);
 		uloop_timeout_set(&jail_process_timeout, 1000);
 		uloop_run();
