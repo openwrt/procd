@@ -125,16 +125,5 @@ INSTALL(TARGETS uxc
 endif()
 
 IF(UTRACE_SUPPORT)
-ADD_EXECUTABLE(utrace trace/trace.c ${SOURCES_OCI_SECCOMP})
-TARGET_LINK_LIBRARIES(utrace ${ubox} ${json} ${blobmsg_json})
-INSTALL(TARGETS utrace
-	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
-)
-ADD_DEPENDENCIES(utrace syscall-names-h)
-
-ADD_LIBRARY(preload-trace SHARED trace/preload.c)
-TARGET_LINK_LIBRARIES(preload-trace dl)
-INSTALL(TARGETS preload-trace
-	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
+INSTALL(PROGRAMS trace2seccomp.uc DESTINATION ${CMAKE_INSTALL_SBINDIR} RENAME trace2seccomp)
 endif()
