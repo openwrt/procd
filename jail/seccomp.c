@@ -41,5 +41,5 @@ int install_syscall_filter(const char *argv, const char *file)
 		return -1;
 	}
 
-	return applyOCIlinuxseccomp(prog);
+	return applyOCIlinuxseccomp(prog, NULL, NULL);
 }

@@ -97,8 +97,6 @@
 
 #define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:ln:NoO:pP:r:R:sS:uU:w:t:T:yY:Z"
 
-#define OCI_VERSION_STRING "1.0.2"
-
 struct hook_execvpe {
 	char *file;
 	char **argv;
@@ -2910,7 +2908,7 @@ static void post_start_hook(void)
 		free_and_exit(EXIT_FAILURE);
 	}
 
-	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp))
+	if (opts.ociseccomp && applyOCIlinuxseccomp(opts.ociseccomp, opts.name, opts.ocibundle))
 		free_and_exit(EXIT_FAILURE);
 
 	uloop_end();

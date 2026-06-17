@@ -16,14 +16,16 @@
 #include <linux/filter.h>
 
 struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg);
-int applyOCIlinuxseccomp(struct sock_fprog *prog);
+int applyOCIlinuxseccomp(struct sock_fprog *prog, const char *container_id,
+			 const char *bundle_path);
 
 #ifndef SECCOMP_SUPPORT
 struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg) {
 	return NULL;
 }
 
-int applyOCIlinuxseccomp(struct sock_fprog *prog) {
+int applyOCIlinuxseccomp(struct sock_fprog *prog, const char *container_id,
+			 const char *bundle_path) {
 	return ENOTSUP;
 }
 #endif

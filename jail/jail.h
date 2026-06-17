@@ -13,6 +13,8 @@
 #ifndef _JAIL_JAIL_H_
 #define _JAIL_JAIL_H_
 
+#define OCI_VERSION_STRING "1.0.2"
+
 int mount_bind(const char *root, const char *path, int readonly, int error);
 int ns_open_pid(const char *nstype, const pid_t target_ns);
 
