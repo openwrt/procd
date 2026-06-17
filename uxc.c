@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <glob.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -28,6 +29,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include <libubus.h>
 #include <libubox/avl-cmp.h>
@@ -110,6 +112,7 @@ static const struct option kill_opts[] = {
 
 static const struct option delete_opts[] = {
 	{"force",		no_argument,		0,	'f'	},
+	{"volumes",		no_argument,		0,	'V'	},
 	{0,			0,			0,	0	}
 };
 
@@ -289,7 +292,7 @@ static int usage(void) {
 	printf("\tkill [--signal <sig>] [--all] <conf> [<sig>]\tsignal <conf> (no signal: graceful stop); --all+KILL: whole cgroup\n");
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
 	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
-	printf("\tdelete <conf> [--force]\t\t\tdelete <conf>\n");
+	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
 	printf("\tresume <conf>\t\t\t\tthaw a previously paused container <conf>\n");
 	printf("\texec <conf> [--process <file>] [-d] [-p <pid-file>] [-- cmd args]\n");
@@ -308,6 +311,8 @@ enum {
 	CONF_WRITE_OVERLAY_PATH,
 	CONF_VOLUMES,
 	CONF_IDMAP_OFFSET,
+	CONF_DATA_VOLUMES,
+	CONF_OVERLAY_SIZE,
 	__CONF_MAX,
 };
 
@@ -321,6 +326,8 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_WRITE_OVERLAY_PATH] = { .name = "write-overlay-path", .type = BLOBMSG_TYPE_STRING },
 	[CONF_VOLUMES] = { .name = "volumes", .type = BLOBMSG_TYPE_ARRAY },
 	[CONF_IDMAP_OFFSET] = { .name = "idmap-offset", .type = BLOBMSG_TYPE_STRING },
+	[CONF_DATA_VOLUMES] = { .name = "data-volumes", .type = BLOBMSG_TYPE_ARRAY },
+	[CONF_OVERLAY_SIZE] = { .name = "overlay-size", .type = BLOBMSG_TYPE_STRING },
 };
 
 static int conf_load(bool load_settings)
@@ -978,6 +985,26 @@ static int uxc_exists(char *name)
 	return 0;
 }
 
+enum {
+	VOL_NAME,
+	VOL_MOUNTPOINT,
+	VOL_SIZE,
+	__VOL_MAX,
+};
+
+static const struct blobmsg_policy vol_policy[__VOL_MAX] = {
+	[VOL_NAME] = { .name = "name", .type = BLOBMSG_TYPE_STRING },
+	[VOL_MOUNTPOINT] = { .name = "mountpoint", .type = BLOBMSG_TYPE_STRING },
+	[VOL_SIZE] = { .name = "size", .type = BLOBMSG_TYPE_STRING },
+};
+
+static int uvol_status(const char *vol);
+static const char *uvol_volume_name(const char *path);
+static int run_uvol(const char *action, const char *vol);
+static int provision_rw_uvol(const char *volname, const char *size);
+static int provision_data_volumes(const char *container, struct blob_attr *vols,
+				  struct blob_buf *req);
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode)
 {
@@ -987,9 +1014,11 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	uint32_t id;
 	struct settings *usettings = NULL;
 	char *path = NULL, *jailname = NULL, *pidfile = NULL, *tmprwsize = NULL, *writepath = NULL;
+	const char *imgvol = NULL;
 	char *seccomp_log = NULL;
+	char overlaypath[PATH_MAX];
 
-	void *in, *ins, *j;
+	void *in, *ins, *j, *m;
 	bool found = false;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
@@ -1008,6 +1037,10 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		return -ENOENT;
 
 	path = blobmsg_get_string(tb[CONF_PATH]);
+
+	imgvol = uvol_volume_name(path);
+	if (imgvol)
+		run_uvol("up", imgvol);
 
 	if (tb[CONF_PIDFILE])
 		pidfile = blobmsg_get_string(tb[CONF_PIDFILE]);
@@ -1061,7 +1094,27 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (systemd_cgroup)
 		blobmsg_add_u8(&req, "systemdcgroup", 1);
 
+	m = blobmsg_open_table(&req, "mount");
+	if (tb[CONF_DATA_VOLUMES]) {
+		ret = provision_data_volumes(name, tb[CONF_DATA_VOLUMES], &req);
+		if (ret) {
+			blobmsg_close_table(&req, m);
+			blob_buf_free(&req);
+			return ret;
+		}
+	}
+	blobmsg_close_table(&req, m);
+
 	blobmsg_close_table(&req, j);
+
+	if (!writepath && !tmprwsize && tb[CONF_OVERLAY_SIZE]) {
+		if (provision_rw_uvol(name, blobmsg_get_string(tb[CONF_OVERLAY_SIZE]))) {
+			blob_buf_free(&req);
+			return -EIO;
+		}
+		snprintf(overlaypath, sizeof(overlaypath), "/tmp/run/uvol/%s", name);
+		writepath = overlaypath;
+	}
 
 	if (writepath)
 		blobmsg_add_string(&req, "overlaydir", writepath);
@@ -1550,7 +1603,7 @@ static void fstab_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 	fstabinfo = blob_memdup(blobmsg_data(msg));
 }
 
-static int uxc_boot(void)
+static int uxc_boot(const char *mountpoint)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct runtime_state *rsstate = NULL;
@@ -1586,6 +1639,9 @@ static int uxc_boot(void)
 		if (!tb[CONF_NAME] || !tb[CONF_PATH])
 			continue;
 
+		if (mountpoint && strncmp(blobmsg_name(cur), mountpoint, strlen(mountpoint)))
+			continue;
+
 		rsstate = avl_find_element(&runtime, blobmsg_get_string(tb[CONF_NAME]), rsstate, avl);
 		if (rsstate)
 			continue;
@@ -1609,6 +1665,9 @@ static int uxc_boot(void)
 			if (checkvolumes(usettings->volumes))
 				continue;
 
+		if ((tb[CONF_DATA_VOLUMES] || tb[CONF_OVERLAY_SIZE]) && uvol_status(".meta"))
+			continue;
+
 		name = strdup(blobmsg_get_string(tb[CONF_NAME]));
 		if (uxc_exists(name))
 			continue;
@@ -1622,7 +1681,189 @@ static int uxc_boot(void)
 	return ret;
 }
 
-static int uxc_delete(char *name, bool force)
+static const char *uvol_volume_name(const char *path)
+{
+	const char prefix[] = "/tmp/run/uvol/";
+	const size_t plen = sizeof(prefix) - 1;
+
+	if (!path || strncmp(path, prefix, plen))
+		return NULL;
+
+	if (!path[plen] || strchr(path + plen, '/'))
+		return NULL;
+
+	return path + plen;
+}
+
+static int run_uvol_argv(char *const argv[])
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	if (pid == 0) {
+		execv(argv[0], argv);
+		_exit(127);
+	} else if (pid < 0) {
+		return -errno;
+	}
+
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
+
+	if (!WIFEXITED(status))
+		return -EIO;
+
+	return WEXITSTATUS(status);
+}
+
+static int run_uvol(const char *action, const char *vol)
+{
+	char *argv[] = { "/usr/sbin/uvol", (char *)action, (char *)vol, NULL };
+
+	return run_uvol_argv(argv);
+}
+
+static int run_uvol_create(const char *vol, const char *size, const char *type)
+{
+	char *argv[] = { "/usr/sbin/uvol", "create", (char *)vol,
+			 (char *)size, (char *)type, NULL };
+
+	return run_uvol_argv(argv);
+}
+
+static int run_uvol_resize(const char *vol, const char *size)
+{
+	char *argv[] = { "/usr/sbin/uvol", "resize", (char *)vol, (char *)size, NULL };
+
+	return run_uvol_argv(argv);
+}
+
+static int uvol_status(const char *vol)
+{
+	char *argv[] = { "/usr/sbin/uvol", "status", (char *)vol, NULL };
+
+	return run_uvol_argv(argv);
+}
+
+static long long parse_size_bytes(const char *s)
+{
+	char *end;
+	long long v;
+
+	if (!s)
+		return -1;
+
+	v = strtoll(s, &end, 10);
+	if (end == s || v < 0)
+		return -1;
+
+	switch (*end) {
+	case 'g':
+	case 'G':
+		v *= 1024;
+	case 'm':
+	case 'M':
+		v *= 1024;
+	case 'k':
+	case 'K':
+		v *= 1024;
+		++end;
+		break;
+	case '\0':
+		break;
+	default:
+		return -1;
+	}
+
+	if (*end)
+		return -1;
+
+	return v;
+}
+
+static int provision_rw_uvol(const char *volname, const char *size)
+{
+	char sizebytes[32];
+	long long bytes;
+	int st, rr;
+
+	bytes = parse_size_bytes(size);
+	if (bytes <= 0) {
+		fprintf(stderr, "uxc: invalid size '%s' for volume %s\n", size, volname);
+		return -EINVAL;
+	}
+	snprintf(sizebytes, sizeof(sizebytes), "%lld", bytes);
+
+	st = uvol_status(volname);
+	if (st == 2) {
+		if (run_uvol_create(volname, sizebytes, "rw")) {
+			fprintf(stderr, "uxc: failed to create volume %s\n", volname);
+			return -EIO;
+		}
+	} else {
+		rr = run_uvol_resize(volname, sizebytes);
+		if (rr == 22)
+			fprintf(stderr, "uxc: volume %s larger than requested, kept\n", volname);
+		else if (rr) {
+			fprintf(stderr, "uxc: failed to resize volume %s\n", volname);
+			return -EIO;
+		}
+	}
+
+	if (run_uvol("up", volname)) {
+		fprintf(stderr, "uxc: failed to activate volume %s\n", volname);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int provision_data_volumes(const char *container, struct blob_attr *vols,
+				  struct blob_buf *req)
+{
+	struct blob_attr *vcur, *vt[__VOL_MAX];
+	char volname[256], bindspec[PATH_MAX];
+	const char *vname, *vmount, *vsize;
+	int vrem;
+
+	blobmsg_for_each_attr(vcur, vols, vrem) {
+		blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(vcur), blobmsg_len(vcur));
+		if (!vt[VOL_NAME] || !vt[VOL_MOUNTPOINT])
+			continue;
+
+		vname = blobmsg_get_string(vt[VOL_NAME]);
+		vmount = blobmsg_get_string(vt[VOL_MOUNTPOINT]);
+		vsize = vt[VOL_SIZE] ? blobmsg_get_string(vt[VOL_SIZE]) : "64m";
+
+		snprintf(volname, sizeof(volname), "%s.%s", container, vname);
+		if (provision_rw_uvol(volname, vsize))
+			return -EIO;
+
+		snprintf(bindspec, sizeof(bindspec), "/tmp/run/uvol/%s:%s", volname, vmount);
+		blobmsg_add_string(req, bindspec, "2");
+	}
+
+	return 0;
+}
+
+static void reap_data_volumes(const char *container, struct blob_attr *vols)
+{
+	struct blob_attr *vcur, *vt[__VOL_MAX];
+	char volname[256];
+	int vrem;
+
+	blobmsg_for_each_attr(vcur, vols, vrem) {
+		blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(vcur), blobmsg_len(vcur));
+		if (!vt[VOL_NAME])
+			continue;
+		snprintf(volname, sizeof(volname), "%s.%s", container,
+			 blobmsg_get_string(vt[VOL_NAME]));
+		if (run_uvol("remove", volname))
+			fprintf(stderr, "uxc: warning: could not remove volume %s\n", volname);
+	}
+}
+
+static int uxc_delete(char *name, bool force, bool volumes)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct runtime_state *rsstate = NULL;
@@ -1633,6 +1874,7 @@ static int uxc_delete(char *name, bool force)
 	const char *cfname = NULL;
 	const char *sfname = NULL;
 	struct stat sb;
+	const char *statevol = NULL;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
@@ -1683,6 +1925,13 @@ static int uxc_delete(char *name, bool force)
 	if (usettings)
 		sfname = usettings->fname;
 
+	if (usettings && usettings->writepath)
+		statevol = uvol_volume_name(usettings->writepath);
+	else if (tb[CONF_WRITE_OVERLAY_PATH])
+		statevol = uvol_volume_name(blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]));
+	else if (tb[CONF_OVERLAY_SIZE])
+		statevol = name;
+
 	if (sfname) {
 		if (stat(sfname, &sb) == -1) {
 			ret = -ENOENT;
@@ -1702,6 +1951,14 @@ static int uxc_delete(char *name, bool force)
 
 	if (unlink(cfname) == -1)
 		ret = -errno;
+
+	if (!ret && volumes && statevol) {
+		if (run_uvol("remove", statevol))
+			fprintf(stderr, "uxc: warning: could not remove state volume %s\n", statevol);
+	}
+
+	if (!ret && volumes && tb[CONF_DATA_VOLUMES])
+		reap_data_volumes(name, tb[CONF_DATA_VOLUMES]);
 
 errout:
 	return ret;
@@ -1880,9 +2137,9 @@ next_global:
 			goto usage_out;
 		ret = uxc_attach(verb_argv[1]);
 	} else if (!strcmp(verb, "boot")) {
-		if (verb_argc != 1)
+		if (verb_argc != 1 && verb_argc != 2)
 			goto usage_out;
-		ret = uxc_boot();
+		ret = uxc_boot(verb_argc == 2 ? verb_argv[1] : NULL);
 	} else if (!strcmp(verb, "start")) {
 		bool console = false;
 
@@ -1948,16 +2205,18 @@ next_global:
 		ret = uxc_set(verb_argv[1], NULL, 0, NULL, NULL, NULL, NULL);
 	} else if (!strcmp(verb, "delete")) {
 		bool force = false;
+		bool volumes = false;
 
-		while ((c = getopt_long(verb_argc, verb_argv, "f", delete_opts, NULL)) != -1) {
+		while ((c = getopt_long(verb_argc, verb_argv, "fV", delete_opts, NULL)) != -1) {
 			switch (c) {
 			case 'f': force = true; break;
+			case 'V': volumes = true; break;
 			default: goto usage_out;
 			}
 		}
 		if (optind != verb_argc - 1)
 			goto usage_out;
-		ret = uxc_delete(verb_argv[optind], force);
+		ret = uxc_delete(verb_argv[optind], force, volumes);
 	} else if (!strcmp(verb, "create")) {
 		char *bundle = NULL, *pidfile = NULL;
 		char *tmprwsize = NULL, *writepath = NULL, *requiredmounts = NULL;
