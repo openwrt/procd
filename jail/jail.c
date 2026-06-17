@@ -202,33 +202,33 @@ static void free_oci_envp(char **p) {
 
 static void free_hooklist(struct hook_execvpe **hooklist)
 {
-	struct hook_execvpe *cur;
+	struct hook_execvpe **cur;
 
 	if (!hooklist)
 		return;
 
-	cur = *hooklist;
-	while (cur) {
-		free_oci_envp(cur->argv);
-		free_oci_envp(cur->envp);
-		free(cur->file);
-		free(cur++);
+	cur = hooklist;
+	while (*cur) {
+		free_oci_envp((*cur)->argv);
+		free_oci_envp((*cur)->envp);
+		free((*cur)->file);
+		free(*(cur++));
 	}
 	free(hooklist);
 }
 
 static void free_sysctl(void) {
-	struct sysctl_val *cur;
+	struct sysctl_val **cur;
 
 	if (!opts.sysctl)
 		return;
 
-	cur = *opts.sysctl;
+	cur = opts.sysctl;
 
-	while (cur) {
-		free(cur->entry);
-		free(cur->value);
-		free(cur++);
+	while (*cur) {
+		free((*cur)->entry);
+		free((*cur)->value);
+		free(*(cur++));
 	}
 	free(opts.sysctl);
 }
