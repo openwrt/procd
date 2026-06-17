@@ -380,16 +380,43 @@ free_source_out:
 	return ret;
 }
 
+static bool nullable_str_eq(const char *a, const char *b)
+{
+	if (a == b)
+		return true;
+	if (!a || !b)
+		return false;
+	return !strcmp(a, b);
+}
+
 static int _add_mount(const char *source, const char *target, const char *filesystemtype,
 		      unsigned long mountflags, unsigned long propflags, const char *optstr,
 		      int error, bool inner)
 {
+	struct mount *m;
+
 	assert(target != NULL);
 
-	if (avl_find(&mounts, target))
-		return 1;
+	m = avl_find_element(&mounts, target, m, avl);
+	if (m) {
+		bool source_match;
+		if (m->source == (void *)(-1) || source == (void *)(-1))
+			source_match = (m->source == source);
+		else
+			source_match = nullable_str_eq(m->source, source);
 
-	struct mount *m;
+		if (source_match &&
+		    nullable_str_eq(m->filesystemtype, filesystemtype) &&
+		    nullable_str_eq(m->optstr, optstr) &&
+		    m->mountflags == mountflags &&
+		    m->propflags == propflags &&
+		    m->error == error &&
+		    m->inner == inner)
+			return 0;
+
+		return EEXIST;
+	}
+
 	m = calloc(1, sizeof(struct mount));
 	if (!m)
 		return ENOMEM;
