@@ -584,6 +584,8 @@ enum {
 	OCI_LINUX_CGROUPS_CPU_SHARES,
 	OCI_LINUX_CGROUPS_CPU_PERIOD,
 	OCI_LINUX_CGROUPS_CPU_QUOTA,
+	OCI_LINUX_CGROUPS_CPU_BURST,
+	OCI_LINUX_CGROUPS_CPU_IDLE,
 	OCI_LINUX_CGROUPS_CPU_REALTIMERUNTIME,
 	OCI_LINUX_CGROUPS_CPU_REALTIMEPERIOD,
 	OCI_LINUX_CGROUPS_CPU_CPUS,
@@ -595,6 +597,8 @@ static const struct blobmsg_policy oci_linux_cgroups_cpu_policy[] = {
 	[OCI_LINUX_CGROUPS_CPU_SHARES] = { "shares", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_PERIOD] = { "period", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_QUOTA] = { "quota", BLOBMSG_CAST_INT64 }, /* signed int64! */
+	[OCI_LINUX_CGROUPS_CPU_BURST] = { "burst", BLOBMSG_CAST_INT64 },
+	[OCI_LINUX_CGROUPS_CPU_IDLE] = { "idle", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_REALTIMEPERIOD] = { "realtimePeriod", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_REALTIMERUNTIME] = { "realtimeRuntime", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_CPUS] = { "cpus", BLOBMSG_TYPE_STRING },
@@ -644,6 +648,18 @@ static int parseOCIlinuxcgroups_legacy_cpu(struct blob_attr *msg)
 	if (tmp[0])
 		cgroups_set("cpu.max", tmp);
 
+	if (tb[OCI_LINUX_CGROUPS_CPU_BURST]) {
+		snprintf(tmp, sizeof(tmp), "%" PRIu64,
+			 blobmsg_cast_u64(tb[OCI_LINUX_CGROUPS_CPU_BURST]));
+		cgroups_set("cpu.max.burst", tmp);
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_CPU_IDLE]) {
+		snprintf(tmp, sizeof(tmp), "%" PRId64,
+			 blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_CPU_IDLE]));
+		cgroups_set("cpu.idle", tmp);
+	}
+
 	if (tb[OCI_LINUX_CGROUPS_CPU_CPUS])
 		cgroups_set("cpuset.cpus", blobmsg_get_string(tb[OCI_LINUX_CGROUPS_CPU_CPUS]));
 
@@ -663,6 +679,7 @@ enum {
 	OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS,
 	OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER,
 	OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY,
+	OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE,
 	__OCI_LINUX_CGROUPS_MEMORY_MAX,
 };
 
@@ -675,6 +692,7 @@ static const struct blobmsg_policy oci_linux_cgroups_memory_policy[] = {
 	[OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS] = { "swappiness", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER] = { "disableOOMKiller", BLOBMSG_TYPE_BOOL },
 	[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY] = { "useHierarchy", BLOBMSG_TYPE_BOOL },
+	[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE] = { "checkBeforeUpdate", BLOBMSG_TYPE_BOOL },
 };
 
 static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
@@ -698,7 +716,6 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 	    tb[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER] ||
 	    tb[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY])
 		return ENOTSUP;
-
 
 	if (tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]) {
 		limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]);
@@ -732,7 +749,7 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 		else
 			snprintf(tmp, sizeof(tmp), "%" PRId64, limit - swap);
 
-		cgroups_set("memory.swap_max", tmp);
+		cgroups_set("memory.swap.max", tmp);
 	}
 
 	return 0;
@@ -752,13 +769,18 @@ static int parseOCIlinuxcgroups_legacy_pids(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MEMORY_MAX];
 	char tmp[32] = { 0 };
+	int64_t limit;
 
 	blobmsg_parse(oci_linux_cgroups_pids_policy, __OCI_LINUX_CGROUPS_PIDS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
 	if (!tb[OCI_LINUX_CGROUPS_PIDS_LIMIT])
-		return EINVAL;
+		return 0;
 
-	snprintf(tmp, sizeof(tmp), "%" PRIu64, blobmsg_cast_u64(tb[OCI_LINUX_CGROUPS_PIDS_LIMIT]));
+	limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_PIDS_LIMIT]);
+	if (limit < 0)
+		strcpy(tmp, "max");
+	else
+		snprintf(tmp, sizeof(tmp), "%" PRId64, limit);
 
 	cgroups_set("pids.max", tmp);
 
