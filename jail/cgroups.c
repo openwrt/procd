@@ -695,6 +695,14 @@ static const struct blobmsg_policy oci_linux_cgroups_memory_policy[] = {
 	[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE] = { "checkBeforeUpdate", BLOBMSG_TYPE_BOOL },
 };
 
+void cgroups_set_memory_limit(int64_t bytes)
+{
+	char tmp[32];
+
+	snprintf(tmp, sizeof(tmp), "%" PRId64, bytes);
+	cgroups_set("memory.max", tmp);
+}
+
 static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MEMORY_MAX];

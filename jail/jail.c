@@ -3824,12 +3824,48 @@ static const struct blobmsg_policy oci_policy[] = {
 	[OCI_ANNOTATIONS] = { "annotations", BLOBMSG_TYPE_TABLE },
 };
 
+static int64_t read_memtotal_bytes(void)
+{
+	char buf[512];
+	char *p;
+	char *end;
+	int64_t kb;
+	int fd;
+	ssize_t n;
+
+	fd = open("/proc/meminfo", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	do {
+		n = read(fd, buf, sizeof(buf) - 1);
+	} while (n < 0 && errno == EINTR);
+	close(fd);
+	if (n <= 0)
+		return -1;
+	buf[n] = '\0';
+	p = strstr(buf, "MemTotal:");
+	if (!p)
+		return -1;
+	p += strlen("MemTotal:");
+	while (*p == ' ' || *p == '\t')
+		p++;
+	kb = strtoll(p, &end, 10);
+	if (end == p || kb <= 0)
+		return -1;
+	return kb * 1024;
+}
+
 static int parseOCI(const char *jsonfile)
 {
 	struct blob_attr *tb[__OCI_MAX];
 	struct blob_attr *cur;
 	int rem;
+	int arem;
+	struct blob_attr *acur;
 	int res;
+	long pct;
+	char *pct_end;
+	int64_t memtotal;
 
 	blob_buf_init(&ocibuf, 0);
 
@@ -3887,9 +3923,35 @@ static int parseOCI(const char *jsonfile)
 	if (tb[OCI_HOOKS] && (res = parseOCIhooks(tb[OCI_HOOKS])))
 		goto errout;
 
-	if (tb[OCI_ANNOTATIONS])
+	if (tb[OCI_ANNOTATIONS]) {
 		opts.annotations = blob_memdup(tb[OCI_ANNOTATIONS]);
 
+		blobmsg_for_each_attr(acur, tb[OCI_ANNOTATIONS], arem) {
+			const char *name = blobmsg_name(acur);
+			const char *val;
+
+			if (!name || blobmsg_type(acur) != BLOBMSG_TYPE_STRING)
+				continue;
+
+			val = blobmsg_get_string(acur);
+
+			if (!strcmp(name, "org.openwrt.cgroup.memory.pct")) {
+				pct = strtol(val, &pct_end, 10);
+				if (pct_end == val || pct < 1 || pct > 100) {
+					ERROR("cgroup.memory.pct: invalid value '%s'\n", val);
+					res = EINVAL;
+					goto errout;
+				}
+				memtotal = read_memtotal_bytes();
+				if (memtotal < 0) {
+					ERROR("cgroup.memory.pct: cannot read MemTotal\n");
+					res = EIO;
+					goto errout;
+				}
+				cgroups_set_memory_limit(memtotal * pct / 100);
+			}
+		}
+	}
 errout:
 	blob_buf_free(&ocibuf);
 
