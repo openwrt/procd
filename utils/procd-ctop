@@ -1,0 +1,558 @@
+#!/usr/bin/env ucode
+'use strict';
+//
+// procd-ctop - a top-like per-service CPU/memory/IO snapshot for procd services,
+// each of which lives in its own cgroup (cgroup v2 unified hierarchy).
+//
+// Read-only: it never enables a controller. MEM/PEAK need +memory delegated,
+// IO needs +io; without them those columns show "-". With -t, PEAK covers the
+// window (all-time on kernels whose memory.peak can't be reset). -p adds PSI
+// columns, "-" where there is no *.pressure file.
+//
+
+import { readfile, lsdir, access, open } from 'fs';
+
+const myName = "procd-ctop";
+
+// ---- defaults --------------------------------------------------------------
+
+let base    = "/sys/fs/cgroup/services";
+let cgroot  = "/sys/fs/cgroup";            // cgroup v2 mount root (for the [system] row)
+let window  = 60;                          // CPU sample window in seconds (only with -t)
+let sortKey = "cpu";
+let sortSet = false;                       // true once --sort is given explicitly
+let leaf    = false;
+let instant = true;                        // -t flips to timed
+let json    = false;
+let normalize = false;
+let showPsi = false;
+
+// ---- helpers ---------------------------------------------------------------
+
+function die(msg) {
+	warn(`${myName}: ${msg}\n`);
+	exit(1);
+}
+
+function usage() {
+	print(`${myName} - cgroup top: per-service CPU and memory snapshot (cgroup v2)
+
+Usage: ${myName} [options]
+
+By default ${myName} prints an instant snapshot: total CPU time and memory, no CPU%.
+Pass -t to measure CPU% over a sample window.
+
+Options:
+  -t, --time <sec>     measure CPU% over an <sec> sample window (default: 60);
+                       PEAK then covers the window instead of all time
+  -p, --pressure       add the PSI_C, PSI_M and PSI_IO columns: % of the window
+                       (or the kernel's 300s average without -t) with at least
+                       one task stalled on cpu / memory / io
+  -s, --sort <col>     sort by column (case-insensitive): SERVICE | CPU% |
+                       CPUTIME | MEM | PEAK | RD | WR | IO
+                       (default: CPUTIME, or CPU% with -t)
+  -b, --base <path>    cgroup base directory (default: /sys/fs/cgroup/services)
+  -l, --leaf           list only leaf cgroups (where processes actually run),
+                       not just top-level services
+  -n, --normalize      render CPUTIME as CPU%avg over uptime, MEM/PEAK as a
+                       percentage of total RAM, and the IO read/write as average
+                       throughput over uptime (bytes/sec)
+  -j, --json           emit a JSON array instead of the table; raw units, null
+                       for unavailable counters. cpu_pct is null without -t;
+                       psi_* are always included
+  -h, --help           show this help
+
+CPU% (with -t) is summed across cores, so 100% means one full core.
+`);
+}
+
+// All descendant directories of dir. lsdir() returns null on a non-directory,
+// which is how we tell dirs from cgroup control files without stat().
+function walk(dir, out) {
+	let names = lsdir(dir);
+	if (names == null)
+		return out;
+	for (let n in names) {
+		let p = `${dir}/${n}`;
+		if (lsdir(p) != null) {
+			push(out, p);
+			walk(p, out);
+		}
+	}
+	return out;
+}
+
+function read_usec(dir) {
+	let s = readfile(`${dir}/cpu.stat`);
+	if (s == null)
+		return null;
+	for (let line in split(s, "\n")) {
+		let p = split(line, " ");
+		if (p[0] == "usage_usec")
+			return int(p[1]);
+	}
+	return null;
+}
+
+// CPU charged to the root but not to any top-level child: kernel threads plus
+// tasks parked in the root (init/procd). null when the root has no cpu.stat.
+function read_system_usec(root) {
+	let total = read_usec(root);
+	if (total == null)
+		return null;
+	let names = lsdir(root);
+	if (names == null)
+		return total;
+	let sum = 0;
+	for (let n in names) {
+		let u = read_usec(`${root}/${n}`);
+		if (u != null)
+			sum += u;
+	}
+	let r = total - sum;
+	return (r < 0) ? 0 : r;
+}
+
+// A service's memory.* already aggregates its subtree; if the controller is
+// enabled only on the leaf instances, sum those instead. null when off entirely.
+function read_mem(dir, file) {
+	let s = readfile(`${dir}/${file}`);
+	if (s != null)
+		return int(trim(s));
+	let total = null;
+	for (let d in walk(dir, [])) {
+		let v = readfile(`${d}/${file}`);
+		if (v != null)
+			total = (total ?? 0) + int(trim(v));
+	}
+	return total;
+}
+
+function parse_io(s) {
+	let r = 0, w = 0;
+	for (let line in split(s, "\n"))
+		for (let tok in split(trim(line), " ")) {
+			if (substr(tok, 0, 7) == "rbytes=")      r += int(substr(tok, 7));
+			else if (substr(tok, 0, 7) == "wbytes=")  w += int(substr(tok, 7));
+		}
+	return { r: r, w: w };
+}
+
+// Same subtree-aggregation logic as read_mem. null when no io.stat anywhere.
+function read_io(dir) {
+	let s = readfile(`${dir}/io.stat`);
+	if (s != null)
+		return parse_io(s);
+	let acc = null;
+	for (let d in walk(dir, [])) {
+		let v = readfile(`${d}/io.stat`);
+		if (v != null) {
+			let p = parse_io(v);
+			acc = acc ?? { r: 0, w: 0 };
+			acc.r += p.r;
+			acc.w += p.w;
+		}
+	}
+	return acc;
+}
+
+// Writing memory.peak resets a high water mark private to that fd, so hold it
+// open across the window and read it back. null when not writable.
+function peak_reset_fd(path) {
+	let h = open(path, "r+");
+	if (h == null)
+		return null;
+	if (h.write("0\n") == null) {
+		h.close();
+		return null;
+	}
+	h.flush();
+	return h;
+}
+
+// One fd on the service, or one per leaf as in read_mem. [] if none reset.
+function peak_window_open(dir, file) {
+	let h = peak_reset_fd(`${dir}/${file}`);
+	if (h != null)
+		return [h];
+	if (access(`${dir}/${file}`))
+		return [];
+	let hs = [];
+	for (let d in walk(dir, []))
+		if ((h = peak_reset_fd(`${d}/${file}`)) != null)
+			push(hs, h);
+	return hs;
+}
+
+// Sum and close the held fds; null when there were none.
+function peak_window_read(hs) {
+	if (length(hs) == 0)
+		return null;
+	let total = 0;
+	for (let h in hs) {
+		h.seek(0);
+		let s = h.read("all");
+		if (s != null)
+			total += int(trim(s));
+		h.close();
+	}
+	return total;
+}
+
+// A field from the "some" line of a *.pressure file; null without PSI.
+function read_pressure(dir, file, field) {
+	let s = readfile(`${dir}/${file}`);
+	if (s == null)
+		return null;
+	let flen = length(field);
+	for (let line in split(s, "\n")) {
+		let p = split(line, " ");
+		if (p[0] == "some")
+			for (let tok in p)
+				if (substr(tok, 0, flen) == field)
+					return substr(tok, flen);
+	}
+	return null;
+}
+
+// Stall time between two total= samples as a share of the window.
+function psi_pct(t0v, t1v, windowUs) {
+	if (t0v == null || t1v == null)
+		return null;
+	let delta = int(t1v) - int(t0v);
+	if (delta < 0) delta = 0;
+	return sprintf("%.2f", (delta * 100.0) / windowUs);
+}
+
+function fmt_cputime(us) {
+	let s = int(us / 1000000);
+	return sprintf("%d:%02d:%02d", int(s / 3600), int((s % 3600) / 60), s % 60);
+}
+
+function read_uptime_us() {
+	let s = readfile("/proc/uptime");
+	if (s == null)
+		return null;
+	let secs = split(trim(s), " ")[0] * 1.0;
+	return (secs > 0) ? secs * 1000000 : null;
+}
+
+// /proc/meminfo lists kB; scale to bytes to match the cgroup counters.
+function read_meminfo_bytes(key) {
+	let s = readfile("/proc/meminfo");
+	if (s == null)
+		return null;
+	for (let line in split(s, "\n")) {
+		let p = split(line, ":");
+		if (p[0] == key)
+			return int(trim(p[1])) * 1024;
+	}
+	return null;
+}
+
+function fmt_pct(v, total) {
+	if (v == null || total == null || total <= 0)
+		return "-";
+	return sprintf("%.1f", (v * 100.0) / total);
+}
+
+function pct_or_null(v, total) {
+	if (v == null || total == null || total <= 0)
+		return null;
+	return (v * 100.0) / total;
+}
+
+function fmt_bytes(b) {
+	let units = [ "B", "KB", "MB", "GB", "TB", "PB" ];
+	let u = 0, frac = 0, v = b;
+	while (v >= 1024 && u < 5) {
+		frac = int((v % 1024) * 10 / 1024);
+		v = int(v / 1024);
+		u++;
+	}
+	if (u == 0)
+		return sprintf("%d%s", v, units[0]);
+	return sprintf("%d.%d%s", v, frac, units[u]);
+}
+
+// Under the base: path relative to it. Outside (escaped the hierarchy): path
+// relative to the cgroup root, wrapped in {braces}.
+function label_of(dir) {
+	let pfx = `${base}/`;
+	if (substr(dir, 0, length(pfx)) == pfx) {
+		let p = substr(dir, length(pfx));
+		return (p == "") ? "/" : p;
+	}
+	let rpfx = `${cgroot}/`;
+	let rel = (substr(dir, 0, length(rpfx)) == rpfx) ? substr(dir, length(rpfx)) : dir;
+	return `{${rel}}`;
+}
+
+function is_leaf(dir) {
+	let names = lsdir(dir);
+	if (names == null)
+		return false;
+	for (let n in names)
+		if (lsdir(`${dir}/${n}`) != null)
+			return false;
+	return true;
+}
+
+// Cgroups to report on: anything exposing cpu.stat or memory.current. Default
+// is top-level services; -l descends to leaves (where processes actually run).
+function discover() {
+	let dirs = [];
+	let candidates;
+	if (leaf) {
+		candidates = walk(base, []);
+	} else {
+		candidates = [];
+		let names = lsdir(base);
+		if (names != null)
+			for (let n in names)
+				push(candidates, `${base}/${n}`);
+	}
+	for (let d in candidates) {
+		if (leaf && !is_leaf(d))
+			continue;
+		if (access(`${d}/cpu.stat`) || access(`${d}/memory.current`))
+			push(dirs, d);
+	}
+	return dirs;
+}
+
+// Top-level cgroups outside the base (e.g. lxc.payload.*) that escaped procd's
+// hierarchy. Otherwise invisible, yet their CPU is subtracted out of [system],
+// so surface them as their own {braced} rows.
+function discover_strays() {
+	let dirs = [];
+	let names = lsdir(cgroot);
+	if (names == null)
+		return dirs;
+	for (let n in names) {
+		let top = `${cgroot}/${n}`;
+		if (top == base || lsdir(top) == null)
+			continue;
+		let candidates = leaf ? walk(top, []) : [top];
+		if (leaf && length(candidates) == 0)
+			candidates = [top];
+		for (let d in candidates) {
+			if (leaf && !is_leaf(d))
+				continue;
+			if (access(`${d}/cpu.stat`) || access(`${d}/memory.current`))
+				push(dirs, d);
+		}
+	}
+	return dirs;
+}
+
+// ---- arg parsing -----------------------------------------------------------
+
+let i = 0;
+while (i < length(ARGV)) {
+	let a = ARGV[i];
+	if (a == "-t" || a == "--time") {
+		let raw = ARGV[++i];
+		if (raw == null || !match(raw, /^[0-9]+$/))
+			die("--time must be a non-negative integer");
+		window = int(raw);
+		instant = false;
+	}
+	else if (a == "-s" || a == "--sort") { sortKey = ARGV[++i]; sortSet = true; }
+	else if (a == "-b" || a == "--base") { base = ARGV[++i]; }
+	else if (a == "-l" || a == "--leaf") { leaf = true; }
+	else if (a == "-n" || a == "--normalize") { normalize = true; }
+	else if (a == "-p" || a == "--pressure") { showPsi = true; }
+	else if (a == "-j" || a == "--json") { json = true; }
+	else if (a == "-h" || a == "--help") { usage(); exit(0); }
+	else die(`unknown option: ${a} (try --help)`);
+	i++;
+}
+
+let k = lc(sortKey ?? "");
+if (k == "service" || k == "name")     sortKey = "name";
+else if (k == "cpu%" || k == "cpu")    sortKey = "cpu";
+else if (k == "cputime" || k == "time") sortKey = "time";
+else if (k == "mem")                   sortKey = "mem";
+else if (k == "peak")                  sortKey = "peak";
+else if (k == "rd" || k == "read")     sortKey = "rd";
+else if (k == "wr" || k == "write")    sortKey = "wr";
+else if (k == "io")                    sortKey = "io";
+else die(`bad --sort key: ${sortKey} (use SERVICE | CPU% | CPUTIME | MEM | PEAK | RD | WR | IO)`);
+
+if (lsdir(base) == null)
+	die(`cgroup base not found: ${base}`);
+
+// Instant mode has no CPU%, so fall back to CPU time unless told otherwise.
+if ((instant || window == 0) && !sortSet && sortKey == "cpu")
+	sortKey = "time";
+
+// ---- collect ---------------------------------------------------------------
+
+let cgroups = discover();
+for (let s in discover_strays())
+	push(cgroups, s);
+if (length(cgroups) == 0)
+	die(`no service cgroups found under ${base}`);
+
+let t0 = {};
+let pc0 = {}, pm0 = {}, pio0 = {};   // pressure total= at t0
+let peakFd = {};                     // memory.peak fds reset at t0
+let sys_t0 = null;
+let sys_pc0 = null, sys_pm0 = null, sys_pio0 = null;
+if (!instant && window > 0) {
+	for (let d in cgroups) {
+		t0[d] = read_usec(d);
+		pc0[d] = read_pressure(d, "cpu.pressure", "total=");
+		pm0[d] = read_pressure(d, "memory.pressure", "total=");
+		pio0[d] = read_pressure(d, "io.pressure", "total=");
+		peakFd[d] = peak_window_open(d, "memory.peak");
+	}
+	sys_t0 = read_system_usec(cgroot);
+	sys_pc0 = read_pressure(cgroot, "cpu.pressure", "total=");
+	sys_pm0 = read_pressure(cgroot, "memory.pressure", "total=");
+	sys_pio0 = read_pressure(cgroot, "io.pressure", "total=");
+	system(sprintf("sleep %d", window));
+}
+
+let windowUs = window * 1000000;
+
+let uptimeUs   = normalize ? read_uptime_us() : null;
+let memTotalB  = normalize ? read_meminfo_bytes("MemTotal") : null;
+if (normalize && uptimeUs == null)
+	die("--normalize: cannot read /proc/uptime");
+if (normalize && memTotalB == null)
+	die("--normalize: cannot read MemTotal from /proc/meminfo");
+
+let rows = [];
+
+for (let d in cgroups) {
+	let totalUs = read_usec(d) ?? 0;
+	let cur  = read_mem(d, "memory.current");
+	let peak = (instant || window == 0) ? read_mem(d, "memory.peak")
+	           : (peak_window_read(peakFd[d]) ?? read_mem(d, "memory.peak"));
+	let io   = read_io(d);
+	let cpuP, memP, ioP;
+	if (instant || window == 0) {
+		cpuP = read_pressure(d, "cpu.pressure", "avg300=");
+		memP = read_pressure(d, "memory.pressure", "avg300=");
+		ioP  = read_pressure(d, "io.pressure", "avg300=");
+	} else {
+		cpuP = psi_pct(pc0[d], read_pressure(d, "cpu.pressure", "total="), windowUs);
+		memP = psi_pct(pm0[d], read_pressure(d, "memory.pressure", "total="), windowUs);
+		ioP  = psi_pct(pio0[d], read_pressure(d, "io.pressure", "total="), windowUs);
+	}
+
+	let cpu = -1;   // sentinel: not measured (instant)
+	if (!(instant || window == 0)) {
+		let delta = totalUs - (t0[d] ?? totalUs);
+		if (delta < 0) delta = 0;
+		cpu = (delta * 100.0) / windowUs;
+	}
+
+	push(rows, { name: label_of(d), cpu: cpu, cputime: totalUs, mem: cur, peak: peak,
+	             rd: (io == null) ? null : io.r, wr: (io == null) ? null : io.w,
+	             cpuP: cpuP, memP: memP, ioP: ioP });
+}
+
+// The root has cpu.stat but no memory.current, so its MEM/PEAK/IO are "-".
+// Its PSI is the root's, i.e. the whole system.
+let sysUs = read_system_usec(cgroot);
+if (sysUs != null) {
+	let sysCpu = -1;
+	if (!(instant || window == 0)) {
+		let delta = sysUs - (sys_t0 ?? sysUs);
+		if (delta < 0) delta = 0;
+		sysCpu = (delta * 100.0) / windowUs;
+	}
+	let sysCpuP, sysMemP, sysIoP;
+	if (instant || window == 0) {
+		sysCpuP = read_pressure(cgroot, "cpu.pressure", "avg300=");
+		sysMemP = read_pressure(cgroot, "memory.pressure", "avg300=");
+		sysIoP  = read_pressure(cgroot, "io.pressure", "avg300=");
+	} else {
+		sysCpuP = psi_pct(sys_pc0, read_pressure(cgroot, "cpu.pressure", "total="), windowUs);
+		sysMemP = psi_pct(sys_pm0, read_pressure(cgroot, "memory.pressure", "total="), windowUs);
+		sysIoP  = psi_pct(sys_pio0, read_pressure(cgroot, "io.pressure", "total="), windowUs);
+	}
+	push(rows, { name: "[system]", cpu: sysCpu, cputime: sysUs, mem: null, peak: null,
+	             rd: null, wr: null, cpuP: sysCpuP, memP: sysMemP, ioP: sysIoP });
+}
+
+// ---- sort & print ----------------------------------------------------------
+
+if (sortKey == "name") {
+	sort(rows, (a, b) => (a.name < b.name) ? -1 : ((a.name > b.name) ? 1 : 0));
+} else {
+	let keyOf = (r) => {
+		if (sortKey == "cpu")  return r.cpu;
+		if (sortKey == "time") return r.cputime;
+		if (sortKey == "mem")  return r.mem ?? 0;
+		if (sortKey == "rd")   return r.rd ?? 0;
+		if (sortKey == "wr")   return r.wr ?? 0;
+		if (sortKey == "io")   return (r.rd ?? 0) + (r.wr ?? 0);
+		return r.peak ?? 0;
+	};
+	sort(rows, (a, b) => {
+		let x = keyOf(a), y = keyOf(b);
+		return (y > x) ? 1 : ((y < x) ? -1 : 0);   // descending
+	});
+}
+
+if (json) {
+	let out = [];
+	for (let r in rows)
+		push(out, {
+			service:      r.name,
+			cpu_pct:      (r.cpu < 0)      ? null : r.cpu,
+			cputime_usec: r.cputime,
+			cputime_pct:  normalize ? (r.cputime * 100.0) / uptimeUs : null,
+			mem:          r.mem,
+			mem_pct:      normalize ? pct_or_null(r.mem,  memTotalB) : null,
+			peak:         r.peak,
+			peak_pct:     normalize ? pct_or_null(r.peak, memTotalB) : null,
+			rd:           r.rd,
+			wr:           r.wr,
+			psi_cpu:      (r.cpuP == null) ? null : r.cpuP * 1,
+			psi_mem:      (r.memP == null) ? null : r.memP * 1,
+			psi_io:       (r.ioP == null)  ? null : r.ioP * 1,
+		});
+	printf("%J\n", out);
+	exit(0);
+}
+
+let io_norm = (v) => (v == null) ? "-" : fmt_bytes(int((v * 1000000.0) / uptimeUs));
+
+// One list drives both the header and every row so they cannot drift apart.
+// CPU% is only present in timed mode.
+let columns = [
+	{ w: "%-28s", h: "SERVICE", f: (r) => r.name },
+];
+if (!(instant || window == 0))
+	push(columns, { w: "%8s", h: "CPU%", f: (r) => (r.cpu < 0) ? "-" : sprintf("%.1f", r.cpu) });
+push(columns, { w: "%12s", h: "CPUTIME", f: (r) => normalize ? sprintf("%.2f", (r.cputime * 100.0) / uptimeUs)
+                                                             : fmt_cputime(r.cputime) });
+push(columns, { w: "%10s", h: "MEM",  f: (r) => normalize ? fmt_pct(r.mem, memTotalB)  : ((r.mem == null)  ? "-" : fmt_bytes(r.mem)) });
+push(columns, { w: "%10s", h: "PEAK", f: (r) => normalize ? fmt_pct(r.peak, memTotalB) : ((r.peak == null) ? "-" : fmt_bytes(r.peak)) });
+
+let io_cell = (v) => normalize ? io_norm(v) : ((v == null) ? "-" : fmt_bytes(v));
+push(columns, { w: "%18s", h: "IO (R/W)",
+                f: (r) => (r.rd == null && r.wr == null) ? "-"
+                                                         : `${io_cell(r.rd)} / ${io_cell(r.wr)}` });
+if (showPsi) {
+	push(columns, { w: "%7s", h: "PSI_C",  f: (r) => (r.cpuP == null) ? "-" : r.cpuP });
+	push(columns, { w: "%7s", h: "PSI_M",  f: (r) => (r.memP == null) ? "-" : r.memP });
+	push(columns, { w: "%7s", h: "PSI_IO", f: (r) => (r.ioP == null)  ? "-" : r.ioP });
+}
+
+let hdr = [];
+for (let c in columns)
+	push(hdr, sprintf(c.w, c.h));
+print(join(" ", hdr) + "\n");
+
+for (let r in rows) {
+	let cells = [];
+	for (let c in columns)
+		push(cells, sprintf(c.w, c.f(r)));
+	print(join(" ", cells) + "\n");
+}
