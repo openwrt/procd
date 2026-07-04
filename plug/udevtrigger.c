@@ -208,7 +208,7 @@ static void scan_subdir(const char *base, const char *subdir,
 		}
 
 		if (subdir)
-			strlcat(dirname, subdir, sizeof(base));
+			strlcat(dirname, subdir, sizeof(dirname));
 
 		if (depth)
 			scan_subdir(dirname, NULL, true, depth - 1);
