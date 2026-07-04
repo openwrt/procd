@@ -2088,6 +2088,8 @@ instance_config_parse(struct service_instance *in)
 			if (i >= 3)
 				break;
 
+			if (blobmsg_type(cur2) != BLOBMSG_TYPE_STRING)
+				continue;
 			vals[i] = atoi(blobmsg_get_string(cur2));
 			i++;
 		}
