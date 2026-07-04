@@ -1059,6 +1059,12 @@ instance_start(struct service_instance *in)
 	in->respawn_run = in->respawning;
 	in->respawning = false;
 	instance_free_stdio(in);
+	in->restart = false;
+	in->halt = false;
+
+	if (!in->valid)
+		return;
+
 	if (in->_stdout.fd.fd > -2 && in->stdio_fd[1] < 0) {
 		if (pipe(opipe)) {
 			ULOG_WARN("pipe() failed: %m\n");
@@ -1072,12 +1078,6 @@ instance_start(struct service_instance *in)
 			epipe[0] = epipe[1] = -1;
 		}
 	}
-
-	in->restart = false;
-	in->halt = false;
-
-	if (!in->valid)
-		return;
 
 	instance_jail_status_close(in);
 	if (in->has_jail &&
@@ -1095,6 +1095,10 @@ instance_start(struct service_instance *in)
 		procd_signal_restore(&oldset);
 		closefd(spair[0]);
 		closefd(spair[1]);
+		closefd(opipe[0]);
+		closefd(opipe[1]);
+		closefd(epipe[0]);
+		closefd(epipe[1]);
 		return;
 	}
 
