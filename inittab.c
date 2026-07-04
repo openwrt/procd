@@ -151,7 +151,10 @@ static void child_exit(struct uloop_process *proc, int ret)
 	if (a->respawn < 0)
 		return;
 
-	if (!dev_exist(a->id)) {
+	if (!a->id)
+		return;
+
+	if (a->id[0] && !dev_exist(a->id)) {
 		DEBUG(4, "Skipping respawn: device '%s' does not exist anymore\n", a->id);
 		return;
 	}
