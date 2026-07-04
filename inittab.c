@@ -416,7 +416,7 @@ void procd_inittab(void)
 		int i;
 		int len = strlen(line);
 
-		while (isspace(line[len - 1]))
+		while (len > 0 && isspace((unsigned char)line[len - 1]))
 			len--;
 		line[len] = 0;
 
