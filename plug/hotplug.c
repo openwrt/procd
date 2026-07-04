@@ -275,7 +275,7 @@ static void handle_firmware(struct blob_attr *msg, struct blob_attr *data)
 send_to_kernel:
 	snprintf(loadpath, sizeof(loadpath), "/sys/%s/loading", dev);
 	load = open(loadpath, O_WRONLY);
-	if (!load) {
+	if (load < 0) {
 		ERROR("Failed to open %s: %m\n", loadpath);
 		exit(EXIT_FAILURE);
 	}
@@ -309,9 +309,13 @@ send_to_kernel:
 	close(fw);
 
 	load = open(loadpath, O_WRONLY);
-	if (write(load, "0", 1) == -1)
-		ERROR("failed to write to %s: %m\n", loadpath);
-	close(load);
+	if (load < 0) {
+		ERROR("Failed to open %s: %m\n", loadpath);
+	} else {
+		if (write(load, "0", 1) == -1)
+			ERROR("failed to write to %s: %m\n", loadpath);
+		close(load);
+	}
 
 	P_DEBUG(2, "Done loading %s\n", path);
 
