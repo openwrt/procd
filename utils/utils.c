@@ -151,12 +151,13 @@ char *get_active_console(char *out, int len)
 		return NULL;
 
 	r = read(fd, line, sizeof(line) - 1);
-	line[CMDLINE_SIZE] = '\0';
 
 	close(fd);
 
 	if (r <= 0)
 		return NULL;
+
+	line[r] = '\0';
 
 	/* The active file is terminated by a newline which we need to strip */
 	char *newline = strtok(line, "\n");
