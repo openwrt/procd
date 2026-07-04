@@ -1160,7 +1160,7 @@ static int parseOCIlinuxcgroups_legacy_cpu(struct blob_attr *msg)
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_CPU_MAX];
 	uint64_t shares, period = 0;
 	int64_t quota = -2; /* unset */
-	char tmp[32] = { 0 };
+	char tmp[64] = { 0 };
 
 	blobmsg_parse(oci_linux_cgroups_cpu_policy, __OCI_LINUX_CGROUPS_CPU_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
