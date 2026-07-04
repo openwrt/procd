@@ -1548,12 +1548,12 @@ instance_stop(struct service_instance *in, bool halt)
 }
 
 static void
-instance_restart(struct service_instance *in)
+instance_restart(struct service_instance *in, bool reload)
 {
 	if (!in->proc.pending)
 		return;
 
-	if (in->reload_signal) {
+	if (reload && in->reload_signal) {
 		instance_signal(in, in->reload_signal);
 		return;
 	}
@@ -1573,7 +1573,7 @@ instance_watchdog(struct uloop_timeout *t)
 	P_DEBUG(3, "instance %s::%s watchdog timer expired\n", in->srv->name, in->name);
 
 	if (in->respawn)
-		instance_restart(in);
+		instance_restart(in, true);
 	else
 		instance_stop(in, true);
 }
@@ -1586,7 +1586,7 @@ static bool string_changed(const char *a, const char *b)
 static bool
 instance_config_changed(struct service_instance *in, struct service_instance *in_new)
 {
-	if (!in->valid)
+	if (!in->valid || !in_new->valid)
 		return true;
 
 	if (!blob_attr_equal(in->command, in_new->command))
@@ -2341,6 +2341,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	}
 	in->name = in_src->name;
 	in->nice = in_src->nice;
+	in->valid = in_src->valid;
 	in->trace = in_src->trace;
 	in->node.avl.key = in_src->node.avl.key;
 	in->syslog_facility = in_src->syslog_facility;
@@ -2403,7 +2404,7 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 		instance_start(in);
 	} else {
 		if (changed)
-			instance_restart(in);
+			instance_restart(in, in_new->valid);
 		else if (!blobmsg_list_equal(&in->data, &in_new->data)) {
 			service_data_trigger(&in->data);
 			service_data_trigger(&in_new->data);
