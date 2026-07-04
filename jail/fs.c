@@ -1769,12 +1769,13 @@ static int add_script_interp(const char *path, const char *map, int size)
 	while (stop < size && map[stop] > 0x20 && map[stop] <= 0x7e) {
 		stop++;
 	}
-	if (stop >= size || (stop-start) > PATH_MAX) {
+	if (stop >= size || (stop-start) >= PATH_MAX) {
 		ERROR("bad script interp (%s)\n", path);
 		return -1;
 	}
 	char buf[PATH_MAX];
 	strncpy(buf, map+start, stop-start);
+	buf[stop-start] = '\0';
 	return add_path_and_deps(buf, 1, -1, 0);
 }
 
