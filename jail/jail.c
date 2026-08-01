@@ -611,6 +611,11 @@ static int create_devices(void)
 		if (strncmp(path, "/dev", 4))
 			return EPERM;
 
+		if (opts.setns.user != -1) {
+			++cur;
+			continue;
+		}
+
 		/* make sure parent folder exists */
 		tmp = strrchr(path, '/');
 		if (!tmp)
@@ -906,8 +911,172 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	if (mount_all(jail_root)) {
+	{
+	/* fds stay open until mount_all() performs the /proc/self/fd/N
+	 * binds below; closing early would drop or swap the source */
+	int *held_fds = NULL;
+	size_t n_devices = 0, n_custom = 0, i;
+	int fail = 0;
+
+	if (opts.setns.user != -1) {
+		struct mknod_args *curdef;
+
+		if (opts.devices) {
+			struct mknod_args **cur;
+
+			for (cur = opts.devices; *cur; cur++)
+				n_custom++;
+		}
+
+		for (curdef = default_devices; curdef->path; curdef++)
+			n_devices++;
+
+		n_devices += n_custom;
+
+		held_fds = malloc(n_devices * sizeof(int));
+		if (!held_fds) {
+			ERROR("out of memory validating devices\n");
+			return -1;
+		}
+		for (i = 0; i < n_devices; i++)
+			held_fds[i] = -1;
+
+		if (opts.devices) {
+			struct mknod_args **cur;
+
+			for (i = 0, cur = opts.devices; *cur && !fail; cur++, i++) {
+				struct stat st;
+
+				if (strncmp((*cur)->path, "/dev", 4)) {
+					ERROR("custom device %s is outside of /dev; "
+					      "refusing to bind-mount it\n",
+					      (*cur)->path);
+					fail = 1;
+					break;
+				}
+
+				held_fds[i] = open((*cur)->path, O_PATH | O_CLOEXEC);
+				if (held_fds[i] < 0) {
+					ERROR("custom device %s requested but not found "
+					      "on the host; it cannot be created under "
+					      "CLONE_NEWUSER (no privilege to mknod)\n",
+					      (*cur)->path);
+					fail = 1;
+					break;
+				}
+
+				if (fstat(held_fds[i], &st)) {
+					ERROR("custom device %s: fstat() failed: %m\n",
+					      (*cur)->path);
+					fail = 1;
+					break;
+				}
+
+				if (((*cur)->mode & S_IFMT) &&
+				    (st.st_mode & S_IFMT) != ((*cur)->mode & S_IFMT)) {
+					ERROR("custom device %s exists on the host but "
+					      "is not the requested node type; its "
+					      "major:minor/mode/owner cannot be enforced "
+					      "under CLONE_NEWUSER\n",
+					      (*cur)->path);
+					fail = 1;
+					break;
+				}
+
+				if (((*cur)->mode & S_IFMT) == S_IFCHR ||
+				    ((*cur)->mode & S_IFMT) == S_IFBLK) {
+					if ((*cur)->dev && st.st_rdev != (*cur)->dev) {
+						ERROR("custom device %s exists on the host "
+						      "but its major:minor (%u:%u) does not "
+						      "match the requested %u:%u; refusing "
+						      "to bind-mount a different device than "
+						      "configured\n", (*cur)->path,
+						      major(st.st_rdev), minor(st.st_rdev),
+						      major((*cur)->dev), minor((*cur)->dev));
+						fail = 1;
+						break;
+					}
+				}
+
+				{
+					int tree;
+					struct ujail_mount_attr attr = { .attr_set = MOUNT_ATTR_RDONLY };
+
+					tree = sys_open_tree(held_fds[i], "", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH);
+					if (tree < 0) {
+						ERROR("open_tree() on custom device %s failed: %m\n", (*cur)->path);
+						fail = 1;
+						break;
+					}
+					close(held_fds[i]);
+					held_fds[i] = tree;
+
+					if (sys_mount_setattr(tree, "", AT_EMPTY_PATH, &attr, sizeof(attr))) {
+						ERROR("mount_setattr() on custom device %s failed: %m\n", (*cur)->path);
+						fail = 1;
+						break;
+					}
+				}
+				if (add_mount_fd(held_fds[i], (*cur)->path, -1)) {
+					ERROR("could not queue bind-mount for mandatory "
+					      "custom device %s; refusing to start with "
+					      "a requested device missing\n",
+					      (*cur)->path);
+					fail = 1;
+					break;
+				}
+			}
+		}
+
+		if (!fail) {
+			size_t j = 0;
+
+			for (curdef = default_devices; curdef->path; curdef++, j++) {
+				int tree;
+				struct ujail_mount_attr attr = { .attr_set = MOUNT_ATTR_RDONLY };
+
+				held_fds[n_custom + j] = open(curdef->path, O_PATH | O_CLOEXEC);
+				if (held_fds[n_custom + j] < 0) {
+					WARNING("could not open default device %s; "
+						"it will be unavailable in the jail\n",
+						curdef->path);
+					continue;
+				}
+
+				tree = sys_open_tree(held_fds[n_custom + j], "", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH);
+				if (tree < 0) {
+					WARNING("open_tree() on default device %s failed; "
+						"it will be unavailable in the jail\n", curdef->path);
+					continue;
+				}
+				close(held_fds[n_custom + j]);
+				held_fds[n_custom + j] = tree;
+
+				if (sys_mount_setattr(tree, "", AT_EMPTY_PATH, &attr, sizeof(attr))) {
+					WARNING("mount_setattr() on default device %s failed; "
+						"it will be unavailable in the jail\n", curdef->path);
+					continue;
+				}
+
+				if (add_mount_fd(held_fds[n_custom + j], curdef->path, 0))
+					WARNING("could not queue bind-mount for default "
+						"device %s; it will be unavailable in "
+						"the jail\n", curdef->path);
+			}
+		}
+	}
+
+	if (!fail && mount_all(jail_root)) {
 		ERROR("mount_all() failed\n");
+		fail = 1;
+	}
+
+	for (i = 0; i < n_devices; i++)
+		if (held_fds && held_fds[i] >= 0)
+			close(held_fds[i]);
+	free(held_fds);
+
+	if (fail)
 		return -1;
 	}
 
@@ -3247,7 +3416,13 @@ static void post_main(struct uloop_timeout *t)
 			/* default mounts */
 			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "size=1M", -1);
 			add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, "mode=1777", -1);
-			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
+			{
+				const char *ptsopts = (opts.namespace & CLONE_NEWUSER) ?
+					"newinstance,ptmxmode=0666,mode=0620,gid=0" :
+					"newinstance,ptmxmode=0666,mode=0620,gid=5";
+
+				add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, ptsopts, 0);
+			}
 
 			if (opts.procfs || opts.ocibundle) {
 				add_mount("proc", "/proc", "proc",

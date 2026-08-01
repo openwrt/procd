@@ -18,6 +18,7 @@
 #include <assert.h>
 #include <elf.h>
 #include <errno.h>
+#include <sys/syscall.h>
 #include <fcntl.h>
 #include <linux/limits.h>
 #include <stdlib.h>
@@ -108,7 +109,25 @@ struct mount {
 	const char *optstr;
 	int error;
 	bool inner;
+	int source_fd;
 };
+
+/* open_tree()/move_mount()/mount_setattr() have no glibc wrappers yet;
+ * struct ujail_mount_attr is declared in fs.h */
+int sys_open_tree(int dfd, const char *path, unsigned flags)
+{
+	return syscall(SYS_open_tree, dfd, path, flags);
+}
+
+static int sys_move_mount(int from_dfd, const char *from_path, int to_dfd, const char *to_path, unsigned flags)
+{
+	return syscall(SYS_move_mount, from_dfd, from_path, to_dfd, to_path, flags);
+}
+
+int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mount_attr *attr, size_t size)
+{
+	return syscall(SYS_mount_setattr, dfd, path, flags, attr, size);
+}
 
 struct avl_tree mounts;
 
@@ -267,6 +286,7 @@ static int _add_mount(const char *source, const char *target, const char *filesy
 	m->propflags = propflags;
 	m->error = error;
 	m->inner = inner;
+	m->source_fd = -1;
 
 	avl_insert(&mounts, &m->avl);
 	DEBUG("adding mount %s %s bind(%d) ro(%d) err(%d)\n", (m->source == (void*)(-1))?"mask":m->source, m->target,
@@ -300,6 +320,28 @@ static int _add_mount_bind(const char *path, const char *path2, int readonly, in
 int add_mount_bind(const char *path, int readonly, int error)
 {
 	return _add_mount_bind(path, path, readonly, error);
+}
+
+int add_mount_fd(int fd, const char *target, int error)
+{
+	struct mount *m;
+
+	if (avl_find(&mounts, target))
+		return 1;
+
+	m = calloc(1, sizeof(struct mount));
+	if (!m)
+		return ENOMEM;
+
+	m->avl.key = m->target = strdup(target);
+	m->mountflags = MS_BIND;
+	m->error = error;
+	m->source_fd = fd;
+
+	avl_insert(&mounts, &m->avl);
+	DEBUG("adding mount fd:%d %s bind(1) ro(?) err(%d)\n", fd, target, error != 0);
+
+	return 0;
 }
 
 enum {
@@ -507,6 +549,47 @@ static void build_noafile(void) {
 	return;
 }
 
+static int do_mount_fd(const char *root, int fd, const char *target, int error)
+{
+	char new[PATH_MAX];
+	struct stat s;
+
+	snprintf(new, sizeof(new), "%s%s", root, target);
+
+	if (fstat(fd, &s)) {
+		if (error)
+			ERROR("fstat(fd:%d) failed: %m\n", fd);
+		close(fd);
+		return error;
+	}
+
+	if (S_ISDIR(s.st_mode)) {
+		mkdir_p(new, 0755);
+	} else {
+		mkdir_p(dirname(new), 0755);
+		snprintf(new, sizeof(new), "%s%s", root, target);
+		int cfd = open(new, O_CREAT|O_WRONLY|O_TRUNC|O_EXCL, 0644);
+		if (cfd >= 0)
+			close(cfd);
+		if (error && cfd < 0 && errno != EEXIST) {
+			ERROR("failed to create mount target %s: %m\n", new);
+			close(fd);
+			return errno;
+		}
+	}
+
+	if (sys_move_mount(fd, "", AT_FDCWD, new, MOVE_MOUNT_F_EMPTY_PATH)) {
+		if (error)
+			ERROR("move_mount() to %s failed: %m\n", new);
+		close(fd);
+		return error;
+	}
+
+	close(fd);
+	DEBUG("move_mount fd to %s\n", new);
+	return 0;
+}
+
 int mount_all(const char *jailroot) {
 	struct library *l;
 	struct mount *m;
@@ -516,10 +599,16 @@ int mount_all(const char *jailroot) {
 	avl_for_each_element(&libraries, l, avl)
 		add_mount_bind(l->path, 1, -1);
 
-	avl_for_each_element(&mounts, m, avl)
+	avl_for_each_element(&mounts, m, avl) {
+		if (m->source_fd >= 0) {
+			if (do_mount_fd(jailroot, m->source_fd, m->target, m->error))
+				return -1;
+			continue;
+		}
 		if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags,
 			     m->propflags, m->optstr, m->error, m->inner))
 			return -1;
+	}
 
 	return 0;
 }
