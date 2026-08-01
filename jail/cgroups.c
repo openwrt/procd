@@ -96,6 +96,8 @@ void cgroups_free(void)
 			free(valp);
 		}
 		free(cgroup_path);
+		cgroup_path = NULL;
+		initialized = false;
 	}
 }
 
