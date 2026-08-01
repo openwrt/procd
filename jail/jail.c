@@ -825,6 +825,27 @@ static int mountinfo_detach_children(const char *prefix)
 	return -1;
 }
 
+/*
+ * Make the mount namespace private and detach inherited /proc,/sys
+ * children before build_jail_fs() mounts its own. Must run before
+ * setns_open(CLONE_NEWUSER) joins an external userns and drops
+ * privilege; see the call site in exec_jail().
+ */
+static int isolate_mountns_and_detach_inherited(void)
+{
+	if (mount("none", "/", "none", MS_REC|MS_PRIVATE, NULL)) {
+		ERROR("private mount failed %m\n");
+		return -1;
+	}
+
+	if ((opts.procfs || opts.ocibundle) && mountinfo_detach_children("/proc"))
+		return -1;
+	if ((opts.sysfs || opts.ocibundle) && mountinfo_detach_children("/sys"))
+		return -1;
+
+	return 0;
+}
+
 static int build_jail_fs(void)
 {
 	char *overlaydir = NULL;
@@ -840,19 +861,6 @@ static int build_jail_fs(void)
 	if (apply_sysctl(jail_root)) {
 		ERROR("failed to apply sysctl values\n");
 		return -1;
-	}
-
-	/* oldroot can't be MS_SHARED else pivot_root() fails */
-	if (mount("none", "/", "none", MS_REC|MS_PRIVATE, NULL)) {
-		ERROR("private mount failed %m\n");
-		return -1;
-	}
-
-	if (opts.namespace & CLONE_NEWUSER) {
-		if ((opts.procfs || opts.ocibundle) && mountinfo_detach_children("/proc"))
-			return -1;
-		if ((opts.sysfs || opts.ocibundle) && mountinfo_detach_children("/sys"))
-			return -1;
 	}
 
 	if (opts.extroot) {
@@ -1404,11 +1412,24 @@ static int exec_jail(void *arg)
 		close(userns_pipe[3]);
 	}
 
-	setns_open(CLONE_NEWUSER);
 	setns_open(CLONE_NEWNET);
 	setns_open(CLONE_NEWNS);
 	setns_open(CLONE_NEWIPC);
 	setns_open(CLONE_NEWUTS);
+
+	/*
+	 * Must run before setns_open(CLONE_NEWUSER) below: joining an
+	 * external userns drops privilege immediately, and our own userns
+	 * is deferred to enter_userns(), so this always runs privileged.
+	 */
+	if ((opts.namespace & CLONE_NEWNS) &&
+	    ((opts.namespace & CLONE_NEWUSER) || opts.setns.user != -1) &&
+	    isolate_mountns_and_detach_inherited()) {
+		ERROR("failed to detach inherited mounts\n");
+		return EXIT_FAILURE;
+	}
+
+	setns_open(CLONE_NEWUSER);
 
 	buf[0] = 'i';
 	if (write(pipes[1], buf, 1) < 1) {
