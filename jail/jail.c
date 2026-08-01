@@ -708,6 +708,123 @@ static ssize_t xwrite_byte(int fd, char byte)
 static char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
 static mode_t old_umask;
 static void enter_jail_fs(void);
+
+static size_t path_depth(const char *path)
+{
+	size_t depth = 0;
+
+	for (; *path; path++)
+		if (*path == '/')
+			depth++;
+
+	return depth;
+}
+
+static void mountinfo_unescape(char *s)
+{
+	char *r = s, *w = s;
+
+	while (*r) {
+		if (r[0] == '\\' && r[1] >= '0' && r[1] <= '7' &&
+		    r[2] >= '0' && r[2] <= '7' && r[3] >= '0' && r[3] <= '7') {
+			*w++ = (char)(((r[1] - '0') << 6) | ((r[2] - '0') << 3) | (r[3] - '0'));
+			r += 4;
+		} else {
+			*w++ = *r++;
+		}
+	}
+	*w = '\0';
+}
+
+static int mountinfo_detach_children(const char *prefix)
+{
+	size_t prefixlen = strlen(prefix);
+	int pass;
+
+	for (pass = 0; pass < 16; pass++) {
+		FILE *f;
+		char *line = NULL;
+		size_t linecap = 0;
+		char *paths[128];
+		size_t n = 0, dropped = 0, i, j;
+		bool progress = false;
+
+		f = fopen("/proc/self/mountinfo", "re");
+		if (!f) {
+			ERROR("mountinfo_detach_children(%s): fopen(/proc/self/mountinfo) "
+			      "failed: %m\n", prefix);
+			return -1;
+		}
+
+		while (getline(&line, &linecap, f) >= 0) {
+			char *mp, *save = NULL;
+
+			strtok_r(line, " ", &save);
+			strtok_r(NULL, " ", &save);
+			strtok_r(NULL, " ", &save);
+			strtok_r(NULL, " ", &save);
+			mp = strtok_r(NULL, " ", &save);
+			if (!mp)
+				continue;
+			mountinfo_unescape(mp);
+
+			if (strncmp(mp, prefix, prefixlen) || mp[prefixlen] != '/')
+				continue;
+
+			if (n < ARRAY_SIZE(paths)) {
+				char *dup = strdup(mp);
+
+				if (dup)
+					paths[n++] = dup;
+				else
+					dropped++;
+			} else {
+				dropped++;
+			}
+		}
+		free(line);
+		fclose(f);
+
+		if (dropped)
+			WARNING("mountinfo_detach_children(%s): %zu nested mount(s) "
+				"exceeded the %zu-entry per-pass limit or could not "
+				"be recorded (out of memory); retrying over further "
+				"passes\n", prefix, dropped, ARRAY_SIZE(paths));
+
+		if (n == 0 && dropped == 0)
+			return 0;
+
+		for (i = 0; i < n; i++) {
+			size_t deepest = i;
+
+			for (j = i + 1; j < n; j++)
+				if (path_depth(paths[j]) > path_depth(paths[deepest]))
+					deepest = j;
+			if (deepest != i) {
+				char *tmp = paths[i];
+				paths[i] = paths[deepest];
+				paths[deepest] = tmp;
+			}
+		}
+
+		for (i = 0; i < n; i++) {
+			if (!umount2(paths[i], MNT_DETACH))
+				progress = true;
+			free(paths[i]);
+		}
+
+		if (!progress && !dropped) {
+			ERROR("mountinfo_detach_children(%s): %zu nested mount(s) could "
+			      "not be detached; refusing to continue\n", prefix, n);
+			return -1;
+		}
+	}
+
+	ERROR("mountinfo_detach_children(%s): nested mounts remained attached "
+	      "after %d passes; refusing to continue\n", prefix, pass);
+	return -1;
+}
+
 static int build_jail_fs(void)
 {
 	char *overlaydir = NULL;
@@ -729,6 +846,13 @@ static int build_jail_fs(void)
 	if (mount("none", "/", "none", MS_REC|MS_PRIVATE, NULL)) {
 		ERROR("private mount failed %m\n");
 		return -1;
+	}
+
+	if (opts.namespace & CLONE_NEWUSER) {
+		if ((opts.procfs || opts.ocibundle) && mountinfo_detach_children("/proc"))
+			return -1;
+		if ((opts.sysfs || opts.ocibundle) && mountinfo_detach_children("/sys"))
+			return -1;
 	}
 
 	if (opts.extroot) {
