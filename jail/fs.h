@@ -21,8 +21,10 @@ int add_mount(const char *source, const char *target, const char *filesystemtype
 int add_mount_inner(const char *source, const char *target, const char *filesystemtype,
 	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error);
 int add_mount_bind(const char *path, int readonly, int error);
+int mask_path_now(const char *path);
 int parseOCImount(struct blob_attr *msg);
 int add_2paths_and_deps(const char *path, const char *path2, int readonly, int error, int lib);
+unsigned long detect_atime_flag(const char *mountpoint);
 
 static inline int add_path_and_deps(const char *path, int readonly, int error, int lib)
 {

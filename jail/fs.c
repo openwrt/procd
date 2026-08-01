@@ -41,6 +41,63 @@
 
 #define UJAIL_NOAFILE "/tmp/.ujailnoafile"
 
+/*
+ * mnt_already_visible() requires a new mount's atime class to match
+ * the host's existing instance or the kernel refuses it with EPERM
+ * ("Mount too revealing"). Detect the mountpoint's actual atime class
+ * instead of hardcoding one, so the new mount can never conflict.
+ */
+unsigned long detect_atime_flag(const char *mountpoint)
+{
+	FILE *f;
+	char *line = NULL;
+	size_t linelen = 0;
+	unsigned long ret = MS_RELATIME; /* kernel default if nothing else is known */
+	size_t mplen = strlen(mountpoint);
+
+	f = fopen("/proc/self/mountinfo", "r");
+	if (!f)
+		return ret;
+
+	while (getline(&line, &linelen, f) != -1) {
+		/* mountinfo(5): field 5 is the mountpoint, field 6 its options */
+		char *saveptr = NULL;
+		char *field;
+		int idx = 0;
+		char *mp_field = NULL, *opts_field = NULL;
+
+		for (field = strtok_r(line, " \t\n", &saveptr); field;
+		     field = strtok_r(NULL, " \t\n", &saveptr), idx++) {
+			if (idx == 4)
+				mp_field = field;
+			else if (idx == 5) {
+				opts_field = field;
+				break;
+			}
+		}
+
+		if (!mp_field || !opts_field)
+			continue;
+
+		if (strlen(mp_field) != mplen || strcmp(mp_field, mountpoint))
+			continue;
+
+		/* last matching entry wins: it's the topmost/currently-effective one */
+		if (strstr(opts_field, "noatime"))
+			ret = MS_NOATIME;
+		else if (strstr(opts_field, "relatime"))
+			ret = MS_RELATIME;
+		else
+			/* strictatime is the absence of noatime/relatime, not a token */
+			ret = MS_STRICTATIME;
+	}
+
+	free(line);
+	fclose(f);
+
+	return ret;
+}
+
 struct mount {
 	struct avl_node avl;
 	const char *source;
@@ -54,6 +111,29 @@ struct mount {
 };
 
 struct avl_tree mounts;
+
+/* same masking as do_mount()'s is_mask branch, applied immediately
+ * against an absolute path instead of queued through jail_root */
+int mask_path_now(const char *path)
+{
+	struct stat s;
+
+	if (stat(path, &s))
+		return 0; /* doesn't exist, nothing to mask */
+
+	if (S_ISDIR(s.st_mode)) {
+		if (mount("none", path, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000"))
+			return -1;
+	} else {
+		if (mount(UJAIL_NOAFILE, path, "bind", MS_BIND, NULL))
+			return -1;
+		if (mount(UJAIL_NOAFILE, path, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, NULL))
+			return -1;
+	}
+
+	DEBUG("masked path %s\n", path);
+	return 0;
+}
 
 static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
 		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner)

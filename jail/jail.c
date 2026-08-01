@@ -679,6 +679,32 @@ only_default_devices:
 }
 
 static char jail_root[] = "/tmp/ujail-XXXXXX";
+/* Handshake for the deferred CLONE_NEWUSER creation in enter_userns(). */
+int userns_pipe[4];
+
+/* single-byte read()/write(), retrying on EINTR */
+static ssize_t xread_byte(int fd, char *buf)
+{
+	ssize_t n;
+
+	do {
+		n = read(fd, buf, 1);
+	} while (n < 0 && errno == EINTR);
+
+	return n;
+}
+
+static ssize_t xwrite_byte(int fd, char byte)
+{
+	ssize_t n;
+
+	do {
+		n = write(fd, &byte, 1);
+	} while (n < 0 && errno == EINTR);
+
+	return n;
+}
+
 static char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
 static mode_t old_umask;
 static void enter_jail_fs(void);
@@ -794,6 +820,7 @@ static void free_and_exit(int ret)
 }
 
 static void post_jail_fs(void);
+static void enter_userns(void);
 static void enter_jail_fs(void)
 {
 	char dirbuf[sizeof(jail_root) + 4];
@@ -833,6 +860,63 @@ static void enter_jail_fs(void)
 		mount(NULL, "/", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
 
 	umask(old_umask);
+	enter_userns();
+}
+
+/*
+ * Create our own CLONE_NEWUSER here, after /proc and /sys are already
+ * mounted, so the PID namespace stays owned by the initial userns
+ * throughout mount setup. See the comment in exec_jail() for why.
+ */
+static void enter_userns(void)
+{
+	char buf[1];
+
+	if (!((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1)) {
+		post_jail_fs();
+		return;
+	}
+
+	if (unshare(CLONE_NEWUSER)) {
+		ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
+		free_and_exit(-1);
+	}
+
+	buf[0] = 'i';
+	if (xwrite_byte(userns_pipe[1], buf[0]) < 1) {
+		ERROR("can't write to parent\n");
+		free_and_exit(-1);
+	}
+	close(userns_pipe[1]);
+
+	if (xread_byte(userns_pipe[2], buf) < 1) {
+		ERROR("can't read from parent\n");
+		free_and_exit(-1);
+	}
+	close(userns_pipe[2]);
+	if (buf[0] != 'O') {
+		ERROR("parent had an error, child exiting\n");
+		free_and_exit(-1);
+	}
+
+	if ((opts.namespace & CLONE_NEWNS) && unshare(CLONE_NEWNS)) {
+		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
+		free_and_exit(-1);
+	}
+
+	if (setregid(0, 0) < 0) {
+		ERROR("setgid\n");
+		free_and_exit(-1);
+	}
+	if (setreuid(0, 0) < 0) {
+		ERROR("setuid\n");
+		free_and_exit(-1);
+	}
+	if (setgroups(0, NULL) < 0) {
+		ERROR("setgroups\n");
+		free_and_exit(-1);
+	}
+
 	post_jail_fs();
 }
 
@@ -1183,6 +1267,19 @@ static int exec_jail(void *arg)
 	close(pipes[0]);
 	close(pipes[3]);
 
+	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1) {
+		/* CLONE_NEWUSER is deferred to enter_userns(); keep our
+		 * ends of the handshake open, close only the parent's. */
+		close(userns_pipe[0]);
+		close(userns_pipe[3]);
+	} else {
+		/* Not deferring anything: this handshake isn't used at all. */
+		close(userns_pipe[0]);
+		close(userns_pipe[1]);
+		close(userns_pipe[2]);
+		close(userns_pipe[3]);
+	}
+
 	setns_open(CLONE_NEWUSER);
 	setns_open(CLONE_NEWNET);
 	setns_open(CLONE_NEWNS);
@@ -1204,12 +1301,24 @@ static int exec_jail(void *arg)
 		return EXIT_FAILURE;
 	}
 
+	if (opts.setns.user != -1 && (opts.namespace & CLONE_NEWNS) &&
+	    unshare(CLONE_NEWNS)) {
+		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
+		return EXIT_FAILURE;
+	}
+
 	if (opts.namespace & CLONE_NEWCGROUP)
 		unshare(CLONE_NEWCGROUP);
 
 	setns_open(CLONE_NEWCGROUP);
 
-	if ((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1)) {
+	/*
+	 * A join of an existing userns (opts.setns.user) can become root
+	 * right away. Our own CLONE_NEWUSER is not created here: doing so
+	 * before /proc,/sys are mounted ties the PID namespace to it,
+	 * which fails mnt_already_visible() on hosts with locked /proc.
+	 */
+	if (opts.setns.user != -1) {
 		if (setregid(0, 0) < 0) {
 			ERROR("setgid\n");
 			free_and_exit(EXIT_FAILURE);
@@ -1242,8 +1351,12 @@ static void pre_exec_jail(struct uloop_timeout *t)
 	if ((opts.namespace & CLONE_NEWNS) && build_jail_fs()) {
 		ERROR("failed to build jail fs\n");
 		free_and_exit(EXIT_FAILURE);
-	} else {
-		run_hooks(opts.hooks.createContainer, post_jail_fs);
+	} else if (!(opts.namespace & CLONE_NEWNS)) {
+		/*
+		 * No mount namespace to build (plain "-f"): build_jail_fs()
+		 * is skipped, so reach enter_userns() directly here instead.
+		 */
+		run_hooks(opts.hooks.createContainer, enter_userns);
 	}
 }
 
@@ -2956,6 +3069,9 @@ static void post_main(struct uloop_timeout *t)
 	if (pipe(&pipes[0]) < 0 || pipe(&pipes[2]) < 0)
 		free_and_exit(-1);
 
+	if (pipe2(&userns_pipe[0], O_CLOEXEC) < 0 || pipe2(&userns_pipe[2], O_CLOEXEC) < 0)
+		free_and_exit(-1);
+
 	if (has_namespaces()) {
 		if (opts.namespace & CLONE_NEWNS) {
 			if (!opts.extroot && (opts.user || opts.group)) {
@@ -2989,7 +3105,8 @@ static void post_main(struct uloop_timeout *t)
 			add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "newinstance,ptmxmode=0666,mode=0620,gid=5", 0);
 
 			if (opts.procfs || opts.ocibundle) {
-				add_mount("proc", "/proc", "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0, NULL, -1);
+				add_mount("proc", "/proc", "proc",
+					  detect_atime_flag("/proc") | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0, NULL, -1);
 
 				/*
 				 * hack to make /proc/sys/net read-write while the rest of /proc/sys is read-only
@@ -3014,7 +3131,8 @@ static void post_main(struct uloop_timeout *t)
 
 			}
 			if (opts.sysfs || opts.ocibundle)
-				add_mount("sysfs", "/sys", "sysfs", MS_RELATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
+				add_mount("sysfs", "/sys", "sysfs",
+					  detect_atime_flag("/sys") | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
 
 		}
 
@@ -3052,7 +3170,11 @@ static void post_main(struct uloop_timeout *t)
 			}
 		}
 
-		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | (opts.namespace & (~CLONE_NEWCGROUP)), NULL);
+		/*
+		 * CLONE_NEWUSER is excluded here; the child creates its own
+		 * later, in enter_userns(). See exec_jail() for why.
+		 */
+		jail_process.pid = clone(exec_jail, child_stack + STACK_SIZE, SIGCHLD | (opts.namespace & (~(CLONE_NEWCGROUP | CLONE_NEWUSER))), NULL);
 	} else {
 		jail_process.pid = fork();
 	}
@@ -3094,6 +3216,8 @@ static void post_main(struct uloop_timeout *t)
 			close(opts.setns.cgroup);
 		close(pipes[1]);
 		close(pipes[2]);
+		close(userns_pipe[1]);
+		close(userns_pipe[2]);
 		if (read(pipes[0], sig_buf, 1) < 1) {
 			ERROR("can't read from child\n");
 			free_and_exit(-1);
@@ -3103,27 +3227,6 @@ static void post_main(struct uloop_timeout *t)
 
 		if (opts.ocibundle)
 			cgroups_apply(jail_process.pid);
-
-		if (opts.namespace & CLONE_NEWUSER) {
-			if (write_setgroups(jail_process.pid, true)) {
-				ERROR("can't write setgroups\n");
-				free_and_exit(-1);
-			}
-			if (!opts.uidmap) {
-				bool has_gr = (opts.gr_gid != -1);
-				if (opts.pw_uid != -1) {
-					write_single_uid_gid_map(jail_process.pid, 0, opts.pw_uid);
-					write_single_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:opts.pw_gid);
-				} else {
-					write_single_uid_gid_map(jail_process.pid, 0, 65534);
-					write_single_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:65534);
-				}
-			} else {
-				write_uid_gid_map(jail_process.pid, 0, opts.uidmap);
-				if (opts.gidmap)
-					write_uid_gid_map(jail_process.pid, 1, opts.gidmap);
-			}
-		}
 
 		if (opts.namespace & CLONE_NEWNET)
 			jail_network_start(parent_ctx, opts.name, jail_process.pid);
@@ -3151,6 +3254,49 @@ static void post_create_runtime(void)
 	if (write(pipes[3], sig_buf, 1) < 0) {
 		ERROR("can't write to child\n");
 		free_and_exit(-1);
+	}
+
+	/*
+	 * Wait for the child to reach enter_userns() and create its own
+	 * userns before writing its uid/gid maps; see that function.
+	 */
+	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1) {
+		char ubuf[1];
+
+		if (xread_byte(userns_pipe[0], ubuf) < 1) {
+			ERROR("can't read from child\n");
+			free_and_exit(-1);
+		}
+		close(userns_pipe[0]);
+
+		if (write_setgroups(jail_process.pid, true)) {
+			ERROR("can't write setgroups\n");
+			free_and_exit(-1);
+		}
+		if (!opts.uidmap) {
+			bool has_gr = (opts.gr_gid != -1);
+			if (opts.pw_uid != -1) {
+				write_single_uid_gid_map(jail_process.pid, 0, opts.pw_uid);
+				write_single_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:opts.pw_gid);
+			} else {
+				write_single_uid_gid_map(jail_process.pid, 0, 65534);
+				write_single_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:65534);
+			}
+		} else {
+			write_uid_gid_map(jail_process.pid, 0, opts.uidmap);
+			if (opts.gidmap)
+				write_uid_gid_map(jail_process.pid, 1, opts.gidmap);
+		}
+
+		ubuf[0] = 'O';
+		if (xwrite_byte(userns_pipe[3], ubuf[0]) < 0) {
+			ERROR("can't write to child\n");
+			free_and_exit(-1);
+		}
+		close(userns_pipe[3]);
+	} else {
+		close(userns_pipe[0]);
+		close(userns_pipe[3]);
 	}
 
 	jail_oci_state = OCI_STATE_CREATED;
