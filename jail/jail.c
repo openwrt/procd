@@ -1230,10 +1230,10 @@ static int write_uid_gid_map(pid_t child_pid, bool gidmap, char *mapstr)
 		child_pid, gidmap?"gid_map":"uid_map") < 0)
 		return -1;
 
-	if ((map_file = open(map_path, O_WRONLY)) < 0)
+	if ((map_file = open(map_path, O_WRONLY | O_CLOEXEC)) < 0)
 		return -1;
 
-	if (dprintf(map_file, "%s", mapstr)) {
+	if (dprintf(map_file, "%s", mapstr) < 0) {
 		close(map_file);
 		return -1;
 	}
@@ -1251,7 +1251,7 @@ static int write_single_uid_gid_map(pid_t child_pid, bool gidmap, int id)
 		child_pid, gidmap?"gid_map":"uid_map") < 0)
 		return -1;
 
-	if ((map_file = open(map_path, O_WRONLY)) < 0)
+	if ((map_file = open(map_path, O_WRONLY | O_CLOEXEC)) < 0)
 		return -1;
 
 	if (dprintf(map_file, map_format, 0, id, 1) < 0) {
@@ -1273,7 +1273,7 @@ static int write_setgroups(pid_t child_pid, bool allow)
 		return -1;
 	}
 
-	if ((setgroups_file = open(setgroups_path, O_WRONLY)) < 0) {
+	if ((setgroups_file = open(setgroups_path, O_WRONLY | O_CLOEXEC)) < 0) {
 		return -1;
 	}
 
@@ -1288,30 +1288,85 @@ static int write_setgroups(pid_t child_pid, bool allow)
 
 static void get_jail_user(int *user, int *user_gid, int *gr_gid)
 {
-	struct passwd *p = NULL;
-	struct group *g = NULL;
+	struct passwd pwd, *p = NULL;
+	struct group grp, *g = NULL;
+	char *buf = NULL;
+	size_t bufsize;
+	long sc;
+	int ret = 0, attempt;
 
 	if (opts.user) {
-		p = getpwnam(opts.user);
-		if (!p) {
-			ERROR("failed to get uid/gid for user %s: %d (%s)\n",
-			      opts.user, errno, strerror(errno));
+		sc = sysconf(_SC_GETPW_R_SIZE_MAX);
+		bufsize = (sc > 0) ? (size_t)sc : 16384;
+
+		for (attempt = 0; attempt < 8; attempt++) {
+			buf = malloc(bufsize);
+			if (!buf) {
+				ERROR("out of memory resolving user %s\n", opts.user);
+				free_and_exit(EXIT_FAILURE);
+			}
+
+			ret = getpwnam_r(opts.user, &pwd, buf, bufsize, &p);
+			if (ret != ERANGE)
+				break;
+
+			free(buf);
+			buf = NULL;
+			bufsize *= 2;
+		}
+
+		if (ret || !p) {
+			free(buf);
+			if (!ret)
+				ERROR("failed to get uid/gid for user %s: "
+				      "no such user\n", opts.user);
+			else
+				ERROR("failed to get uid/gid for user %s: %d (%s)\n",
+				      opts.user, ret, strerror(ret));
 			free_and_exit(EXIT_FAILURE);
 		}
+
 		*user = p->pw_uid;
 		*user_gid = p->pw_gid;
+		free(buf);
 	} else {
 		*user = -1;
 		*user_gid = -1;
 	}
 
 	if (opts.group) {
-		g = getgrnam(opts.group);
-		if (!g) {
-			ERROR("failed to get gid for group %s: %m\n", opts.group);
+		sc = sysconf(_SC_GETGR_R_SIZE_MAX);
+		bufsize = (sc > 0) ? (size_t)sc : 16384;
+
+		for (attempt = 0; attempt < 8; attempt++) {
+			buf = malloc(bufsize);
+			if (!buf) {
+				ERROR("out of memory resolving group %s\n", opts.group);
+				free_and_exit(EXIT_FAILURE);
+			}
+
+			ret = getgrnam_r(opts.group, &grp, buf, bufsize, &g);
+			if (ret != ERANGE)
+				break;
+
+			free(buf);
+			buf = NULL;
+			bufsize *= 2;
+		}
+
+		if (ret || !g) {
+			free(buf);
+			if (!ret)
+				ERROR("failed to get gid for group %s: "
+				      "no such group\n", opts.group);
+			else
+				ERROR("failed to get gid for group %s: %d (%s)\n",
+				      opts.group, ret, strerror(ret));
 			free_and_exit(EXIT_FAILURE);
 		}
+
 		*gr_gid = g->gr_gid;
+		free(buf);
 	} else {
 		*gr_gid = -1;
 	}
@@ -1333,6 +1388,114 @@ static void set_jail_user(int pw_uid, int user_gid, int gr_gid)
 		ERROR("failed to set user id %d: %m\n", pw_uid);
 		free_and_exit(EXIT_FAILURE);
 	}
+}
+
+static bool resolve_jail_user_gids(int primary_gid)
+{
+	gid_t *groups = NULL;
+	int ngroups = 16;
+	int ret = -1;
+	int attempt, i, n;
+
+	if (!opts.user || primary_gid == -1)
+		return false;
+
+	for (attempt = 0; attempt < 16; attempt++) {
+		gid_t *tmp = realloc(groups, ngroups * sizeof(gid_t));
+		if (!tmp) {
+			free(groups);
+			ERROR("out of memory resolving groups for %s\n", opts.user);
+			return false;
+		}
+		groups = tmp;
+
+		ret = getgrouplist(opts.user, primary_gid, groups, &ngroups);
+		if (ret >= 0)
+			break;
+	}
+
+	if (ret < 0) {
+		free(groups);
+		ERROR("could not resolve groups for %s\n", opts.user);
+		return false;
+	}
+
+	for (n = 0, i = 0; i < ret; i++) {
+		if ((int)groups[i] == primary_gid)
+			continue;
+		groups[n++] = groups[i];
+	}
+
+	opts.additional_gids = groups;
+	opts.num_additional_gids = n;
+
+	return true;
+}
+
+/* deterministic: parent and child (across fork) compute the same ids */
+static int *compute_inner_gids(int primary_gid)
+{
+	size_t i;
+	int *inner_id;
+	int next_id = 1;
+
+	inner_id = calloc(opts.num_additional_gids ?: 1, sizeof(int));
+	if (!inner_id)
+		return NULL;
+
+	for (i = 0; i < opts.num_additional_gids; i++) {
+		int gid = (int)opts.additional_gids[i];
+		int candidate = gid;
+		bool used;
+
+		if (gid == 0) {
+			do {
+				used = (candidate == 0 || candidate == primary_gid);
+				for (size_t j = 0; !used && j < opts.num_additional_gids; j++)
+					if ((int)opts.additional_gids[j] == candidate)
+						used = true;
+				for (size_t j = 0; !used && j < i; j++)
+					if (inner_id[j] == candidate)
+						used = true;
+				if (used)
+					candidate = next_id++;
+			} while (used);
+		}
+
+		inner_id[i] = candidate;
+	}
+
+	return inner_id;
+}
+
+static char *build_group_gidmap(int primary_gid)
+{
+	size_t i, len = 0, pos = 0;
+	char *map;
+	int *inner_id;
+
+	inner_id = compute_inner_gids(primary_gid);
+	if (!inner_id)
+		return NULL;
+
+	len += snprintf(NULL, 0, "%d %d %d\n", 0, primary_gid, 1);
+	for (i = 0; i < opts.num_additional_gids; i++)
+		len += snprintf(NULL, 0, "%d %d %d\n",
+				inner_id[i], opts.additional_gids[i], 1);
+
+	map = malloc(len + 1);
+	if (!map) {
+		free(inner_id);
+		return NULL;
+	}
+
+	pos += snprintf(&map[pos], len + 1 - pos, "%d %d %d\n", 0, primary_gid, 1);
+	for (i = 0; i < opts.num_additional_gids; i++)
+		pos += snprintf(&map[pos], len + 1 - pos, "%d %d %d\n",
+				inner_id[i], opts.additional_gids[i], 1);
+
+	free(inner_id);
+	return map;
 }
 
 static int apply_rlimits(void)
@@ -1712,13 +1875,53 @@ static void post_start_hook(void)
 		free_and_exit(EXIT_FAILURE);
 
 	/* use either cmdline-supplied user/group or uid/gid from OCI spec */
-	get_jail_user(&pw_uid, &pw_gid, &gr_gid);
-	set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
+	if (opts.ocibundle || opts.uidmap || !(opts.namespace & CLONE_NEWUSER)) {
+		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
+		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
+	} else if (opts.user || opts.group || opts.pw_uid != -1 || opts.pw_gid != -1 || opts.gr_gid != -1) {
+		WARNING("user/group identity switch (-U/-G) is not re-applied under "
+			"CLONE_NEWUSER without an OCI bundle or explicit uidmap; the "
+			"process already has the correct identity via the uid_map\n");
+	}
 
-	if (opts.additional_gids &&
-	    (setgroups(opts.num_additional_gids, opts.additional_gids) < 0)) {
-		ERROR("setgroups failed: %m\n");
-		free_and_exit(EXIT_FAILURE);
+	if (opts.additional_gids) {
+		bool default_own_userns_map = !opts.uidmap &&
+			(opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1;
+
+		if (default_own_userns_map) {
+			bool has_gr = (opts.gr_gid != -1);
+			int primary_gid = has_gr ? opts.gr_gid :
+				((opts.pw_uid != -1) ? opts.pw_gid : 65534);
+			int *inner_id = compute_inner_gids(primary_gid);
+
+			if (inner_id) {
+				gid_t *mapped = calloc(opts.num_additional_gids ?: 1, sizeof(gid_t));
+				size_t i;
+
+				if (mapped) {
+					for (i = 0; i < opts.num_additional_gids; i++)
+						mapped[i] = (gid_t)inner_id[i];
+					if (setgroups(opts.num_additional_gids, mapped) < 0) {
+						ERROR("setgroups failed: %m\n");
+						free(mapped);
+						free(inner_id);
+						free_and_exit(EXIT_FAILURE);
+					}
+					free(mapped);
+				} else {
+					ERROR("out of memory computing setgroups() list\n");
+					free(inner_id);
+					free_and_exit(EXIT_FAILURE);
+				}
+				free(inner_id);
+			} else {
+				ERROR("out of memory computing setgroups() list\n");
+				free_and_exit(EXIT_FAILURE);
+			}
+		} else if (setgroups(opts.num_additional_gids, opts.additional_gids) < 0) {
+			ERROR("setgroups failed: %m\n");
+			free_and_exit(EXIT_FAILURE);
+		}
 	}
 
 	if (opts.set_umask)
@@ -3257,6 +3460,12 @@ int main(int argc, char **argv)
 	}
 
 
+	if (!opts.extroot && (opts.user || opts.group)) {
+		int precheck_uid, precheck_gid, precheck_grgid;
+
+		get_jail_user(&precheck_uid, &precheck_gid, &precheck_grgid);
+	}
+
 	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
 		ERROR("size parameter too long: \"%s\"\n", opts.tmpoverlaysize);
 		ret=-1;
@@ -3337,8 +3546,18 @@ int main(int argc, char **argv)
 		for (size_t s = optind; s < argc; s++)
 			opts.jail_argv[s - optind] = strdup(argv[s]);
 
-		if (opts.namespace & CLONE_NEWUSER)
+		if (opts.namespace & CLONE_NEWUSER) {
 			get_jail_user(&opts.pw_uid, &opts.pw_gid, &opts.gr_gid);
+
+			if (!opts.uidmap && opts.user) {
+				int primary_gid = (opts.gr_gid != -1) ? opts.gr_gid : opts.pw_gid;
+
+				if (!resolve_jail_user_gids(primary_gid))
+					WARNING("could not resolve supplementary groups for "
+						"user %s; jail will start with no supplementary "
+						"groups\n", opts.user);
+			}
+		}
 	}
 
 	if (!opts.extroot) {
@@ -3595,17 +3814,65 @@ static void post_create_runtime(void)
 		}
 		if (!opts.uidmap) {
 			bool has_gr = (opts.gr_gid != -1);
-			if (opts.pw_uid != -1) {
-				write_single_uid_gid_map(jail_process.pid, 0, opts.pw_uid);
-				write_single_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:opts.pw_gid);
+			int primary_gid = has_gr ? opts.gr_gid :
+				((opts.pw_uid != -1) ? opts.pw_gid : 65534);
+			int target_uid = (opts.pw_uid != -1) ? opts.pw_uid : 65534;
+
+			if (write_single_uid_gid_map(jail_process.pid, 0, target_uid)) {
+				ERROR("failed to map uid %d into the jail's user "
+				      "namespace (mapping a uid other than your own "
+				      "requires CAP_SETUID, typically real root; use "
+				      "-U with your own account, run as a privileged "
+				      "user, or supply an explicit --uidmap)\n",
+				      target_uid);
+				free_and_exit(-1);
+			}
+
+			if (opts.additional_gids && opts.num_additional_gids) {
+				char *gidmap = build_group_gidmap(primary_gid);
+
+				if (gidmap) {
+					if (write_uid_gid_map(jail_process.pid, 1, gidmap)) {
+						ERROR("failed to map supplementary groups for "
+						      "%s into the jail's user namespace "
+						      "(mapping a gid other than your own "
+						      "requires CAP_SETGID, typically real "
+						      "root)\n", opts.user);
+						free(gidmap);
+						free_and_exit(-1);
+					}
+					free(gidmap);
+				} else {
+					WARNING("failed to build supplementary group map for "
+						"%s; falling back to primary gid only\n", opts.user);
+					if (write_single_uid_gid_map(jail_process.pid, 1, primary_gid)) {
+						ERROR("failed to map gid %d into the jail's "
+						      "user namespace (mapping a gid other "
+						      "than your own requires CAP_SETGID, "
+						      "typically real root)\n", primary_gid);
+						free_and_exit(-1);
+					}
+				}
 			} else {
-				write_single_uid_gid_map(jail_process.pid, 0, 65534);
-				write_single_uid_gid_map(jail_process.pid, 1, has_gr?opts.gr_gid:65534);
+				if (write_single_uid_gid_map(jail_process.pid, 1, primary_gid)) {
+					ERROR("failed to map gid %d into the jail's user "
+					      "namespace (mapping a gid other than your "
+					      "own requires CAP_SETGID, typically real "
+					      "root)\n", primary_gid);
+					free_and_exit(-1);
+				}
 			}
 		} else {
-			write_uid_gid_map(jail_process.pid, 0, opts.uidmap);
-			if (opts.gidmap)
-				write_uid_gid_map(jail_process.pid, 1, opts.gidmap);
+			if (write_uid_gid_map(jail_process.pid, 0, opts.uidmap)) {
+				ERROR("failed to write uidmap (check --uidmap values "
+				      "and privileges)\n");
+				free_and_exit(-1);
+			}
+			if (opts.gidmap && write_uid_gid_map(jail_process.pid, 1, opts.gidmap)) {
+				ERROR("failed to write gidmap (check --gidmap values "
+				      "and privileges)\n");
+				free_and_exit(-1);
+			}
 		}
 
 		ubuf[0] = 'O';
