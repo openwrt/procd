@@ -154,6 +154,83 @@ int mask_path_now(const char *path)
 	return 0;
 }
 
+static void mountinfo_unescape(char *s)
+{
+	char *r = s, *w = s;
+
+	while (*r) {
+		if (r[0] == '\\' && r[1] >= '0' && r[1] <= '7' &&
+		    r[2] >= '0' && r[2] <= '7' && r[3] >= '0' && r[3] <= '7') {
+			*w++ = (char)(((r[1] - '0') << 6) | ((r[2] - '0') << 3) | (r[3] - '0'));
+			r += 4;
+		} else {
+			*w++ = *r++;
+		}
+	}
+	*w = '\0';
+}
+
+static unsigned long mountinfo_current_flags(const char *path)
+{
+	unsigned long flags = MS_RELATIME;
+	bool found = false;
+	FILE *f;
+	char *line = NULL;
+	size_t linecap = 0;
+
+	f = fopen("/proc/self/mountinfo", "re");
+	if (!f)
+		return flags;
+
+	while (getline(&line, &linecap, f) >= 0) {
+		char *mp, *opts, *save = NULL, *optsave = NULL;
+		char *tok;
+		unsigned long this_flags;
+
+		strtok_r(line, " ", &save);
+		strtok_r(NULL, " ", &save);
+		strtok_r(NULL, " ", &save);
+		strtok_r(NULL, " ", &save);
+		mp = strtok_r(NULL, " ", &save);
+		opts = strtok_r(NULL, " ", &save);
+		if (!mp || !opts)
+			continue;
+		mountinfo_unescape(mp);
+		if (strcmp(mp, path))
+			continue;
+
+		this_flags = 0;
+		for (tok = strtok_r(opts, ",", &optsave); tok;
+		     tok = strtok_r(NULL, ",", &optsave)) {
+			if (!strcmp(tok, "ro"))
+				this_flags |= MS_RDONLY;
+			else if (!strcmp(tok, "nosuid"))
+				this_flags |= MS_NOSUID;
+			else if (!strcmp(tok, "nodev"))
+				this_flags |= MS_NODEV;
+			else if (!strcmp(tok, "noexec"))
+				this_flags |= MS_NOEXEC;
+			else if (!strcmp(tok, "noatime"))
+				this_flags |= MS_NOATIME;
+			else if (!strcmp(tok, "relatime"))
+				this_flags |= MS_RELATIME;
+			else if (!strcmp(tok, "nodiratime"))
+				this_flags |= MS_NODIRATIME;
+		}
+
+		/* last match wins: it's the topmost/effective entry */
+		flags = this_flags;
+		found = true;
+	}
+	free(line);
+	fclose(f);
+
+	if (!found)
+		return MS_RELATIME;
+
+	return flags;
+}
+
 static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
 		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner)
 {
@@ -231,6 +308,49 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 
 	const char *hack_fstype = ((!filesystemtype || strcmp(filesystemtype, "cgroup"))?filesystemtype:"cgroup2");
 	if (mount(source?:(is_bind?new:NULL), new, hack_fstype?:"none", mountflags, optstr)) {
+		int mount_errno = errno;
+
+		if ((mountflags & MS_REMOUNT) && mount_errno == EPERM) {
+			/* Not a heuristic: re-read the kernel-enforced flags from
+			 * mountinfo and only proceed once the security-relevant
+			 * ones (ro/nosuid/nodev/noexec) are confirmed in effect. */
+			unsigned long retry_flags = mountflags | mountinfo_current_flags(new);
+
+			if (retry_flags != mountflags &&
+			    !mount(source?:(is_bind?new:NULL), new, hack_fstype?:"none", retry_flags, optstr))
+				goto mount_ok;
+
+			unsigned long lockable_flags = MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC;
+			unsigned long wanted = orig_mountflags & lockable_flags;
+			unsigned long got = mountinfo_current_flags(new) & lockable_flags;
+
+			if ((wanted & ~got) == 0) {
+				WARNING("remount(%s) to apply flags failed: %s (tolerated - "
+				"the flags actually in effect already satisfy the "
+				"request; expected under CLONE_NEWUSER for host-owned "
+				"bind sources)\n", new, strerror(mount_errno));
+				goto mount_ok;
+			}
+
+			if (error) {
+				errno = mount_errno;
+				ERROR("failed to enforce mount restrictions on %s %s: %m "
+				      "(missing flags: %s%s%s%s)\n", source, new,
+				      (wanted & ~got & MS_RDONLY) ? "ro " : "",
+				      (wanted & ~got & MS_NOSUID) ? "nosuid " : "",
+				      (wanted & ~got & MS_NODEV) ? "nodev " : "",
+				      (wanted & ~got & MS_NOEXEC) ? "noexec " : "");
+				ret = error;
+				goto free_source_out;
+			}
+
+			WARNING("remount(%s) to apply mount restrictions failed and could not "
+				"be verified in effect; continuing best-effort since "
+				"this mount was not marked as critical\n", new);
+			goto mount_ok;
+		}
+
+		errno = mount_errno;
 		if (error)
 			ERROR("failed to mount %s %s: %m\n", source, new);
 
@@ -238,6 +358,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 		goto free_source_out;
 	}
 
+mount_ok:
 	DEBUG("mount %s%s %s (%s)\n", (mountflags & MS_BIND)?"-B ":"", source, new,
 	      (mountflags & MS_RDONLY)?"ro":"rw");
 
