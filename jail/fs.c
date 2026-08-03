@@ -629,6 +629,20 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 	return 0;
 }
 
+static bool is_proc_or_sys_path(const char *path)
+{
+	if (!strcmp(path, "/proc") || !strcmp(path, "/sys"))
+		return true;
+
+	if (!strncmp(path, "/proc/", 6))
+		return true;
+
+	if (!strncmp(path, "/sys/", 5))
+		return true;
+
+	return false;
+}
+
 int parseOCImount(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_MOUNT_MAX];
@@ -646,6 +660,18 @@ int parseOCImount(struct blob_attr *msg)
 		ret = parseOCImountopts(tb[OCI_MOUNT_OPTIONS], &mount_flags, &propagation_flags, &mount_data, &err);
 		if (ret)
 			return ret;
+	}
+
+	if (is_proc_or_sys_path(blobmsg_get_string(tb[OCI_MOUNT_DESTINATION])) &&
+	    ((mount_flags & MS_BIND) ||
+	     (tb[OCI_MOUNT_TYPE] && !strcmp(blobmsg_get_string(tb[OCI_MOUNT_TYPE]), "bind"))) &&
+	    !(mount_flags & MS_RDONLY)) {
+		ERROR("OCI mount config requests a writable bind mount onto %s; "
+		      "refusing to allow write access to /proc or /sys\n",
+		      blobmsg_get_string(tb[OCI_MOUNT_DESTINATION]));
+		if (mount_data)
+			free(mount_data);
+		return EPERM;
 	}
 
 	ret = add_mount(tb[OCI_MOUNT_SOURCE] ? blobmsg_get_string(tb[OCI_MOUNT_SOURCE]) : NULL,
