@@ -53,6 +53,24 @@ early_console(const char *dev)
 }
 
 static void
+early_noafile(void)
+{
+	int fd;
+
+	mkdir(PROCD_NOAFILE_DIR, 0000);
+	if (mount("tmpfs", PROCD_NOAFILE_DIR, "tmpfs",
+		  MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=4k,mode=000"))
+		return;
+
+	fd = creat(PROCD_NOAFILE, 0000);
+	if (fd >= 0)
+		close(fd);
+
+	mount(NULL, PROCD_NOAFILE_DIR, NULL,
+	      MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+}
+
+static void
 early_mounts(void)
 {
 	unsigned int oldumask = umask(0);
@@ -73,6 +91,7 @@ early_mounts(void)
 	early_console("/dev/console");
 
 	mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOATIME, "mode=01777");
+	early_noafile();
 	mkdir("/tmp/shm", 01777);
 
 	mkdir("/tmp/run", 0755);

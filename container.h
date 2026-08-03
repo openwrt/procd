@@ -18,6 +18,9 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 
+#define PROCD_NOAFILE_DIR "/tmp/.ujail"
+#define PROCD_NOAFILE PROCD_NOAFILE_DIR "/noafile"
+
 static inline bool is_container() {
 	struct stat s;
 	int r = stat("/.dockerenv", &s);
