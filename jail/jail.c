@@ -1946,8 +1946,14 @@ static int exec_jail(void *arg)
 			free_and_exit(EXIT_FAILURE);
 		}
 		if (setgroups(0, NULL) < 0) {
-			ERROR("setgroups\n");
-			free_and_exit(EXIT_FAILURE);
+			if (errno != EPERM) {
+				ERROR("setgroups\n");
+				free_and_exit(EXIT_FAILURE);
+			}
+			WARNING("setgroups(0, NULL) denied by the joined "
+				"userns (setgroups=deny is permanent once a "
+				"gid_map is written); continuing without "
+				"dropping supplementary groups\n");
 		}
 	}
 
