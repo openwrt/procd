@@ -151,6 +151,8 @@ static struct {
 	bool set_oom_score_adj;
 	struct mknod_args **devices;
 	char *ocibundle;
+	char **oci_deferred_masked;
+	char **oci_deferred_readonly;
 	bool immediately;
 	struct blob_attr *annotations;
 	int term_timeout;
@@ -283,6 +285,19 @@ static void free_opts(bool parent) {
 	free_hooklist(opts.hooks.startContainer);
 	free_hooklist(opts.hooks.poststart);
 	free_hooklist(opts.hooks.poststop);
+
+	if (opts.oci_deferred_masked) {
+		char **p;
+		for (p = opts.oci_deferred_masked; *p; p++)
+			free(*p);
+		free(opts.oci_deferred_masked);
+	}
+	if (opts.oci_deferred_readonly) {
+		char **p;
+		for (p = opts.oci_deferred_readonly; *p; p++)
+			free(*p);
+		free(opts.oci_deferred_readonly);
+	}
 }
 
 static int mount_overlay(char *jail_root, char *overlaydir) {
@@ -1122,6 +1137,8 @@ static void free_and_exit(int ret)
 
 static void post_jail_fs(void);
 static void enter_userns(void);
+static void remask_after_unshare(void);
+static void remount_proc_sys_after_unshare(void);
 static void enter_jail_fs(void)
 {
 	char dirbuf[sizeof(jail_root) + 4];
@@ -1155,6 +1172,11 @@ static void enter_jail_fs(void)
 
 	if (create_devices()) {
 		ERROR("create_devices() failed\n");
+		free_and_exit(-1);
+	}
+	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1 &&
+	    build_jail_noafile()) {
+		ERROR("build_jail_noafile() failed\n");
 		free_and_exit(-1);
 	}
 	if (opts.ronly)
@@ -1203,6 +1225,10 @@ static void enter_userns(void)
 	if ((opts.namespace & CLONE_NEWNS) && unshare(CLONE_NEWNS)) {
 		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
 		free_and_exit(-1);
+	}
+	if (opts.namespace & CLONE_NEWNS) {
+		remask_after_unshare();
+		remount_proc_sys_after_unshare();
 	}
 
 	if (setregid(0, 0) < 0) {
@@ -1388,6 +1414,121 @@ static void set_jail_user(int pw_uid, int user_gid, int gr_gid)
 		ERROR("failed to set user id %d: %m\n", pw_uid);
 		free_and_exit(EXIT_FAILURE);
 	}
+}
+
+static const char *proc_mask_critical[] = {
+	"/proc/kcore",
+	"/proc/sysrq-trigger",
+	NULL,
+};
+
+static const char *proc_mask_optional[] = {
+	"/proc/latency_stats",
+	"/proc/timer_list",
+	"/proc/timer_stats",
+	"/proc/sched_debug",
+	"/proc/scsi",
+	NULL,
+};
+
+static const char *sys_mask_critical[] = {
+	"/sys/firmware",
+	NULL,
+};
+
+static int mask_default_paths(const char **paths, bool critical)
+{
+	const char **p;
+
+	for (p = paths; *p; p++) {
+		if (add_mount((void *)(-1), *p, NULL, 0, 0, NULL, critical ? -1 : 0)) {
+			if (critical) {
+				ERROR("failed to mask sensitive path %s\n", *p);
+				return -1;
+			}
+			WARNING("could not mask optional path %s; it may not "
+				"exist on this kernel/config\n", *p);
+		}
+	}
+
+	return 0;
+}
+
+/* deferred like mask_path_now(): locking a readonlyPath in phase 1
+ * would stay locked past the jail's own unshare(CLONE_NEWNS). */
+static int remount_readonly_now(const char *path)
+{
+	struct stat s;
+
+	if (stat(path, &s))
+		return 0; /* doesn't exist, nothing to restrict */
+
+	if (mount(path, path, "bind", MS_BIND | MS_REC, NULL))
+		return -1;
+	if (mount(path, path, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_REC, NULL))
+		return -1;
+
+	DEBUG("read-only path %s\n", path);
+	return 0;
+}
+
+/* re-apply masks inside the container's own mntns: the first pass is
+ * locked once copied in after unshare(CLONE_NEWNS); best-effort */
+static void remask_after_unshare(void)
+{
+	const char **p;
+	char **dp;
+
+	if (!opts.ocibundle) {
+		if (opts.procfs) {
+			for (p = proc_mask_critical; *p; p++)
+				mask_path_now(*p);
+			for (p = proc_mask_optional; *p; p++)
+				mask_path_now(*p);
+		}
+
+		if (opts.sysfs) {
+			for (p = sys_mask_critical; *p; p++)
+				mask_path_now(*p);
+		}
+	}
+
+	/* same reason as the default masks above: locked in phase 1, an
+	 * OCI bundle's own masks would outlive its unshare(CLONE_NEWNS). */
+	if (opts.oci_deferred_masked)
+		for (dp = opts.oci_deferred_masked; *dp; dp++)
+			mask_path_now(*dp);
+
+	if (opts.oci_deferred_readonly)
+		for (dp = opts.oci_deferred_readonly; *dp; dp++)
+			remount_readonly_now(*dp);
+}
+
+/* /proc/sys is locked read-only for every procfs jail via a self-bind,
+ * separately from the mask_default_paths() lists above; a deferred-
+ * userns jail skips it in phase 1 for the same reason it skips the
+ * masks (see the call site in post_main()), so re-apply it here. */
+static void remount_proc_sys_after_unshare(void)
+{
+	struct stat s;
+
+	if (!(opts.procfs || opts.ocibundle))
+		return;
+	if (stat("/proc/sys", &s))
+		return;
+
+	/* the MS_MOVE below needs a mountpoint to move from, or it's a
+	 * silent EINVAL. */
+	if (opts.namespace & CLONE_NEWNET)
+		mount("/proc/sys/net", "/proc/self/net", "bind", MS_BIND, NULL);
+
+	if (mount("/proc/sys", "/proc/sys", "bind", MS_BIND, NULL))
+		return;
+	if (mount("/proc/sys", "/proc/sys", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, NULL))
+		WARNING("could not remount /proc/sys read-only\n");
+
+	if (opts.namespace & CLONE_NEWNET)
+		mount("/proc/self/net", "/proc/sys/net", "bind", MS_MOVE, NULL);
 }
 
 static bool resolve_jail_user_gids(int primary_gid)
@@ -2837,6 +2978,30 @@ static const struct blobmsg_policy oci_linux_policy[] = {
 	[OCI_LINUX_ROOTFSPROPAGATION] = { "rootfsPropagation", BLOBMSG_TYPE_STRING },
 };
 
+static int append_deferred_path(char ***list, const char *path)
+{
+	size_t n = 0;
+	char **newlist;
+
+	if (*list)
+		while ((*list)[n])
+			n++;
+
+	newlist = realloc(*list, (n + 2) * sizeof(char *));
+	if (!newlist)
+		return ENOMEM;
+
+	newlist[n] = strdup(path);
+	if (!newlist[n]) {
+		*list = newlist;
+		return ENOMEM;
+	}
+	newlist[n + 1] = NULL;
+	*list = newlist;
+
+	return 0;
+}
+
 static int parseOCIlinux(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_MAX];
@@ -2868,19 +3033,35 @@ static int parseOCIlinux(struct blob_attr *msg)
 			return res;
 	}
 
-	if (tb[OCI_LINUX_READONLYPATHS]) {
-		blobmsg_for_each_attr(cur, tb[OCI_LINUX_READONLYPATHS], rem) {
-			res = add_mount(NULL, blobmsg_get_string(cur), NULL, MS_BIND | MS_REC | MS_RDONLY, 0, NULL, 0);
-			if (res)
-				return res;
-		}
-	}
+	{
+		bool defer_userns = (opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1;
 
-	if (tb[OCI_LINUX_MASKEDPATHS]) {
-		blobmsg_for_each_attr(cur, tb[OCI_LINUX_MASKEDPATHS], rem) {
-			res = add_mount((void *)(-1), blobmsg_get_string(cur), NULL, 0, 0, NULL, 0);
-			if (res)
-				return res;
+		if (tb[OCI_LINUX_READONLYPATHS]) {
+			blobmsg_for_each_attr(cur, tb[OCI_LINUX_READONLYPATHS], rem) {
+				if (defer_userns) {
+					res = append_deferred_path(&opts.oci_deferred_readonly, blobmsg_get_string(cur));
+					if (res)
+						return res;
+					continue;
+				}
+				res = add_mount(NULL, blobmsg_get_string(cur), NULL, MS_BIND | MS_REC | MS_RDONLY, 0, NULL, 0);
+				if (res)
+					return res;
+			}
+		}
+
+		if (tb[OCI_LINUX_MASKEDPATHS]) {
+			blobmsg_for_each_attr(cur, tb[OCI_LINUX_MASKEDPATHS], rem) {
+				if (defer_userns) {
+					res = append_deferred_path(&opts.oci_deferred_masked, blobmsg_get_string(cur));
+					if (res)
+						return res;
+					continue;
+				}
+				res = add_mount((void *)(-1), blobmsg_get_string(cur), NULL, 0, 0, NULL, 0);
+				if (res)
+					return res;
+			}
 		}
 	}
 
@@ -3643,6 +3824,8 @@ static void post_main(struct uloop_timeout *t)
 				add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, ptsopts, 0);
 			}
 
+			bool defer_userns = (opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1;
+
 			if (opts.procfs || opts.ocibundle) {
 				add_mount("proc", "/proc", "proc",
 					  detect_atime_flag("/proc") | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0, NULL, -1);
@@ -3662,8 +3845,17 @@ static void post_main(struct uloop_timeout *t)
 				 * succeeds as the bind-mount of /proc/self/net is performed first and then
 				 * move-mount of /proc/sys/net follows because 'e' preceeds 'y' in the ASCII
 				 * table (and in the alphabet).
+				 *
+				 * A jail that defers its own CLONE_NEWUSER applies this (and all other
+				 * default masking below) itself in phase 2, once it regains its own
+				 * mount namespace: a mount locked here, while still privileged, can
+				 * never be replaced by that same, now less-privileged phase, since a
+				 * locked mount stays present underneath anything mounted over it and
+				 * still counts against the kernel's mount-visibility check for any
+				 * nested runtime's own /proc mount.
 				 */
-				if (!add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, 0, NULL, -1))
+				if (!defer_userns &&
+				    !add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, 0, NULL, -1))
 					if (opts.namespace & CLONE_NEWNET)
 						if (!add_mount_inner("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, 0, NULL, -1))
 							add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, 0, NULL, -1);
@@ -3672,6 +3864,15 @@ static void post_main(struct uloop_timeout *t)
 			if (opts.sysfs || opts.ocibundle)
 				add_mount("sysfs", "/sys", "sysfs",
 					  detect_atime_flag("/sys") | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
+
+			if (!opts.ocibundle && !defer_userns) {
+				if (opts.procfs &&
+				    (mask_default_paths(proc_mask_critical, true) ||
+				     mask_default_paths(proc_mask_optional, false)))
+					free_and_exit(-1);
+				if (opts.sysfs && mask_default_paths(sys_mask_critical, true))
+					free_and_exit(-1);
+			}
 
 		}
 

@@ -26,6 +26,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/fsuid.h>
 #include <unistd.h>
 #include <libgen.h>
 
@@ -41,6 +42,8 @@
 #include "log.h"
 
 #define UJAIL_NOAFILE "/tmp/.ujailnoafile"
+#define JAIL_NOAFILE_DIR "/dev/.ujail"
+#define JAIL_NOAFILE JAIL_NOAFILE_DIR "/noafile"
 
 /*
  * mnt_already_visible() requires a new mount's atime class to match
@@ -131,8 +134,37 @@ int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mo
 
 struct avl_tree mounts;
 
+/* ownership alone can't survive an explicit 0->0 uidMapping, or a
+ * directory-owner unlink; a locked, read-only superblock can.
+ * The directory keeps its execute bit: traversal to the one, known
+ * path is needed by mask_path_now() itself; read (listing) and write
+ * (creating/removing entries) stay denied. */
+int build_jail_noafile(void)
+{
+	int fd, old_fsuid;
+
+	if (mkdir(JAIL_NOAFILE_DIR, 0111))
+		return -1;
+	if (mount("none", JAIL_NOAFILE_DIR, "tmpfs",
+		  MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=4k,mode=111"))
+		return -1;
+
+	old_fsuid = setfsuid(0);
+	fd = creat(JAIL_NOAFILE, 0000);
+	setfsuid(old_fsuid);
+	if (fd < 0)
+		return -1;
+	close(fd);
+
+	return mount(NULL, JAIL_NOAFILE_DIR, NULL,
+		     MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+}
+
 /* same masking as do_mount()'s is_mask branch, applied immediately
- * against an absolute path instead of queued through jail_root */
+ * against an absolute path instead of queued through jail_root.
+ *
+ * UJAIL_NOAFILE lives under the pre-pivot root, gone by the time this
+ * runs; JAIL_NOAFILE (see build_jail_noafile()) is used instead. */
 int mask_path_now(const char *path)
 {
 	struct stat s;
@@ -144,9 +176,9 @@ int mask_path_now(const char *path)
 		if (mount("none", path, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000"))
 			return -1;
 	} else {
-		if (mount(UJAIL_NOAFILE, path, "bind", MS_BIND, NULL))
+		if (mount(JAIL_NOAFILE, path, "bind", MS_BIND, NULL))
 			return -1;
-		if (mount(UJAIL_NOAFILE, path, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, NULL))
+		if (mount(JAIL_NOAFILE, path, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, NULL))
 			return -1;
 	}
 
@@ -262,14 +294,14 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 			return 0; /* doesn't exists, nothing to mask */
 
 		if (S_ISDIR(s.st_mode)) {/* use empty 0-sized tmpfs for directories */
-			if (mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_NOATIME, "size=0,mode=000"))
+			if (mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000"))
 				return error;
 		} else {
 			/* mount-bind 0-sized file having mode 000 */
 			if (mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL))
 				return error;
 
-			if (mount(UJAIL_NOAFILE, new, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_NOATIME, NULL))
+			if (mount(UJAIL_NOAFILE, new, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, NULL))
 				return error;
 		}
 

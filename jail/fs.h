@@ -24,6 +24,7 @@ int add_mount_inner(const char *source, const char *target, const char *filesyst
 int add_mount_bind(const char *path, int readonly, int error);
 int add_mount_fd(int fd, const char *target, int error);
 int mask_path_now(const char *path);
+int build_jail_noafile(void);
 
 /* open_tree()/mount_setattr() wrappers - no glibc wrappers yet.
  * Fields must match the kernel's struct mount_attr layout exactly
