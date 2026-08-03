@@ -843,6 +843,7 @@ int add_2paths_and_deps(const char *path, const char *path2, int readonly, int e
 	}
 
 	char *map = NULL;
+	char *fullpath = NULL;
 	int fd, ret = -1;
 	if (path[0] == '/') {
 		if (avl_find(&mounts, path2))
@@ -854,14 +855,11 @@ int add_2paths_and_deps(const char *path, const char *path2, int readonly, int e
 	} else {
 		if (avl_find(&libraries, path))
 			return 0;
-		char *fullpath;
 		fd = lib_open(&fullpath, path);
 		if (fd < 0)
 			return error;
-		if (fullpath) {
+		if (fullpath)
 			alloc_library(fullpath, path);
-			free(fullpath);
-		}
 	}
 
 	struct stat s;
@@ -895,7 +893,10 @@ int add_2paths_and_deps(const char *path, const char *path2, int readonly, int e
 	}
 
 	if (map[0] == ELFMAG0 && map[1] == ELFMAG1 && map[2] == ELFMAG2 && map[3] == ELFMAG3) {
-		ret = elf_load_deps(path, map);
+		/* Pass the resolved fullpath, not the bare soname, so
+		 * elf_load_deps() can expand a $ORIGIN-relative DT_RPATH/
+		 * DT_RUNPATH in this object against its real directory. */
+		ret = elf_load_deps(fullpath ? fullpath : path, map, s.st_size);
 		goto out;
 	}
 
@@ -906,6 +907,7 @@ out:
 		close(fd);
 	if (map)
 		munmap(map, s.st_size);
+	free(fullpath);
 
 	return ret;
 }
