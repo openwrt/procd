@@ -1174,11 +1174,6 @@ static void enter_jail_fs(void)
 		ERROR("create_devices() failed\n");
 		free_and_exit(-1);
 	}
-	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1 &&
-	    build_jail_noafile()) {
-		ERROR("build_jail_noafile() failed\n");
-		free_and_exit(-1);
-	}
 	if (opts.ronly)
 		mount(NULL, "/", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
 
@@ -3831,6 +3826,10 @@ static void post_main(struct uloop_timeout *t)
 			}
 
 			bool defer_userns = (opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1;
+
+			if (defer_userns)
+				add_mount(PROCD_NOAFILE, JAIL_NOAFILE, NULL,
+					  MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, NULL, -1);
 
 			if (opts.procfs || opts.ocibundle) {
 				add_mount("proc", "/proc", "proc",
