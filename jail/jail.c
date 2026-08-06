@@ -1795,8 +1795,8 @@ static void jail_process_handler(struct uloop_process *c, int ret)
 		jail_return_code = WEXITSTATUS(ret);
 		INFO("jail (%d) exited with exit: %d\n", c->pid, jail_return_code);
 	} else {
-		jail_return_code = WTERMSIG(ret);
-		INFO("jail (%d) exited with signal: %d\n", c->pid, jail_return_code);
+		jail_return_code = 128 + WTERMSIG(ret);
+		INFO("jail (%d) exited with signal: %d\n", c->pid, WTERMSIG(ret));
 	}
 	jail_running = 0;
 	poststop();
