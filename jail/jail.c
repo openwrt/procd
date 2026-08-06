@@ -21,6 +21,8 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/syscall.h>
+#include <poll.h>
 
 /* musl only defined 15 limit types, make sure all 16 are supported */
 #ifndef RLIMIT_RTTIME
@@ -1854,6 +1856,7 @@ static struct uloop_timeout pre_exec_timeout = {
 };
 
 int pipes[4];
+static int parent_pidfd = -1;
 static int exec_jail(void *arg)
 {
 	char buf[1];
@@ -2085,6 +2088,32 @@ static void post_start_hook(void)
 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
 		ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
 		free_and_exit(EXIT_FAILURE);
+	}
+
+	/* the supervisor can SIGKILL ujail on its own death (netifd on exit,
+	 * procd's instance_timeout() escalation); die with it, otherwise the
+	 * jailed process keeps running and the supervisor's supervisor starts
+	 * a second instance. Placed after set_jail_user() and the capability
+	 * transitions, whose commit_creds() would zero pdeath_signal, but before
+	 * the seccomp filter, which need not permit prctl() to reach execve(). */
+	if (prctl(PR_SET_PDEATHSIG, SIGKILL)) {
+		ERROR("prctl(PR_SET_PDEATHSIG) failed: %m\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	/* the parent can die between the fork() and the prctl above; the death
+	 * signal is then bound to the process we are reparented to and never
+	 * delivered, so detect the exit on the inherited pidfd and die ourselves.
+	 * getppid() == 1 cannot serve here: in a new PID namespace the parent is
+	 * not visible and getppid() reads 0 either way. */
+	if (parent_pidfd >= 0) {
+		struct pollfd pfd = { .fd = parent_pidfd, .events = POLLIN };
+
+		if (poll(&pfd, 1, 0) > 0) {
+			ERROR("parent died before PR_SET_PDEATHSIG\n");
+			free_and_exit(EXIT_FAILURE);
+		}
+		close(parent_pidfd);
 	}
 
 	char **envp = build_envp(opts.seccomp, opts.envp);
@@ -3787,6 +3816,8 @@ static void post_main(struct uloop_timeout *t)
 	if (pipe2(&userns_pipe[0], O_CLOEXEC) < 0 || pipe2(&userns_pipe[2], O_CLOEXEC) < 0)
 		free_and_exit(-1);
 
+	parent_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+
 	if (has_namespaces()) {
 		if (opts.namespace & CLONE_NEWNS) {
 			if (!opts.extroot && (opts.user || opts.group)) {
@@ -3928,6 +3959,7 @@ static void post_main(struct uloop_timeout *t)
 		/* parent process */
 		char sig_buf[1];
 
+		close(parent_pidfd);
 		uloop_process_add(&jail_process);
 		jail_running = 1;
 		if (seteuid(0)) {
