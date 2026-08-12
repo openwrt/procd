@@ -66,8 +66,9 @@ early_noafile(void)
 	if (fd >= 0)
 		close(fd);
 
-	mount(NULL, PROCD_NOAFILE_DIR, NULL,
-	      MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+	if (mount(NULL, PROCD_NOAFILE_DIR, NULL,
+		  MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL))
+		ERROR("failed to lock %s read-only: %m\n", PROCD_NOAFILE_DIR);
 }
 
 static void
