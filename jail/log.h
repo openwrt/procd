@@ -14,22 +14,14 @@
 #define _JAIL_LOG_H_
 
 extern int debug;
-#include <stdio.h>
 #include <syslog.h>
+#include <libubox/ulog.h>
 
-#define INFO(fmt, ...) do { \
-	printf("jail: "fmt, ## __VA_ARGS__); \
-	} while (0)
-#define WARNING(fmt, ...) do { \
-	syslog(LOG_WARNING, "jail: "fmt, ## __VA_ARGS__); \
-	printf("jail: "fmt, ## __VA_ARGS__); \
-	} while (0)
-#define ERROR(fmt, ...) do { \
-	syslog(LOG_ERR, "jail: "fmt, ## __VA_ARGS__); \
-	fprintf(stderr,"jail: "fmt, ## __VA_ARGS__); \
-	} while (0)
+#define INFO(fmt, ...)		ULOG_INFO(fmt, ## __VA_ARGS__)
+#define WARNING(fmt, ...)	ULOG_WARN(fmt, ## __VA_ARGS__)
+#define ERROR(fmt, ...)		ULOG_ERR(fmt, ## __VA_ARGS__)
 #define DEBUG(fmt, ...) do { \
-	if (debug) printf("jail: "fmt, ## __VA_ARGS__); \
+	if (debug) ulog(LOG_DEBUG, fmt, ## __VA_ARGS__); \
 	} while (0)
 
 #endif

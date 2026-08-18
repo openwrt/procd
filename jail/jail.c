@@ -5768,6 +5768,9 @@ int main(int argc, char **argv)
 		char *jsonfile;
 		int ocires;
 
+		/* stdout and stderr belong to the container, not to us */
+		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "jail");
+
 		if (!opts.name) {
 			ERROR("OCI bundle needs a named jail\n");
 			ret=-1;
