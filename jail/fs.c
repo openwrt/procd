@@ -281,6 +281,7 @@ out:
 
 struct mount {
 	struct avl_node avl;
+	struct list_head list;
 	const char *source;
 	const char *target;
 	const char *filesystemtype;
@@ -293,6 +294,7 @@ struct mount {
 	bool idmap;
 	bool idmap_recursive;
 	bool volume;
+	bool mounted;
 	int idmap_treefd;
 	struct blob_attr *uidmappings;
 	struct blob_attr *gidmappings;
@@ -316,6 +318,7 @@ int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mo
 }
 
 struct avl_tree mounts;
+static LIST_HEAD(mounts_order);
 
 /* same masking as do_mount()'s is_mask branch, applied immediately
  * against an absolute path instead of queued through jail_root.
@@ -675,6 +678,7 @@ static int _add_mount(const char *source, const char *target, const char *filesy
 	m->source_fd = -1;
 
 	avl_insert(&mounts, &m->avl);
+	list_add_tail(&m->list, &mounts_order);
 	DEBUG("adding mount %s %s bind(%d) ro(%d) err(%d)\n", (m->source == (void*)(-1))?"mask":m->source, m->target,
 		!!(m->mountflags & MS_BIND), !!(m->mountflags & MS_RDONLY), m->error != 0);
 
@@ -725,6 +729,7 @@ int add_mount_fd(int fd, const char *target, int error)
 	m->source_fd = fd;
 
 	avl_insert(&mounts, &m->avl);
+	list_add_tail(&m->list, &mounts_order);
 	DEBUG("adding mount fd:%d %s bind(1) ro(?) err(%d)\n", fd, target, error != 0);
 
 	return 0;
@@ -1468,10 +1473,63 @@ void mount_stage_dev(const char *jail_dev)
 	}
 }
 
+static bool mount_target_covers(const struct mount *outer, const struct mount *inner)
+{
+	size_t len = strlen(outer->target);
+
+	if (!strcmp(outer->target, "/"))
+		return strcmp(inner->target, "/") != 0;
+
+	return !strncmp(inner->target, outer->target, len) && inner->target[len] == '/';
+}
+
+static int mount_one(const char *jailroot, const char *jail_dev, struct mount *m)
+{
+	char devtarget[PATH_MAX];
+	struct mount *outer;
+
+	if (m->mounted)
+		return 0;
+
+	m->mounted = true;
+
+	/* whatever this one sits on has to be established first */
+	list_for_each_entry(outer, &mounts_order, list)
+		if (!outer->mounted && mount_target_covers(outer, m) &&
+		    mount_one(jailroot, jail_dev, outer))
+			return -1;
+
+	if (jail_dev && m->filesystemtype && !strcmp(m->filesystemtype, "tmpfs") &&
+	    !strcmp(m->target, "/dev")) {
+		snprintf(devtarget, sizeof(devtarget), "%s%s", jailroot, m->target);
+		mkdir_p(devtarget, 0755);
+		if (mount(jail_dev, devtarget, NULL, MS_BIND | MS_REC, NULL)) {
+			ERROR("mount(MS_BIND, %s -> %s): %m\n", jail_dev, devtarget);
+			return -1;
+		}
+
+		return 0;
+	}
+
+	if (m->idmap_treefd >= 0)
+		return do_move_idmap_mount(jailroot, m) ? -1 : 0;
+
+	if (m->idmap)
+		return do_idmap_mount(jailroot, m) ? -1 : 0;
+
+	if (m->source_fd >= 0)
+		return do_mount_fd(jailroot, m->source_fd, m->target, m->error) ? -1 : 0;
+
+	if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags,
+		     m->propflags, m->optstr, m->error, m->inner, m->source_fd))
+		return -1;
+
+	return 0;
+}
+
 int mount_all(const char *jailroot, const char *jail_dev) {
 	struct library *l;
 	struct mount *m;
-	char devtarget[PATH_MAX];
 	int ret = 0;
 
 	build_noafile();
@@ -1483,43 +1541,19 @@ int mount_all(const char *jailroot, const char *jail_dev) {
 	avl_for_each_element(&libraries, l, avl)
 		add_mount_bind(l->path, 1, -1);
 
-	avl_for_each_element(&mounts, m, avl) {
-		if (jail_dev && m->filesystemtype && !strcmp(m->filesystemtype, "tmpfs") &&
-		    !strcmp(m->target, "/dev")) {
-			snprintf(devtarget, sizeof(devtarget), "%s%s", jailroot, m->target);
-			mkdir_p(devtarget, 0755);
-			if (mount(jail_dev, devtarget, NULL, MS_BIND | MS_REC, NULL)) {
-				ERROR("mount(MS_BIND, %s -> %s): %m\n", jail_dev, devtarget);
-				ret = -1;
-				goto out;
-			}
-		} else if (m->idmap_treefd >= 0) {
-			if (do_move_idmap_mount(jailroot, m)) {
-				ret = -1;
-				goto out;
-			}
-		} else if (m->idmap) {
-			if (do_idmap_mount(jailroot, m)) {
-				ret = -1;
-				goto out;
-			}
-		} else if (m->source_fd >= 0) {
-			if (do_mount_fd(jailroot, m->source_fd, m->target, m->error)) {
-				ret = -1;
-				goto out;
-			}
-		} else if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags,
-				    m->propflags, m->optstr, m->error, m->inner, m->source_fd)) {
+	/* the spec has the runtime establish the mounts in the order they are listed */
+	list_for_each_entry(m, &mounts_order, list) {
+		if (mount_one(jailroot, jail_dev, m)) {
 			ret = -1;
-			goto out;
+			break;
 		}
 	}
 
-out:
 	if (jailroot_dirfd >= 0) {
 		close(jailroot_dirfd);
 		jailroot_dirfd = -1;
 	}
+
 	return ret;
 }
 
@@ -1527,6 +1561,7 @@ void mount_free(void) {
 	struct mount *m, *tmp;
 
 	avl_remove_all_elements(&mounts, m, avl, tmp) {
+		list_del(&m->list);
 		if (m->source != (void*)(-1))
 			free((void*)m->source);
 		if (m->source_fd >= 0)
@@ -1542,6 +1577,7 @@ void mount_free(void) {
 
 void mount_list_init(void) {
 	avl_init(&mounts, avl_strcmp, false, NULL);
+	INIT_LIST_HEAD(&mounts_order);
 }
 
 static int add_script_interp(const char *path, const char *map, int size)

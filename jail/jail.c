@@ -6106,11 +6106,8 @@ static void post_main(struct uloop_timeout *t)
 				 * /proc/sys/net into (totally unrelated, but surely existing) /proc/self/net.
 				 * Then we mount-bind /proc/sys read-only and then mount-move /proc/self/net into
 				 * /proc/sys/net.
-				 * This works because mounts are executed in incrementing strcmp() order and
-				 * /proc/self/net appears there before /proc/sys/net and hence the operation
-				 * succeeds as the bind-mount of /proc/self/net is performed first and then
-				 * move-mount of /proc/sys/net follows because 'e' preceeds 'y' in the ASCII
-				 * table (and in the alphabet).
+				 * Mounts are established in the order they are added, so the three
+				 * steps are registered in exactly the order they have to happen in.
 				 *
 				 * A jail that defers its own CLONE_NEWUSER applies this (and all other
 				 * default masking below) itself in phase 2, once it regains its own
@@ -6120,11 +6117,14 @@ static void post_main(struct uloop_timeout *t)
 				 * still counts against the kernel's mount-visibility check for any
 				 * nested runtime's own /proc mount.
 				 */
-				if (!defer_userns &&
-				    !add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, 0, NULL, -1))
+				if (!defer_userns && !mount_is_defined("/proc/sys")) {
 					if (opts.namespace & CLONE_NEWNET)
-						if (!add_mount_inner("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, 0, NULL, -1))
-							add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, 0, NULL, -1);
+						add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, 0, NULL, -1);
+
+					if (!add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, 0, NULL, -1) &&
+					    (opts.namespace & CLONE_NEWNET))
+						add_mount_inner("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, 0, NULL, -1);
+				}
 
 			}
 			if (opts.sysfs || opts.ocibundle)
