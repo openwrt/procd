@@ -5429,7 +5429,7 @@ jail_writepid(pid_t pid)
 	if (_pidfile == NULL)
 		return errno;
 
-	if (fprintf(_pidfile, "%d\n", pid) < 0) {
+	if (fprintf(_pidfile, "%d", pid) < 0) {
 		fclose(_pidfile);
 		return errno;
 	}
