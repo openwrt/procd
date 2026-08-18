@@ -648,6 +648,7 @@ static struct uloop_timeout hook_process_timeout = {
 };
 
 static void run_hooklist(void);
+static void oci_state_fill(struct blob_buf *b);
 static void hook_process_handler(struct uloop_process *c, int ret)
 {
 	uloop_timeout_cancel(&hook_process_timeout);
@@ -680,9 +681,38 @@ static void hook_process_timeout_cb(struct uloop_timeout *t)
 	kill(hook_process.pid, SIGKILL);
 }
 
+static int hook_state_pipe(void)
+{
+	static struct blob_buf sb;
+	int state_pipe[2];
+	char *state;
+	size_t len;
+
+	blob_buf_init(&sb, 0);
+	oci_state_fill(&sb);
+	state = blobmsg_format_json(sb.head, true);
+	if (!state)
+		return -1;
+
+	if (pipe(state_pipe)) {
+		free(state);
+		return -1;
+	}
+
+	len = strlen(state);
+	if (write(state_pipe[1], state, len) != (ssize_t)len)
+		WARNING("cannot pass the container state to the hook: %m\n");
+
+	free(state);
+	close(state_pipe[1]);
+
+	return state_pipe[0];
+}
+
 static void run_hooklist(void)
 {
 	struct hook_execvpe *hook = *current_hook;
+	int state_fd;
 	struct stat s;
 
 	if (!hook)
@@ -696,10 +726,16 @@ static void run_hooklist(void)
 	if (!((unsigned long)s.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
 		hook_process_handler(&hook_process, EPERM);
 
+	state_fd = hook_state_pipe();
+
 	hook_running = 1;
 	hook_process.pid = fork();
 	if (hook_process.pid == 0) {
 		/* child */
+		if (state_fd > -1) {
+			dup2(state_fd, STDIN_FILENO);
+			close(state_fd);
+		}
 		execve(hook->file, hook->argv, hook->envp);
 		ERROR("execve error %m\n");
 		_exit(errno);
@@ -707,10 +743,15 @@ static void run_hooklist(void)
 		/* fork error */
 		ERROR("hook fork error\n");
 		hook_running = 0;
+		if (state_fd > -1)
+			close(state_fd);
 		hook_process_handler(&hook_process, errno);
 	}
 
 	/* parent */
+	if (state_fd > -1)
+		close(state_fd);
+
 	uloop_process_add(&hook_process);
 
 	if (hook->timeout > 0)
@@ -4458,9 +4499,7 @@ static int handle_start(struct ubus_context *ctx, struct ubus_object *obj,
 }
 
 static struct blob_buf bb;
-static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
-			struct ubus_request_data *req, const char *method,
-			struct blob_attr *msg)
+static void oci_state_fill(struct blob_buf *b)
 {
 	char *statusstr;
 
@@ -4484,26 +4523,25 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 			statusstr = "unknown";
 	}
 
-	blob_buf_init(&bb, 0);
-	blobmsg_add_string(&bb, "ociVersion", OCI_VERSION_STRING);
-	blobmsg_add_string(&bb, "id", opts.name);
-	blobmsg_add_string(&bb, "status", statusstr);
+	blobmsg_add_string(b, "ociVersion", OCI_VERSION_STRING);
+	blobmsg_add_string(b, "id", opts.name);
+	blobmsg_add_string(b, "status", statusstr);
 	if (jail_oci_state == OCI_STATE_CREATED ||
 	    jail_oci_state == OCI_STATE_RUNNING ||
 	    jail_oci_state == OCI_STATE_PAUSED) {
 		int64_t v;
 
-		blobmsg_add_u32(&bb, "pid", jail_process.pid);
+		blobmsg_add_u32(b, "pid", jail_process.pid);
 
 		v = cgroups_read_int64("memory.peak");
 		if (v >= 0)
-			blobmsg_add_u64(&bb, "memoryPeak", (uint64_t)v);
+			blobmsg_add_u64(b, "memoryPeak", (uint64_t)v);
 		v = cgroups_read_int64("memory.swap.peak");
 		if (v >= 0)
-			blobmsg_add_u64(&bb, "memorySwapPeak", (uint64_t)v);
+			blobmsg_add_u64(b, "memorySwapPeak", (uint64_t)v);
 		v = cgroups_read_int64("pids.peak");
 		if (v >= 0)
-			blobmsg_add_u64(&bb, "pidsPeak", (uint64_t)v);
+			blobmsg_add_u64(b, "pidsPeak", (uint64_t)v);
 
 		int events_fd = cgroups_open_attr("memory.events.local");
 		if (events_fd >= 0) {
@@ -4512,7 +4550,7 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 
 			close(events_fd);
 			if (en > 0) {
-				void *sub = blobmsg_open_table(&bb, "memoryEventsLocal");
+				void *sub = blobmsg_open_table(b, "memoryEventsLocal");
 
 				ebuf[en] = '\0';
 				next = ebuf;
@@ -4522,19 +4560,26 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 					if (!space)
 						continue;
 					*space = '\0';
-					blobmsg_add_u64(&bb, line,
+					blobmsg_add_u64(b, line,
 							strtoull(space + 1, NULL, 10));
 				}
-				blobmsg_close_table(&bb, sub);
+				blobmsg_close_table(b, sub);
 			}
 		}
 	}
 
-	blobmsg_add_string(&bb, "bundle", opts.ocibundle);
+	blobmsg_add_string(b, "bundle", opts.ocibundle);
 
 	if (opts.annotations)
-		blobmsg_add_blob(&bb, opts.annotations);
+		blobmsg_add_blob(b, opts.annotations);
+}
 
+static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	blob_buf_init(&bb, 0);
+	oci_state_fill(&bb);
 	ubus_send_reply(ctx, req, bb.head);
 
 	return UBUS_STATUS_OK;
