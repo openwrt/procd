@@ -1787,7 +1787,7 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 			return -ENOTDIR;
 	}
 
-	usettings = avl_find_element(&settings, blobmsg_get_string(tb[CONF_NAME]), usettings, avl);
+	usettings = avl_find_element(&settings, name, usettings, avl);
 	if (path && usettings)
 		return -EIO;
 
