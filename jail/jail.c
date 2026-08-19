@@ -2603,6 +2603,7 @@ static int exec_jail(void *arg)
 	char tag;
 	int recv_fds[JAIL_IDMAP_MAX_FDS];
 	int nrecv;
+	int ret;
 
 	exit_from_child = true;
 	prctl(PR_SET_SECUREBITS, 0);
@@ -2626,10 +2627,17 @@ static int exec_jail(void *arg)
 		close(userns_pipe[3]);
 	}
 
-	setns_open(CLONE_NEWNET);
-	setns_open(CLONE_NEWNS);
-	setns_open(CLONE_NEWIPC);
-	setns_open(CLONE_NEWUTS);
+	ret = setns_open(CLONE_NEWNET);
+	if (!ret)
+		ret = setns_open(CLONE_NEWNS);
+	if (!ret)
+		ret = setns_open(CLONE_NEWIPC);
+	if (!ret)
+		ret = setns_open(CLONE_NEWUTS);
+	if (ret) {
+		ERROR("failed to join namespace: %s\n", strerror(ret));
+		return EXIT_FAILURE;
+	}
 
 	/*
 	 * Must run before setns_open(CLONE_NEWUSER) below: joining an
@@ -2643,7 +2651,11 @@ static int exec_jail(void *arg)
 		return EXIT_FAILURE;
 	}
 
-	setns_open(CLONE_NEWUSER);
+	ret = setns_open(CLONE_NEWUSER);
+	if (ret) {
+		ERROR("failed to join user namespace: %s\n", strerror(ret));
+		return EXIT_FAILURE;
+	}
 
 	buf[0] = 'i';
 	if (write(pipes[1], buf, 1) < 1) {
@@ -2675,7 +2687,11 @@ static int exec_jail(void *arg)
 	if (opts.namespace & CLONE_NEWCGROUP)
 		unshare(CLONE_NEWCGROUP);
 
-	setns_open(CLONE_NEWCGROUP);
+	ret = setns_open(CLONE_NEWCGROUP);
+	if (ret) {
+		ERROR("failed to join cgroup namespace: %s\n", strerror(ret));
+		free_and_exit(EXIT_FAILURE);
+	}
 
 	/*
 	 * A join of an existing userns (opts.setns.user) can become root
