@@ -257,6 +257,28 @@ static int console_slave_fd = -1;
 static char console_slave_name[64];
 
 
+/*
+ * Joining a namespace by path needs privilege in the user namespace owning it,
+ * which our own user namespace would take away, so in that case it is created
+ * after the joins instead of by clone(). crun makes the same distinction.
+ */
+static inline bool userns_deferred(void)
+{
+	if (!(opts.namespace & CLONE_NEWUSER) || opts.setns.user != -1)
+		return false;
+
+	return (opts.setns.pid != -1) ||
+	       (opts.setns.net != -1) ||
+	       (opts.setns.ns != -1) ||
+	       (opts.setns.ipc != -1) ||
+	       (opts.setns.uts != -1) ||
+	       (opts.setns.cgroup != -1) ||
+#ifdef CLONE_NEWTIME
+	       (opts.setns.time != -1) ||
+#endif
+	       false;
+}
+
 static inline bool has_namespaces(void)
 {
 return ((opts.setns.pid != -1) ||
@@ -1458,6 +1480,7 @@ static void free_and_exit(int ret)
 
 static void post_jail_fs(void);
 static void enter_userns(void);
+static int userns_wait_idmaps(void);
 static void remask_after_unshare(void);
 static void remount_proc_sys_after_unshare(void);
 static void enter_jail_fs(void)
@@ -1486,16 +1509,48 @@ static void enter_jail_fs(void)
 	enter_userns();
 }
 
-/*
- * Create our own CLONE_NEWUSER here, after /proc and /sys are already
- * mounted, so the PID namespace stays owned by the initial userns
- * throughout mount setup. See the comment in exec_jail() for why.
- */
-static void enter_userns(void)
+static int userns_wait_idmaps(void)
 {
 	char buf[1];
 
-	if (!((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1)) {
+	buf[0] = 'i';
+	if (xwrite_byte(userns_pipe[1], buf[0]) < 1) {
+		ERROR("can't write to parent\n");
+		return -1;
+	}
+	close(userns_pipe[1]);
+
+	if (xread_byte(userns_pipe[2], buf) < 1) {
+		ERROR("can't read from parent\n");
+		return -1;
+	}
+	close(userns_pipe[2]);
+	if (buf[0] != 'O') {
+		ERROR("parent had an error, child exiting\n");
+		return -1;
+	}
+
+	if (setregid(0, 0) < 0 || setreuid(0, 0) < 0) {
+		ERROR("cannot become root in our user namespace: %m\n");
+		return -1;
+	}
+	if (setgroups(0, NULL) < 0) {
+		ERROR("setgroups: %m\n");
+		return -1;
+	}
+
+	if ((opts.namespace & CLONE_NEWNS) &&
+	    mount("none", "/", "none", MS_REC | MS_PRIVATE, NULL)) {
+		ERROR("private mount failed: %m\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static void enter_userns(void)
+{
+	if (!userns_deferred()) {
 		post_jail_fs();
 		return;
 	}
@@ -1505,22 +1560,8 @@ static void enter_userns(void)
 		free_and_exit(-1);
 	}
 
-	buf[0] = 'i';
-	if (xwrite_byte(userns_pipe[1], buf[0]) < 1) {
-		ERROR("can't write to parent\n");
+	if (userns_wait_idmaps())
 		free_and_exit(-1);
-	}
-	close(userns_pipe[1]);
-
-	if (xread_byte(userns_pipe[2], buf) < 1) {
-		ERROR("can't read from parent\n");
-		free_and_exit(-1);
-	}
-	close(userns_pipe[2]);
-	if (buf[0] != 'O') {
-		ERROR("parent had an error, child exiting\n");
-		free_and_exit(-1);
-	}
 
 	if ((opts.namespace & CLONE_NEWNS) && unshare(CLONE_NEWNS)) {
 		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
@@ -1529,19 +1570,6 @@ static void enter_userns(void)
 	if (opts.namespace & CLONE_NEWNS) {
 		remask_after_unshare();
 		remount_proc_sys_after_unshare();
-	}
-
-	if (setregid(0, 0) < 0) {
-		ERROR("setgid\n");
-		free_and_exit(-1);
-	}
-	if (setreuid(0, 0) < 0) {
-		ERROR("setuid\n");
-		free_and_exit(-1);
-	}
-	if (setgroups(0, NULL) < 0) {
-		ERROR("setgroups\n");
-		free_and_exit(-1);
 	}
 
 	post_jail_fs();
@@ -2699,8 +2727,6 @@ static int exec_jail(void *arg)
 	close(pipes[3]);
 
 	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1) {
-		/* CLONE_NEWUSER is deferred to enter_userns(); keep our
-		 * ends of the handshake open, close only the parent's. */
 		close(userns_pipe[0]);
 		close(userns_pipe[3]);
 	} else {
@@ -2724,12 +2750,13 @@ static int exec_jail(void *arg)
 	}
 
 	/*
-	 * Must run before setns_open(CLONE_NEWUSER) below: joining an
-	 * external userns drops privilege immediately, and our own userns
-	 * is deferred to enter_userns(), so this always runs privileged.
+	 * Joining an external userns drops privilege immediately, so this has
+	 * to run before it. A userns of our own owns the mount namespace it
+	 * was created with and locks everything inherited into it, so there
+	 * the detach neither works nor is needed.
 	 */
 	if ((opts.namespace & CLONE_NEWNS) &&
-	    ((opts.namespace & CLONE_NEWUSER) || opts.setns.user != -1) &&
+	    (userns_deferred() || opts.setns.user != -1) &&
 	    isolate_mountns_and_detach_inherited()) {
 		ERROR("failed to detach inherited mounts\n");
 		return EXIT_FAILURE;
@@ -2762,6 +2789,10 @@ static int exec_jail(void *arg)
 				  false,
 				  recv_fds, nrecv, &extroot_idmap_fd, &overlay_idmap_fd);
 
+	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred() &&
+	    userns_wait_idmaps())
+		return EXIT_FAILURE;
+
 	if (opts.setns.user != -1 && (opts.namespace & CLONE_NEWNS) &&
 	    unshare(CLONE_NEWNS)) {
 		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
@@ -2777,12 +2808,6 @@ static int exec_jail(void *arg)
 		free_and_exit(EXIT_FAILURE);
 	}
 
-	/*
-	 * A join of an existing userns (opts.setns.user) can become root
-	 * right away. Our own CLONE_NEWUSER is not created here: doing so
-	 * before /proc,/sys are mounted ties the PID namespace to it,
-	 * which fails mnt_already_visible() on hosts with locked /proc.
-	 */
 	if (opts.setns.user != -1) {
 		if (setregid(0, 0) < 0) {
 			ERROR("setgid\n");
@@ -4211,7 +4236,7 @@ static int parseOCIlinux(struct blob_attr *msg)
 	}
 
 	{
-		bool defer_userns = (opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1;
+		bool defer_userns = userns_deferred();
 
 		if (tb[OCI_LINUX_READONLYPATHS]) {
 			blobmsg_for_each_attr(cur, tb[OCI_LINUX_READONLYPATHS], rem) {
@@ -5728,7 +5753,8 @@ int main(int argc, char **argv)
 			opts.ronly = 1;
 			break;
 		case 'f':
-			opts.namespace |= CLONE_NEWUSER;
+			if (opts.setns.user == -1)
+				opts.namespace |= CLONE_NEWUSER;
 			break;
 		case 'F':
 			opts.namespace |= CLONE_NEWCGROUP;
@@ -6233,7 +6259,7 @@ static void post_main(struct uloop_timeout *t)
 				add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, ptsopts, 0);
 			}
 
-			bool defer_userns = (opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1;
+			bool defer_userns = userns_deferred();
 
 			if (defer_userns)
 				add_mount(PROCD_NOAFILE, JAIL_NOAFILE, NULL,
@@ -6392,7 +6418,8 @@ static void post_main(struct uloop_timeout *t)
 		 */
 		int init_cgroup_fd = -1;
 		struct clone_args cargs = {
-			.flags = (opts.namespace & ~(CLONE_NEWCGROUP | CLONE_NEWUSER | CLONE_NEWTIME)) | CLONE_PIDFD,
+			.flags = (opts.namespace & ~(CLONE_NEWCGROUP | CLONE_NEWTIME |
+						     (userns_deferred() ? CLONE_NEWUSER : 0))) | CLONE_PIDFD,
 			.pidfd = (__u64)(uintptr_t)&jail_process_pidfd,
 			.exit_signal = SIGCHLD,
 		};
@@ -6578,10 +6605,6 @@ static void post_create_runtime(void)
 	while (num_idmap_fds > 0)
 		close(idmap_fds[--num_idmap_fds]);
 
-	/*
-	 * Wait for the child to reach enter_userns() and create its own
-	 * userns before writing its uid/gid maps; see that function.
-	 */
 	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1) {
 		char ubuf[1];
 

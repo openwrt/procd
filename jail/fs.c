@@ -432,6 +432,8 @@ void jail_fs_set_userns(bool enabled)
 }
 
 static bool mount_opts_has(const char *opts, const char *needle);
+static bool mount_opts_gid_unmapped(const char *opts);
+static void mount_opts_drop(const char *opts, const char *key, char *buf, size_t len);
 
 static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
 		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner,
@@ -440,6 +442,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	struct stat s;
 	char new[PATH_MAX];
 	char tmpfs_data[512];
+	char devpts_data[512];
 	const char *mount_data;
 	char *source = (char *)orig_source;
 	int fd, ret = 0;
@@ -536,6 +539,12 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	}
 
 	mount_data = optstr;
+	if (filesystemtype && !strcmp(filesystemtype, "devpts") && fs_userns &&
+	    mount_opts_gid_unmapped(optstr)) {
+		mount_opts_drop(optstr, "gid=", devpts_data, sizeof(devpts_data));
+		mount_data = devpts_data;
+	}
+
 	if (filesystemtype && !strcmp(filesystemtype, "tmpfs") && !fs_userns &&
 	    !mount_opts_has(optstr ?: "", "swap") && !mount_opts_has(optstr ?: "", "noswap")) {
 		if (optstr && *optstr)
@@ -956,6 +965,78 @@ static bool is_proc_or_sys_path(const char *path)
 		return true;
 
 	return false;
+}
+
+static bool id_is_mapped(const char *mapfile, unsigned long id)
+{
+	unsigned long inside, outside, count;
+	char line[128];
+	bool mapped = false;
+	FILE *f;
+
+	f = fopen(mapfile, "r");
+	if (!f)
+		return true;
+
+	while (fgets(line, sizeof(line), f)) {
+		if (sscanf(line, "%lu %lu %lu", &inside, &outside, &count) != 3)
+			continue;
+
+		if (id >= inside && id - inside < count) {
+			mapped = true;
+			break;
+		}
+	}
+
+	fclose(f);
+
+	return mapped;
+}
+
+static bool mount_opts_gid_unmapped(const char *opts)
+{
+	const char *p;
+
+	if (!opts)
+		return false;
+
+	for (p = opts; p; p = strchr(p, ',')) {
+		if (*p == ',')
+			++p;
+
+		if (!strncmp(p, "gid=", 4))
+			return !id_is_mapped("/proc/self/gid_map", strtoul(p + 4, NULL, 10));
+	}
+
+	return false;
+}
+
+static void mount_opts_drop(const char *opts, const char *key, char *buf, size_t len)
+{
+	size_t klen = strlen(key);
+	const char *p, *end;
+	size_t used = 0;
+
+	buf[0] = '\0';
+
+	for (p = opts; p && *p; p = end) {
+		end = strchr(p, ',');
+		if (end)
+			++end;
+
+		if (!strncmp(p, key, klen))
+			continue;
+
+		while (*p && used + 1 < len) {
+			buf[used++] = *p;
+			if (*p++ == ',')
+				break;
+		}
+		buf[used] = '\0';
+	}
+
+	if (used && buf[used - 1] == ',')
+		buf[used - 1] = '\0';
 }
 
 static bool mount_opts_has(const char *opts, const char *needle)
