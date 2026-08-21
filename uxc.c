@@ -15,9 +15,11 @@
 #define _GNU_SOURCE
 #endif
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <sys/file.h>
 #include <glob.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -47,6 +49,7 @@
 #define OCI_VERSION_STRING "1.0.2"
 #define UXC_ETC_CONFDIR "/etc/uxc"
 #define UXC_VOL_CONFDIR "/tmp/run/uvol/.meta/uxc"
+#define UXC_VOL_SECRETDIR "/tmp/run/uvol/.meta/secrets"
 
 static bool verbose = false;
 static bool json_output = false;
@@ -313,6 +316,7 @@ enum {
 	CONF_IDMAP_OFFSET,
 	CONF_DATA_VOLUMES,
 	CONF_OVERLAY_SIZE,
+	CONF_INITENV,
 	__CONF_MAX,
 };
 
@@ -328,6 +332,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_IDMAP_OFFSET] = { .name = "idmap-offset", .type = BLOBMSG_TYPE_STRING },
 	[CONF_DATA_VOLUMES] = { .name = "data-volumes", .type = BLOBMSG_TYPE_ARRAY },
 	[CONF_OVERLAY_SIZE] = { .name = "overlay-size", .type = BLOBMSG_TYPE_STRING },
+	[CONF_INITENV] = { .name = "initenv", .type = BLOBMSG_TYPE_TABLE },
 };
 
 static int conf_load(bool load_settings)
@@ -1005,6 +1010,164 @@ static int provision_rw_uvol(const char *volname, const char *size);
 static int provision_data_volumes(const char *container, struct blob_attr *vols,
 				  struct blob_buf *req);
 
+static void gen_secret(char *out, size_t outlen)
+{
+	static const char hex[] = "0123456789abcdef";
+	unsigned char buf[24];
+	size_t i, n;
+	FILE *f;
+
+	out[0] = '\0';
+	f = fopen("/dev/urandom", "r");
+	if (!f)
+		return;
+	n = fread(buf, 1, sizeof(buf), f);
+	fclose(f);
+	if (n != sizeof(buf) || outlen < (n * 2 + 1))
+		return;
+
+	for (i = 0; i < n; i++) {
+		out[i * 2] = hex[buf[i] >> 4];
+		out[i * 2 + 1] = hex[buf[i] & 0xf];
+	}
+	out[n * 2] = '\0';
+}
+
+static void mkdir_path(const char *path, mode_t mode)
+{
+	char tmp[PATH_MAX];
+	char *p;
+
+	if (strlen(path) >= sizeof(tmp))
+		return;
+	strcpy(tmp, path);
+	for (p = tmp + 1; *p; p++) {
+		if (*p != '/')
+			continue;
+		*p = '\0';
+		mkdir(tmp, mode);
+		*p = '/';
+	}
+	mkdir(tmp, mode);
+}
+
+static bool shared_secret(const char *scope, char *out, size_t outlen)
+{
+	char dir[PATH_MAX], path[PATH_MAX], lockpath[PATH_MAX];
+	const char *p;
+	int lockfd;
+	FILE *f;
+	size_t n;
+	bool ok = false;
+
+	if (!scope || !*scope || *scope == '/' || strstr(scope, ".."))
+		return false;
+	for (p = scope; *p; p++)
+		if (!isalnum((unsigned char)*p) && *p != '/' && *p != '-' &&
+		    *p != '_' && *p != '.')
+			return false;
+
+	snprintf(dir, sizeof(dir), "%s/%s", UXC_VOL_SECRETDIR, scope);
+	snprintf(path, sizeof(path), "%s/value", dir);
+	snprintf(lockpath, sizeof(lockpath), "%s/.lock", UXC_VOL_SECRETDIR);
+
+	mkdir_path(UXC_VOL_SECRETDIR, 0700);
+	lockfd = open(lockpath, O_CREAT | O_RDWR, 0600);
+	if (lockfd < 0)
+		return false;
+	flock(lockfd, LOCK_EX);
+
+	f = fopen(path, "r");
+	if (f) {
+		n = fread(out, 1, outlen - 1, f);
+		fclose(f);
+		out[n] = '\0';
+		while (n && (out[n - 1] == '\n' || out[n - 1] == '\r'))
+			out[--n] = '\0';
+		ok = (out[0] != '\0');
+	} else {
+		gen_secret(out, outlen);
+		if (out[0]) {
+			mkdir_path(dir, 0700);
+			f = fopen(path, "w");
+			if (f) {
+				fchmod(fileno(f), 0600);
+				fprintf(f, "%s", out);
+				fclose(f);
+				ok = true;
+			}
+		}
+	}
+
+	flock(lockfd, LOCK_UN);
+	close(lockfd);
+	return ok;
+}
+
+static bool envfile_has_key(const char *path, const char *key)
+{
+	char line[4096];
+	size_t klen = strlen(key);
+	bool found = false;
+	FILE *f;
+
+	f = fopen(path, "r");
+	if (!f)
+		return false;
+	while (fgets(line, sizeof(line), f))
+		if (!strncmp(line, key, klen) && line[klen] == '=') {
+			found = true;
+			break;
+		}
+	fclose(f);
+	return found;
+}
+
+static void materialise_initenv(const char *name, struct blob_attr *initenv)
+{
+	char statedir[PATH_MAX], dir[PATH_MAX], path[PATH_MAX], secret[64];
+	struct blob_attr *cur;
+	const char *key, *val;
+	int rem;
+	FILE *f;
+
+	snprintf(statedir, sizeof(statedir), "%s/state", UXC_VOL_CONFDIR);
+	snprintf(dir, sizeof(dir), "%s/%s", statedir, name);
+	snprintf(path, sizeof(path), "%s/env", dir);
+
+	blobmsg_for_each_attr(cur, initenv, rem) {
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING)
+			continue;
+		key = blobmsg_name(cur);
+		if (!key || !*key || envfile_has_key(path, key))
+			continue;
+
+		val = blobmsg_get_string(cur);
+		if (!strcmp(val, "generate")) {
+			gen_secret(secret, sizeof(secret));
+			if (!secret[0])
+				continue;
+			val = secret;
+		} else if (!strncmp(val, "generate@", 9)) {
+			if (!shared_secret(val + 9, secret, sizeof(secret)))
+				continue;
+			val = secret;
+		}
+
+		mkdir(statedir, 0700);
+		mkdir(dir, 0700);
+		f = fopen(path, "a");
+		if (!f)
+			return;
+		fchmod(fileno(f), 0600);
+		fprintf(f, "%s=%s\n", key, val);
+		fclose(f);
+
+		if (val == secret)
+			fprintf(stderr, "uxc: generated %s for container %s\n", key, name);
+	}
+}
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode)
 {
@@ -1017,6 +1180,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	const char *imgvol = NULL;
 	char *seccomp_log = NULL;
 	char overlaypath[PATH_MAX];
+	char envpath[PATH_MAX];
 
 	void *in, *ins, *j, *m;
 	bool found = false;
@@ -1086,13 +1250,21 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (pidfile)
 		blobmsg_add_string(&req, "pidfile", pidfile);
 
-	if (tb[CONF_IDMAP_OFFSET])
-		blobmsg_add_string(&req, "idmap_offset", blobmsg_get_string(tb[CONF_IDMAP_OFFSET]));
 	if (console_socket)
 		blobmsg_add_string(&req, "consolesocket", console_socket);
 
 	if (systemd_cgroup)
 		blobmsg_add_u8(&req, "systemdcgroup", 1);
+
+	if (tb[CONF_IDMAP_OFFSET])
+		blobmsg_add_string(&req, "idmap_offset", blobmsg_get_string(tb[CONF_IDMAP_OFFSET]));
+
+	if (tb[CONF_INITENV])
+		materialise_initenv(name, tb[CONF_INITENV]);
+
+	snprintf(envpath, sizeof(envpath), "%s/state/%s/env", UXC_VOL_CONFDIR, name);
+	if (!access(envpath, R_OK))
+		blobmsg_add_string(&req, "envfile", envpath);
 
 	m = blobmsg_open_table(&req, "mount");
 	if (tb[CONF_DATA_VOLUMES]) {
