@@ -567,12 +567,19 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 
 	argv[argc] = NULL;
 
-	_stdin = open("/dev/null", O_RDONLY);
+	if (in->stdio_fd[0] > -1)
+		_stdin = in->stdio_fd[0];
+	else
+		_stdin = open("/dev/null", O_RDONLY);
 
-	if (_stdout == -1)
+	if (in->stdio_fd[1] > -1)
+		_stdout = in->stdio_fd[1];
+	else if (_stdout == -1)
 		_stdout = open("/dev/null", O_WRONLY);
 
-	if (_stderr == -1)
+	if (in->stdio_fd[2] > -1)
+		_stderr = in->stdio_fd[2];
+	else if (_stderr == -1)
 		_stderr = open("/dev/null", O_WRONLY);
 
 	if (_stdin > -1) {
@@ -721,14 +728,14 @@ instance_start(struct service_instance *in)
 	}
 
 	instance_free_stdio(in);
-	if (in->_stdout.fd.fd > -2) {
+	if (in->_stdout.fd.fd > -2 && in->stdio_fd[1] < 0) {
 		if (pipe(opipe)) {
 			ULOG_WARN("pipe() failed: %m\n");
 			opipe[0] = opipe[1] = -1;
 		}
 	}
 
-	if (in->_stderr.fd.fd > -2) {
+	if (in->_stderr.fd.fd > -2 && in->stdio_fd[2] < 0) {
 		if (pipe(epipe)) {
 			ULOG_WARN("pipe() failed: %m\n");
 			epipe[0] = epipe[1] = -1;
@@ -1698,6 +1705,9 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 	bool running = in->proc.pending;
 	bool stopping = in->halt;
 
+	if (in_new->stdio_fd[1] > -1)
+		instance_stdio_set(in, in_new->stdio_fd);
+
 	if (!running || stopping) {
 		instance_config_move(in, in_new);
 		instance_start(in);
@@ -1713,11 +1723,39 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 	}
 }
 
+static void
+instance_free_stdio_fds(struct service_instance *in)
+{
+	int i;
+
+	for (i = 0; i < 3; i++) {
+		if (in->stdio_fd[i] < 0)
+			continue;
+
+		close(in->stdio_fd[i]);
+		in->stdio_fd[i] = -1;
+	}
+}
+
+void
+instance_stdio_set(struct service_instance *in, int *fds)
+{
+	int i;
+
+	instance_free_stdio_fds(in);
+
+	for (i = 0; i < 3; i++) {
+		in->stdio_fd[i] = fds[i];
+		fds[i] = -1;
+	}
+}
+
 void
 instance_free(struct service_instance *in)
 {
 	service_data_trigger(&in->data);
 	instance_free_stdio(in);
+	instance_free_stdio_fds(in);
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	uloop_timeout_cancel(&in->watchdog.timeout);
@@ -1760,6 +1798,8 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->exit_code = 0;
 	in->require_jail = false;
 	in->immediately = false;
+
+	in->stdio_fd[0] = in->stdio_fd[1] = in->stdio_fd[2] = -1;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;

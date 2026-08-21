@@ -13,6 +13,7 @@
  */
 
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/types.h>
@@ -29,6 +30,7 @@
 #include "instance.h"
 
 #include "../rcS.h"
+#include "../stdio-fds.h"
 
 AVL_TREE(services, avl_strcmp, false, NULL);
 AVL_TREE(containers, avl_strcmp, false, NULL);
@@ -37,7 +39,7 @@ static struct ubus_context *ctx;
 static struct ubus_object main_object;
 
 static void
-service_instance_add(struct service *s, struct blob_attr *attr)
+service_instance_add(struct service *s, struct blob_attr *attr, int *stdio_fds)
 {
 	struct service_instance *in;
 
@@ -49,6 +51,9 @@ service_instance_add(struct service *s, struct blob_attr *attr)
 		return;
 
 	instance_init(in, s, attr);
+	if (stdio_fds && stdio_fds[1] > -1)
+		instance_stdio_set(in, stdio_fds);
+
 	vlist_add(&s->instances, &in->node, (void *) in->name);
 }
 
@@ -152,7 +157,7 @@ service_update_data(struct service *s, struct blob_attr *data)
 }
 
 static int
-service_update(struct service *s, struct blob_attr **tb, bool add, bool init)
+service_update(struct service *s, struct blob_attr **tb, bool add, bool init, int *stdio_fds)
 {
 	struct blob_attr *cur;
 	int rem;
@@ -182,7 +187,7 @@ service_update(struct service *s, struct blob_attr **tb, bool add, bool init)
 		if (!add)
 			vlist_update(&s->instances);
 		blobmsg_for_each_attr(cur, tb[SERVICE_SET_INSTANCES], rem) {
-			service_instance_add(s, cur);
+			service_instance_add(s, cur, stdio_fds);
 		}
 		if (!add)
 			vlist_flush(&s->instances);
@@ -430,11 +435,12 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		   struct blob_attr *msg)
 {
 	struct blob_attr *tb[__SERVICE_SET_MAX], *cur;
+	int stdio_fds[3] = { -1, -1, -1 };
 	struct service *s = NULL;
 	const char *name;
 	bool container = is_container_obj(obj);
 	bool add = !strcmp(method, "add");
-	int ret;
+	int sock, ret;
 
 	blobmsg_parse(service_set_attrs, __SERVICE_SET_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 	cur = tb[SERVICE_SET_NAME];
@@ -443,6 +449,14 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	name = blobmsg_data(cur);
 
+	sock = req ? ubus_request_get_caller_fd(req) : -1;
+	if (sock > -1) {
+		if (stdio_fds_recv(sock, stdio_fds))
+			ULOG_WARN("failed to receive stdio for %s: %m\n", name);
+
+		close(sock);
+	}
+
 	if (container)
 		s = avl_find_element(&containers, name, s, avl);
 	else
@@ -450,17 +464,22 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 
 	if (s) {
 		P_DEBUG(2, "Update service %s\n", name);
-		return service_update(s, tb, add, false);
+		ret = service_update(s, tb, add, false, stdio_fds);
+		stdio_fds_close(stdio_fds);
+		return ret;
 	}
 
 	P_DEBUG(2, "Create service %s\n", name);
 	s = service_alloc(name);
-	if (!s)
+	if (!s) {
+		stdio_fds_close(stdio_fds);
 		return UBUS_STATUS_UNKNOWN_ERROR;
+	}
 
 	s->container = container;
 
-	ret = service_update(s, tb, add, true);
+	ret = service_update(s, tb, add, true, stdio_fds);
+	stdio_fds_close(stdio_fds);
 	if (ret)
 		return ret;
 

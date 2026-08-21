@@ -73,6 +73,7 @@
 #include "seccomp-trace.h"
 #include "cgroups.h"
 #include "netifd.h"
+#include "../stdio-fds.h"
 
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
@@ -4893,6 +4894,8 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 	bool console_sock_owned = false;
 	int cgroup_fd = -1;
 	int pipe_fds[2] = { -1, -1 };
+	int stdio_fds[STDIO_FDS_NUM] = { -1, -1, -1 };
+	int stdio_sock;
 	pid_t exec_pid, grandchild = -1;
 	struct container_exec *e = NULL;
 	char nspath[64];
@@ -4934,11 +4937,21 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 		exec_num_additional_gids = opts.num_additional_gids;
 	}
 
+	stdio_sock = ubus_request_get_caller_fd(req);
+	if (stdio_sock > -1) {
+		if (stdio_fds_recv(stdio_sock, stdio_fds))
+			ERROR("exec: cannot receive caller stdio: %m\n");
+
+		close(stdio_sock);
+	}
+
 	blobmsg_parse(container_exec_attrs, __CONTAINER_EXEC_ATTR_MAX, tb,
 		      blobmsg_data(msg), blobmsg_data_len(msg));
 
-	if (!tb[CONTAINER_EXEC_ATTR_ARGS])
+	if (!tb[CONTAINER_EXEC_ATTR_ARGS]) {
+		stdio_fds_close(stdio_fds);
 		return UBUS_STATUS_INVALID_ARGUMENT;
+	}
 
 	args = container_exec_strarray(tb[CONTAINER_EXEC_ATTR_ARGS]);
 	if (!args || !args[0]) {
@@ -5168,6 +5181,13 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 				dup2(slave_fd, STDERR_FILENO);
 				if (slave_fd > STDERR_FILENO)
 					close(slave_fd);
+			} else if (stdio_fds[1] > -1) {
+				for (j = 0; j < STDIO_FDS_NUM; j++) {
+					if (dup2(stdio_fds[j], j) < 0)
+						_exit(127);
+					if (stdio_fds[j] > STDERR_FILENO)
+						close(stdio_fds[j]);
+				}
 			}
 			if (exec_set_umask)
 				umask(exec_umask);
@@ -5272,6 +5292,8 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 	close(pipe_fds[0]);
 	pipe_fds[0] = -1;
 
+	stdio_fds_close(stdio_fds);
+
 	for (i = 0; i < (int)ARRAY_SIZE(ns_names); i++)
 		if (ns_fds[i] >= 0) {
 			close(ns_fds[i]);
@@ -5332,6 +5354,7 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 
 out:
+	stdio_fds_close(stdio_fds);
 	for (i = 0; i < (int)ARRAY_SIZE(ns_names); i++)
 		if (ns_fds[i] >= 0)
 			close(ns_fds[i]);
