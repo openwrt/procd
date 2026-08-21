@@ -227,9 +227,15 @@ static struct {
 } opts;
 
 static struct blob_buf ocibuf;
+static struct blob_buf notify_buf;
 
 static char **volume_sources;
 static int num_volume_sources;
+static int exec_ack[2] = { -1, -1 };
+static void exec_ack_cb(struct uloop_fd *fd, unsigned int events);
+static struct uloop_fd exec_ack_uloop = {
+	.cb = exec_ack_cb,
+};
 
 extern int pivot_root(const char *new_root, const char *put_old);
 
@@ -1294,6 +1300,7 @@ static int build_jail_fs(void)
 }
 
 static bool exit_from_child;
+static void emit_instance_event(const char *event);
 static bool jail_ptrace_seccomp(void);
 
 static void free_and_exit(int ret)
@@ -1313,6 +1320,9 @@ static void free_and_exit(int ret)
 		rmdir(jail_dev);
 		jail_dev_staged = false;
 	}
+
+	if (!exit_from_child && opts.ocibundle && parent_ctx && opts.name)
+		emit_instance_event("instance.stopped");
 
 	if (!exit_from_child && parent_ctx)
 		ubus_free(parent_ctx);
@@ -2840,8 +2850,10 @@ static void post_start_hook(void)
 	if (!envp)
 		free_and_exit(EXIT_FAILURE);
 
-	if (opts.cwd && chdir(opts.cwd))
+	if (opts.cwd && chdir(opts.cwd)) {
+		ERROR("chdir(cwd=%s) failed: %m\n", opts.cwd);
 		free_and_exit(EXIT_FAILURE);
+	}
 
 	if (opts.landlock.n > 0 && landlock_apply(&opts.landlock)) {
 		ERROR("landlock_apply failed\n");
@@ -4418,7 +4430,7 @@ enum {
 	OCI_STATE_STOPPED,
 };
 
-static int jail_oci_state = OCI_STATE_CREATED;
+static int jail_oci_state = OCI_STATE_CREATING;
 static void pipe_send_start_container(struct uloop_timeout *t);
 static struct uloop_timeout start_container_timeout = {
 	.cb = pipe_send_start_container,
@@ -4519,6 +4531,8 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
+#define UXC_STOP_TIMEOUT 120
+
 enum {
 	CONTAINER_KILL_ATTR_SIGNAL,
 	CONTAINER_KILL_ATTR_ALL,
@@ -4538,12 +4552,18 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *tb[__CONTAINER_KILL_ATTR_MAX], *cur;
 	int sig = SIGTERM;
 	bool all = false;
+	bool escalate = false;
 
 	blobmsg_parse(container_kill_attrs, __CONTAINER_KILL_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
 	cur = tb[CONTAINER_KILL_ATTR_SIGNAL];
-	if (cur)
-		sig = blobmsg_get_u32(cur);
+	if (cur) {
+		sig = (int32_t)blobmsg_get_u32(cur);
+		if (sig < 0) {
+			sig = SIGTERM;
+			escalate = true;
+		}
+	}
 
 	cur = tb[CONTAINER_KILL_ATTR_ALL];
 	if (cur)
@@ -4561,8 +4581,11 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 		DEBUG("cgroup.kill unavailable (%d), falling back to per-pid kill\n", rc);
 	}
 
-	if (jail_pidfd_send_signal(sig) == 0)
+	if (jail_pidfd_send_signal(sig) == 0) {
+		if (escalate)
+			uloop_timeout_set(&jail_process_timeout, UXC_STOP_TIMEOUT * 1000);
 		return 0;
+	}
 
 	switch (errno) {
 	case EINVAL: return UBUS_STATUS_INVALID_ARGUMENT;
@@ -5876,11 +5899,7 @@ int main(int argc, char **argv)
 	uloop_run();
 
 errout:
-	if (opts.ocibundle)
-		cgroups_free();
-
-	free_opts(true);
-
+	free_and_exit(ret);
 	return ret;
 }
 
@@ -5919,6 +5938,8 @@ static int run_uxc_net(const char *action)
 
 static void post_main(struct uloop_timeout *t)
 {
+	int child_status;
+
 	if (apply_rlimits()) {
 		ERROR("error applying resource limits\n");
 		free_and_exit(EXIT_FAILURE);
@@ -5937,6 +5958,9 @@ static void post_main(struct uloop_timeout *t)
 		free_and_exit(-1);
 
 	parent_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+
+	if (pipe2(exec_ack, O_CLOEXEC) < 0)
+		free_and_exit(-1);
 
 	if (opts.ocibundle)
 		cgroups_create();
@@ -6205,8 +6229,23 @@ static void post_main(struct uloop_timeout *t)
 		close(pipes[2]);
 		close(userns_pipe[1]);
 		close(userns_pipe[2]);
+		if (exec_ack[1] >= 0) {
+			close(exec_ack[1]);
+			exec_ack[1] = -1;
+		}
+		if (exec_ack[0] >= 0) {
+			exec_ack_uloop.fd = exec_ack[0];
+			uloop_fd_add(&exec_ack_uloop, ULOOP_READ);
+		}
 		if (read(pipes[0], sig_buf, 1) < 1) {
-			ERROR("can't read from child\n");
+			child_status = 0;
+			if (waitpid(jail_process.pid, &child_status, 0) == jail_process.pid &&
+			    WIFSIGNALED(child_status))
+				ERROR("can't read from child: killed by signal %d\n", WTERMSIG(child_status));
+			else if (WIFEXITED(child_status))
+				ERROR("can't read from child: exited %d\n", WEXITSTATUS(child_status));
+			else
+				ERROR("can't read from child\n");
 			free_and_exit(-1);
 		}
 		close(pipes[0]);
@@ -6258,6 +6297,43 @@ static void post_main(struct uloop_timeout *t)
 		free_and_exit(EXIT_FAILURE);
 	}
 	run_hooks(opts.hooks.prestart, post_prestart);
+}
+
+static void emit_instance_event(const char *event)
+{
+	if (!opts.ocibundle || !opts.name || !parent_ctx)
+		return;
+	blob_buf_init(&notify_buf, 0);
+	blobmsg_add_string(&notify_buf, "service", opts.name);
+	blobmsg_add_string(&notify_buf, "instance", opts.name);
+	ubus_send_event(parent_ctx, event, notify_buf.head);
+}
+
+static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
+{
+	char buf[8];
+	ssize_t n;
+
+	n = read(fd->fd, buf, sizeof(buf));
+	if (n < 0 && errno == EINTR)
+		return;
+
+	uloop_fd_delete(fd);
+	close(fd->fd);
+	exec_ack[0] = -1;
+
+	if (n != 0) {
+		ERROR("container.start: exec_ack read=%zd errno=%m\n", n);
+		return;
+	}
+
+	if (jail_dev_staged) {
+		umount2(jail_dev, MNT_DETACH);
+		rmdir(jail_dev);
+		jail_dev_staged = false;
+	}
+
+	emit_instance_event("instance.running");
 }
 
 static void post_poststart(void);
@@ -6368,6 +6444,8 @@ static void post_create_runtime(void)
 	}
 
 	jail_oci_state = OCI_STATE_CREATED;
+	emit_instance_event("instance.ready");
+
 	if (opts.ocibundle && !opts.immediately)
 		uloop_run(); /* wait for 'start' command via ubus */
 	else
@@ -6642,9 +6720,5 @@ static void post_poststop(void)
 		close(jail_process_pidfd);
 		jail_process_pidfd = -1;
 	}
-	free_opts(true);
-	if (parent_ctx)
-		ubus_free(parent_ctx);
-
-	exit(jail_return_code);
+	free_and_exit(jail_return_code);
 }
