@@ -100,7 +100,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:lm:M:n:NoO:pP:r:R:sS:uU:V:w:t:T:yY:Z"
+#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
 
 struct hook_execvpe {
 	char *file;
@@ -144,6 +144,7 @@ static struct {
 	char *overlaydir;
 	char *tmpoverlaysize;
 	char **envp;
+	char *envfile;
 	char *uidmap;
 	char *gidmap;
 	struct blob_attr *uidmappings;
@@ -1901,6 +1902,7 @@ static void usage(void)
 	fprintf(stderr, "  -c\t\tset PR_SET_NO_NEW_PRIVS\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "  -e <var>\timport environment variable\n");
+	fprintf(stderr, "  -x <file>\tappend KEY=VALUE lines from <file> to the container env\n");
 	fprintf(stderr, "namespace jail options:\n");
 	fprintf(stderr, "  -h <hostname>\tchange the hostname of the jail\n");
 	fprintf(stderr, "  -N\t\tjail has network namespace\n");
@@ -2902,6 +2904,44 @@ static int parseOCIenvarray(struct blob_attr *msg, char ***envp)
 	return 0;
 }
 
+static int append_envfile(char ***envp, const char *path)
+{
+	char line[4096];
+	char **arr = *envp;
+	char *nl;
+	int n = 0;
+	FILE *f;
+
+	f = fopen(path, "r");
+	if (!f)
+		return 0;
+
+	while (arr && arr[n])
+		++n;
+
+	while (fgets(line, sizeof(line), f)) {
+		nl = strchr(line, '\n');
+		if (nl)
+			*nl = '\0';
+
+		if (line[0] == '\0' || line[0] == '#' || !strchr(line, '='))
+			continue;
+
+		arr = realloc(arr, (n + 2) * sizeof(char *));
+		if (!arr) {
+			fclose(f);
+			return ENOMEM;
+		}
+
+		arr[n++] = strdup(line);
+		arr[n] = NULL;
+	}
+
+	fclose(f);
+	*envp = arr;
+	return 0;
+}
+
 enum {
 	OCI_ROOT_PATH,
 	OCI_ROOT_READONLY,
@@ -3388,6 +3428,9 @@ static int parseOCIprocess(struct blob_attr *msg)
 		if (res)
 			return res;
 	}
+
+	if (opts.envfile && (res = append_envfile(&opts.envp, opts.envfile)))
+		return res;
 
 	if (tb[OCI_PROCESS_USER] && (res = parseOCIprocessuser(tb[OCI_PROCESS_USER])))
 		return res;
@@ -5428,6 +5471,9 @@ int main(int argc, char **argv)
 			enve = calloc(1, sizeof(*enve));
 			enve->envarg = optarg;
 			list_add_tail(&enve->list, &envl);
+			break;
+		case 'x':
+			opts.envfile = optarg;
 			break;
 		case 'p':
 			opts.namespace |= CLONE_NEWNS;

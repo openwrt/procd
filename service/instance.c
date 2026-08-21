@@ -131,6 +131,7 @@ enum {
 	JAIL_ATTR_IDMAP_OFFSET,
 	JAIL_ATTR_CONSOLESOCKET,
 	JAIL_ATTR_SYSTEMDCGROUP,
+	JAIL_ATTR_ENVFILE,
 	__JAIL_ATTR_MAX,
 };
 
@@ -155,6 +156,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_IDMAP_OFFSET] = { "idmap_offset", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_CONSOLESOCKET] = { "consolesocket", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_SYSTEMDCGROUP] = { "systemdcgroup", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_ENVFILE] = { "envfile", BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -418,6 +420,11 @@ jail_run(struct service_instance *in, char **argv)
 	if (jail->consolesocket) {
 		argv[argc++] = "-Y";
 		argv[argc++] = jail->consolesocket;
+	}
+
+	if (jail->envfile) {
+		argv[argc++] = "-x";
+		argv[argc++] = jail->envfile;
 	}
 
 	if (jail->systemd_cgroup)
@@ -1123,6 +1130,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->jail.consolesocket, in_new->jail.consolesocket))
 		return true;
 
+	if (string_changed(in->jail.envfile, in_new->jail.envfile))
+		return true;
+
 	if (in->jail.flags != in_new->jail.flags)
 		return true;
 
@@ -1307,6 +1317,11 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	if (tb[JAIL_ATTR_SYSTEMDCGROUP] && blobmsg_get_bool(tb[JAIL_ATTR_SYSTEMDCGROUP])) {
 		jail->systemd_cgroup = true;
 		jail->argc++;
+	}
+
+	if (tb[JAIL_ATTR_ENVFILE]) {
+		jail->envfile = strdup(blobmsg_get_string(tb[JAIL_ATTR_ENVFILE]));
+		jail->argc += 2;
 	}
 
 	if (tb[JAIL_ATTR_SETNS]) {
@@ -1665,6 +1680,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	instance_config_move_strdup(&in->jail.hostname, in_src->jail.hostname);
 	instance_config_move_strdup(&in->jail.pidfile, in_src->jail.pidfile);
 	instance_config_move_strdup(&in->jail.consolesocket, in_src->jail.consolesocket);
+	instance_config_move_strdup(&in->jail.envfile, in_src->jail.envfile);
 
 	free(in->config);
 	in->config = in_src->config;
