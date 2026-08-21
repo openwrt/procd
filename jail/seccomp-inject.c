@@ -60,6 +60,12 @@
 #ifndef NT_PRSTATUS
 #define NT_PRSTATUS 1
 #endif
+#ifndef NT_ARM_SYSTEM_CALL
+#define NT_ARM_SYSTEM_CALL 0x404
+#endif
+#ifndef PTRACE_SET_SYSCALL
+#define PTRACE_SET_SYSCALL 23
+#endif
 
 #if defined(__x86_64__)
 typedef struct user_regs_struct inj_regs;

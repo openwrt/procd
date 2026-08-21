@@ -29,6 +29,7 @@ static const char * const seccomp_loader_files[] = { NULL };
 
 struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 					const char * const *extra_allow);
+struct sock_fprog *seccomp_oci_audit_filter(const struct sock_fprog *prog);
 struct sock_fprog *seccomp_deny_delta(const char * const *names,
 				      const struct sock_fprog *app);
 int applyOCIlinuxseccomp(struct sock_fprog *prog, const char *container_id,
@@ -39,6 +40,10 @@ bool seccomp_profile_covers(const struct sock_fprog *prog, const char * const *n
 #ifndef SECCOMP_SUPPORT
 struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 					const char * const *extra_allow) {
+	return NULL;
+}
+
+struct sock_fprog *seccomp_oci_audit_filter(const struct sock_fprog *prog) {
 	return NULL;
 }
 

@@ -69,6 +69,7 @@
 #include "log.h"
 #include "seccomp-oci.h"
 #include "seccomp-inject.h"
+#include "seccomp-trace.h"
 #include "cgroups.h"
 #include "netifd.h"
 
@@ -98,7 +99,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:ln:NoO:pP:r:R:sS:uU:w:t:T:yY:Z"
+#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:lm:M:n:NoO:pP:r:R:sS:uU:w:t:T:yY:Z"
 
 struct hook_execvpe {
 	char *file;
@@ -132,6 +133,8 @@ static struct {
 	struct sock_fprog *ociseccomp_init;
 	struct sock_fprog *ociseccomp_delta_entry;
 	struct sock_fprog *ociseccomp_delta_main;
+	enum seccomp_mode seccomp_mode;
+	char *seccomp_log;
 	char *capabilities;
 	struct jail_capset capset;
 	char *user;
@@ -1413,6 +1416,8 @@ static int build_jail_fs(void)
 }
 
 static bool exit_from_child;
+static bool jail_ptrace_seccomp(void);
+
 static void free_and_exit(int ret)
 {
 	if (!exit_from_child && opts.ocibundle) {
@@ -2022,6 +2027,8 @@ static void usage(void)
 	fprintf(stderr, "ujail <options> -- <binary> <params ...>\n");
 	fprintf(stderr, "  -d <num>\tshow debug log (increase num to increase verbosity)\n");
 	fprintf(stderr, "  -S <file>\tseccomp filter config\n");
+	fprintf(stderr, "  -m <mode>\tseccomp mode: enforce (default), trace, audit or complain\n");
+	fprintf(stderr, "  -M <file>\tseccomp trace log (NDJSON) output path\n");
 	fprintf(stderr, "  -C <file>\tcapabilities drop config\n");
 	fprintf(stderr, "  -c\t\tset PR_SET_NO_NEW_PRIVS\n");
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
@@ -2972,8 +2979,7 @@ static void post_start_hook(void)
 
 	uloop_end();
 	free_opts(false);
-	if (opts.ociseccomp && !seccomp_oci_needs_inproc() &&
-	    ptrace(PTRACE_TRACEME, 0, 0, 0)) {
+	if (jail_ptrace_seccomp() && ptrace(PTRACE_TRACEME, 0, 0, 0)) {
 		ERROR("PTRACE_TRACEME failed: %m\n");
 		exit(EXIT_FAILURE);
 	}
@@ -5613,6 +5619,19 @@ int main(int argc, char **argv)
 		case 'Z':
 			opts.systemd_cgroup = true;
 			break;
+		case 'm':
+			if (!strcmp(optarg, "trace"))
+				opts.seccomp_mode = SECCOMP_MODE_TRACE;
+			else if (!strcmp(optarg, "audit"))
+				opts.seccomp_mode = SECCOMP_MODE_AUDIT;
+			else if (!strcmp(optarg, "complain"))
+				opts.seccomp_mode = SECCOMP_MODE_COMPLAIN;
+			else
+				opts.seccomp_mode = SECCOMP_MODE_ENFORCE;
+			break;
+		case 'M':
+			opts.seccomp_log = optarg;
+			break;
 		}
 	}
 
@@ -5740,6 +5759,7 @@ int main(int argc, char **argv)
 		goto errout;
 	}
 	if (!(opts.ocibundle||opts.namespace||opts.capabilities||opts.seccomp||
+		(opts.seccomp_mode != SECCOMP_MODE_ENFORCE) ||
 		(opts.setns.net != -1) ||
 		(opts.setns.ns != -1) ||
 		(opts.setns.ipc != -1) ||
@@ -6282,6 +6302,40 @@ static void post_create_runtime(void)
 		pipe_send_start_container(NULL);
 }
 
+static bool jail_ptrace_seccomp(void)
+{
+	if (opts.seccomp_mode == SECCOMP_MODE_TRACE)
+		return true;
+
+	return opts.ociseccomp && !seccomp_oci_needs_inproc();
+}
+
+static void jail_seccomp_run(void)
+{
+	struct seccomp_trace_opts t = {
+		.mode = opts.seccomp_mode,
+		.name = opts.name ? opts.name : "trace",
+		.log_fd = -1,
+		.main_boundary = (opts.seccomp_mode == SECCOMP_MODE_TRACE),
+		.dedup = 0,
+	};
+	int fd = -1;
+
+	if (opts.seccomp_log) {
+		fd = open(opts.seccomp_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd < 0)
+			ERROR("seccomp-trace: cannot open log %s: %m\n", opts.seccomp_log);
+		t.log_fd = fd;
+	}
+
+	seccomp_trace_run(jail_process.pid, &t);
+
+	if (fd >= 0)
+		close(fd);
+
+	free_and_exit(0);
+}
+
 static bool seccomp_target_is_static(pid_t pid)
 {
 	unsigned long pair[2];
@@ -6317,9 +6371,10 @@ static bool seccomp_main_trackable(pid_t pid)
 
 static int jail_seccomp_handshake(void)
 {
-	int status, mrc;
+	struct sock_fprog *aprog;
+	int status, rc, mrc;
 
-	if (!opts.ociseccomp || seccomp_oci_needs_inproc())
+	if (!jail_ptrace_seccomp())
 		return 0;
 
 	while (waitpid(jail_process.pid, &status, 0) < 0) {
@@ -6330,13 +6385,22 @@ static int jail_seccomp_handshake(void)
 	}
 
 	if (!WIFSTOPPED(status)) {
-		ERROR("seccomp-inject: jail exited before entrypoint exec\n");
+		if (WIFEXITED(status))
+			ERROR("seccomp-inject: jail exited (code %d) before entrypoint exec\n", WEXITSTATUS(status));
+		else if (WIFSIGNALED(status))
+			ERROR("seccomp-inject: jail killed by signal %d before entrypoint exec\n", WTERMSIG(status));
+		else
+			ERROR("seccomp-inject: jail exited before entrypoint exec\n");
 		uloop_process_delete(&jail_process);
 		jail_process_handler(&jail_process, status);
 		return -1;
 	}
 
-	if (seccomp_target_is_static(jail_process.pid)) {
+	if (opts.seccomp_mode == SECCOMP_MODE_TRACE)
+		jail_seccomp_run();
+
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE &&
+	    seccomp_target_is_static(jail_process.pid)) {
 		if (opts.ociseccomp_init &&
 		    seccomp_main_trackable(jail_process.pid)) {
 			if (seccomp_inject(jail_process.pid, opts.ociseccomp_init)) {
@@ -6367,7 +6431,7 @@ static int jail_seccomp_handshake(void)
 		return 0;
 	}
 
-	if (!opts.ociseccomp_linker) {
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE && !opts.ociseccomp_linker) {
 		if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
 			ERROR("seccomp-inject: failed to arm filter\n");
 			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
@@ -6380,7 +6444,8 @@ static int jail_seccomp_handshake(void)
 		return 0;
 	}
 
-	if (seccomp_inject(jail_process.pid, opts.ociseccomp_linker)) {
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE && opts.ociseccomp_linker &&
+	    seccomp_inject(jail_process.pid, opts.ociseccomp_linker)) {
 		ERROR("seccomp-inject: failed to arm linker filter\n");
 		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
 		return -1;
@@ -6392,9 +6457,35 @@ static int jail_seccomp_handshake(void)
 		return -1;
 	}
 
-	if (opts.ociseccomp_delta_entry &&
-	    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_entry)) {
-		ERROR("seccomp-inject: failed to arm entry delta\n");
+	if (opts.seccomp_mode == SECCOMP_MODE_AUDIT ||
+	    opts.seccomp_mode == SECCOMP_MODE_COMPLAIN) {
+		aprog = seccomp_oci_audit_filter(opts.ociseccomp);
+		if (!aprog) {
+			ERROR("seccomp-trace: failed to build audit filter\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+		rc = seccomp_inject(jail_process.pid, aprog);
+		free(aprog->filter);
+		free(aprog);
+		if (rc) {
+			ERROR("seccomp-trace: failed to arm audit filter\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+		jail_seccomp_run();
+	}
+
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE) {
+		if (opts.ociseccomp_delta_entry &&
+		    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_entry)) {
+			ERROR("seccomp-inject: failed to arm entry delta\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+	} else if (opts.ociseccomp_init &&
+		   seccomp_inject(jail_process.pid, opts.ociseccomp_init)) {
+		ERROR("seccomp-inject: failed to arm init filter\n");
 		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
 		return -1;
 	}
@@ -6406,9 +6497,15 @@ static int jail_seccomp_handshake(void)
 		return -1;
 	}
 
-	if (opts.ociseccomp_delta_main &&
-	    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_main)) {
-		ERROR("seccomp-inject: failed to arm main delta\n");
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE) {
+		if (opts.ociseccomp_delta_main &&
+		    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_main)) {
+			ERROR("seccomp-inject: failed to arm main delta\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+	} else if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
+		ERROR("seccomp-inject: failed to arm filter\n");
 		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
 		return -1;
 	}

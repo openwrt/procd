@@ -102,10 +102,11 @@ ADD_CUSTOM_TARGET(capabilities-names-h DEPENDS capabilities-names.h)
 IF(SECCOMP_SUPPORT)
 ADD_DEFINITIONS(-DSECCOMP_SUPPORT)
 SET(SOURCES_OCI_SECCOMP jail/seccomp-oci.c jail/seccomp-inject.c)
+SET(SOURCES_JAIL_TRACE jail/seccomp-trace.c)
 ENDIF()
 
 IF(JAIL_SUPPORT)
-ADD_EXECUTABLE(ujail jail/jail.c jail/cgroups.c jail/cgroups-bpf.c jail/elf.c jail/fs.c jail/capabilities.c jail/landlock.c jail/netifd.c ${SOURCES_OCI_SECCOMP})
+ADD_EXECUTABLE(ujail jail/jail.c jail/cgroups.c jail/cgroups-bpf.c jail/elf.c jail/fs.c jail/capabilities.c jail/landlock.c jail/netifd.c ${SOURCES_OCI_SECCOMP} ${SOURCES_JAIL_TRACE})
 TARGET_LINK_LIBRARIES(ujail ${ubox} ${ubus} ${uci} ${blobmsg_json})
 INSTALL(TARGETS ujail
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
@@ -113,6 +114,7 @@ INSTALL(TARGETS ujail
 ADD_DEPENDENCIES(ujail capabilities-names-h)
 IF(SECCOMP_SUPPORT)
   ADD_DEPENDENCIES(ujail syscall-names-h)
+  TARGET_LINK_LIBRARIES(ujail ${udebug})
 ENDIF()
 
 ADD_EXECUTABLE(uxc uxc.c)

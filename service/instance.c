@@ -61,6 +61,8 @@ enum {
 	INSTANCE_ATTR_JAIL,
 	INSTANCE_ATTR_TRACE,
 	INSTANCE_ATTR_SECCOMP,
+	INSTANCE_ATTR_SECCOMP_MODE,
+	INSTANCE_ATTR_SECCOMP_LOG,
 	INSTANCE_ATTR_CAPABILITIES,
 	INSTANCE_ATTR_PIDFILE,
 	INSTANCE_ATTR_RELOADSIG,
@@ -94,6 +96,8 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_JAIL] = { "jail", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_TRACE] = { "trace", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_SECCOMP] = { "seccomp", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_SECCOMP_MODE] = { "seccomp_mode", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_SECCOMP_LOG] = { "seccomp_log", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_CAPABILITIES] = { "capabilities", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
@@ -324,6 +328,16 @@ jail_run(struct service_instance *in, char **argv)
 	if (in->seccomp) {
 		argv[argc++] = "-S";
 		argv[argc++] = in->seccomp;
+	}
+
+	if (in->seccomp_mode) {
+		argv[argc++] = "-m";
+		argv[argc++] = in->seccomp_mode;
+	}
+
+	if (in->seccomp_log) {
+		argv[argc++] = "-M";
+		argv[argc++] = in->seccomp_log;
 	}
 
 	if (in->user) {
@@ -1059,6 +1073,12 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->seccomp, in_new->seccomp))
 		return true;
 
+	if (string_changed(in->seccomp_mode, in_new->seccomp_mode))
+		return true;
+
+	if (string_changed(in->seccomp_log, in_new->seccomp_log))
+		return true;
+
 	if (string_changed(in->capabilities, in_new->capabilities))
 		return true;
 
@@ -1312,6 +1332,12 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	if (in->seccomp)
 		jail->argc += 2;
 
+	if (in->seccomp_mode)
+		jail->argc += 2;
+
+	if (in->seccomp_log)
+		jail->argc += 2;
+
 	if (in->capabilities)
 		jail->argc += 2;
 
@@ -1443,6 +1469,12 @@ instance_config_parse(struct service_instance *in)
 
 	if (!in->trace && tb[INSTANCE_ATTR_SECCOMP])
 		in->seccomp = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]));
+
+	if (tb[INSTANCE_ATTR_SECCOMP_MODE])
+		in->seccomp_mode = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP_MODE]));
+
+	if (tb[INSTANCE_ATTR_SECCOMP_LOG])
+		in->seccomp_log = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP_LOG]));
 
 	if (tb[INSTANCE_ATTR_CAPABILITIES])
 		in->capabilities = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_CAPABILITIES]));
@@ -1618,6 +1650,8 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 
 	instance_config_move_strdup(&in->pidfile, in_src->pidfile);
 	instance_config_move_strdup(&in->seccomp, in_src->seccomp);
+	instance_config_move_strdup(&in->seccomp_mode, in_src->seccomp_mode);
+	instance_config_move_strdup(&in->seccomp_log, in_src->seccomp_log);
 	instance_config_move_strdup(&in->capabilities, in_src->capabilities);
 	instance_config_move_strdup(&in->bundle, in_src->bundle);
 	instance_config_move_strdup(&in->extroot, in_src->extroot);
@@ -1683,6 +1717,8 @@ instance_free(struct service_instance *in)
 	free(in->jail.idmap_offset);
 	free(in->jail.consolesocket);
 	free(in->seccomp);
+	free(in->seccomp_mode);
+	free(in->seccomp_log);
 	free(in->capabilities);
 	free(in->pidfile);
 	free(in);

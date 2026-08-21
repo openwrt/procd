@@ -76,6 +76,22 @@
 #define SECCOMP_RET_USER_NOTIF	0x7fc00000U
 #endif
 
+#ifndef SECCOMP_RET_ACTION_FULL
+#define SECCOMP_RET_ACTION_FULL	0xffff0000U
+#endif
+
+#ifndef SECCOMP_RET_DATA
+#define SECCOMP_RET_DATA	0x0000ffffU
+#endif
+
+#ifndef SECCOMP_RET_KILL_PROCESS
+#define SECCOMP_RET_KILL_PROCESS	0x80000000U
+#endif
+
+#ifndef SECCOMP_RET_KILL_THREAD
+#define SECCOMP_RET_KILL_THREAD	0x00000000U
+#endif
+
 static unsigned long seccomp_filter_flags;
 static char *seccomp_listener_path;
 static char *seccomp_listener_metadata;
@@ -772,6 +788,58 @@ errout1:
 errout2:
 	free(prog);
 	return NULL;
+}
+
+struct sock_fprog *seccomp_oci_audit_filter(const struct sock_fprog *prog)
+{
+	struct sock_fprog *out;
+	struct sock_filter *filter;
+	unsigned short i;
+	uint32_t action, data;
+
+	if (!prog || !prog->len)
+		return NULL;
+
+	out = malloc(sizeof(*out));
+	if (!out) {
+		ERROR("seccomp: failed to allocate audit sock_fprog\n");
+		return NULL;
+	}
+
+	filter = calloc(prog->len, sizeof(*filter));
+	if (!filter) {
+		ERROR("seccomp: failed to allocate audit filter\n");
+		free(out);
+		return NULL;
+	}
+
+	memcpy(filter, prog->filter, prog->len * sizeof(*filter));
+
+	for (i = 3; i < prog->len; i++) {
+		if (BPF_CLASS(filter[i].code) != BPF_RET)
+			continue;
+		if (BPF_RVAL(filter[i].code) != BPF_K)
+			continue;
+
+		action = filter[i].k & SECCOMP_RET_ACTION_FULL;
+		data = filter[i].k & SECCOMP_RET_DATA;
+
+		switch (action) {
+		case SECCOMP_RET_ERRNO:
+			filter[i].k = SECCOMP_RET_TRACE | data;
+			break;
+		case SECCOMP_RET_KILL_PROCESS:
+		case SECCOMP_RET_KILL_THREAD:
+			filter[i].k = SECCOMP_RET_TRACE | SECCOMP_RET_DATA;
+			break;
+		default:
+			break;
+		}
+	}
+
+	out->len = prog->len;
+	out->filter = filter;
+	return out;
 }
 
 

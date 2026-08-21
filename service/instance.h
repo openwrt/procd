@@ -92,6 +92,8 @@ struct service_instance {
 	bool no_new_privs;
 	struct jail jail;
 	char *seccomp;
+	char *seccomp_mode;
+	char *seccomp_log;
 	char *capabilities;
 	char *pidfile;
 	char *extroot;
