@@ -19,7 +19,6 @@
 #include <fcntl.h>
 
 #include <unistd.h>
-#include <sched.h>
 
 #include <libubox/blobmsg_json.h>
 #include <libubox/avl-cmp.h>
@@ -416,9 +415,7 @@ container_handle_features(struct ubus_context *ctx, struct ubus_object *obj,
 	put_namespace(&b, "mnt");
 	put_namespace(&b, "net");
 	put_namespace(&b, "pid");
-#ifdef CLONE_NEWTIME
 	put_namespace(&b, "time");
-#endif
 	put_namespace(&b, "user");
 	put_namespace(&b, "uts");
 	blobmsg_close_array(&b, nsarray);
