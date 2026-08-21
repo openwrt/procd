@@ -79,6 +79,8 @@ enum {
 	OPT_NO_PIVOT,
 	OPT_NO_NEW_KEYRING,
 	OPT_PRESERVE_FDS,
+	OPT_PROCESS,
+	OPT_RESOURCES,
 };
 
 static const struct option create_opts[] = {
@@ -114,6 +116,21 @@ static const struct option delete_opts[] = {
 static const struct option list_opts[] = {
 	{"json",		no_argument,		0,	'j'	},
 	{0,			0,			0,	0	}
+};
+
+static const struct option exec_opts[] = {
+	{"console-socket",	required_argument,	0,	OPT_CONSOLE_SOCKET	},
+	{"detach",		no_argument,		0,	'd'			},
+	{"pid-file",		required_argument,	0,	'p'			},
+	{"preserve-fds",	required_argument,	0,	OPT_PRESERVE_FDS	},
+	{"process",		required_argument,	0,	OPT_PROCESS		},
+	{"tty",			no_argument,		0,	't'			},
+	{0,			0,			0,	0			}
+};
+
+static const struct option update_opts[] = {
+	{"resources",		required_argument,	0,	OPT_RESOURCES		},
+	{0,			0,			0,	0			}
 };
 
 struct signame {
@@ -272,6 +289,9 @@ static int usage(void) {
 	printf("\tdelete <conf> [--force]\t\t\tdelete <conf>\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
 	printf("\tresume <conf>\t\t\t\tthaw a previously paused container <conf>\n");
+	printf("\texec <conf> [--process <file>] [-d] [-p <pid-file>] [-- cmd args]\n");
+	printf("\t\t\t\t\t\trun a command inside running container <conf>\n");
+	printf("\tupdate <conf> --resources <file>\tapply linux.resources from <file> to running container <conf>\n");
 	return -EINVAL;
 }
 
@@ -1081,6 +1101,131 @@ static int uxc_start(const char *name, bool console)
 	return ubus_invoke(ctx, id, "start", NULL, NULL, NULL, 3000);
 }
 
+struct uxc_exec_reply {
+	int status;
+};
+
+static void uxc_exec_reply_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	enum { REPLY_STATUS, REPLY_PID, __REPLY_MAX };
+	static const struct blobmsg_policy reply_policy[__REPLY_MAX] = {
+		[REPLY_STATUS] = { "status", BLOBMSG_TYPE_INT32 },
+		[REPLY_PID]    = { "pid",    BLOBMSG_TYPE_INT32 },
+	};
+	struct blob_attr *tb[__REPLY_MAX];
+	struct uxc_exec_reply *r = req->priv;
+
+	blobmsg_parse(reply_policy, __REPLY_MAX, tb, blob_data(msg), blob_len(msg));
+	if (tb[REPLY_STATUS])
+		r->status = blobmsg_get_u32(tb[REPLY_STATUS]);
+}
+
+static int uxc_exec(const char *name, const char *process_file,
+		    const char *pid_file, bool detach, bool tty,
+		    const char *console_socket,
+		    char **cmd_argv, int cmd_argc)
+{
+	static struct blob_buf req;
+	struct uxc_exec_reply reply = { .status = 0 };
+	char *objname;
+	uint32_t id;
+	int ret;
+
+	if (tty && !console_socket) {
+		fprintf(stderr, "uxc: --tty requires --console-socket\n");
+		return -EINVAL;
+	}
+
+	blob_buf_init(&req, 0);
+
+	if (process_file) {
+		if (!blobmsg_add_json_from_file(&req, process_file)) {
+			fprintf(stderr, "uxc: cannot parse %s as JSON\n", process_file);
+			blob_buf_free(&req);
+			return -EINVAL;
+		}
+	} else {
+		void *arr;
+		int i;
+
+		if (cmd_argc < 1) {
+			fprintf(stderr, "uxc: exec requires --process or a command\n");
+			blob_buf_free(&req);
+			return -EINVAL;
+		}
+		arr = blobmsg_open_array(&req, "args");
+		for (i = 0; i < cmd_argc; i++)
+			blobmsg_add_string(&req, NULL, cmd_argv[i]);
+		blobmsg_close_array(&req, arr);
+	}
+
+	if (pid_file)
+		blobmsg_add_string(&req, "pidfile", pid_file);
+	if (detach)
+		blobmsg_add_u8(&req, "detach", 1);
+	if (tty)
+		blobmsg_add_u8(&req, "terminal", 1);
+	if (console_socket)
+		blobmsg_add_string(&req, "consolesocket", console_socket);
+
+	if (asprintf(&objname, "container.%s", name) == -1) {
+		blob_buf_free(&req);
+		return -ENOMEM;
+	}
+
+	ret = ubus_lookup_id(ctx, objname, &id);
+	free(objname);
+	if (ret) {
+		blob_buf_free(&req);
+		return -ENOENT;
+	}
+
+	ret = ubus_invoke(ctx, id, "exec", req.head,
+			  uxc_exec_reply_cb, &reply, 0);
+	blob_buf_free(&req);
+
+	if (ret)
+		return -EIO;
+
+	return reply.status;
+}
+
+static int uxc_update(const char *name, const char *resources_file)
+{
+	static struct blob_buf req;
+	char *objname;
+	uint32_t id;
+	int ret;
+
+	if (!resources_file) {
+		fprintf(stderr, "uxc: update requires --resources <file>\n");
+		return -EINVAL;
+	}
+
+	blob_buf_init(&req, 0);
+	if (!blobmsg_add_json_from_file(&req, resources_file)) {
+		fprintf(stderr, "uxc: cannot parse %s as JSON\n", resources_file);
+		blob_buf_free(&req);
+		return -EINVAL;
+	}
+
+	if (asprintf(&objname, "container.%s", name) == -1) {
+		blob_buf_free(&req);
+		return -ENOMEM;
+	}
+
+	ret = ubus_lookup_id(ctx, objname, &id);
+	free(objname);
+	if (ret) {
+		blob_buf_free(&req);
+		return -ENOENT;
+	}
+
+	ret = ubus_invoke(ctx, id, "update", req.head, NULL, NULL, 3000);
+	blob_buf_free(&req);
+	return ret ? -EIO : 0;
+}
+
 static int uxc_kill(char *name, int signal, bool all)
 {
 	static struct blob_buf req;
@@ -1843,6 +1988,52 @@ next_global:
 			reload_conf();
 
 		ret = uxc_create(name, false, console_socket, systemd_cgroup);
+	} else if (!strcmp(verb, "exec")) {
+		const char *process_file = NULL;
+		const char *pid_file = NULL;
+		const char *console_socket = NULL;
+		bool detach = false;
+		bool tty = false;
+
+		while ((c = getopt_long(verb_argc, verb_argv, "+dp:t",
+					exec_opts, NULL)) != -1) {
+			switch (c) {
+			case 'd': detach = true; break;
+			case 'p': pid_file = optarg; break;
+			case 't': tty = true; break;
+			case OPT_PROCESS: process_file = optarg; break;
+			case OPT_CONSOLE_SOCKET: console_socket = optarg; break;
+			case OPT_PRESERVE_FDS:
+				fprintf(stderr, "uxc: --preserve-fds=%s accepted but ignored\n", optarg);
+				break;
+			default: goto usage_out;
+			}
+		}
+		if (optind >= verb_argc)
+			goto usage_out;
+		{
+			const char *id = verb_argv[optind];
+			int cmd_start = optind + 1;
+			if (cmd_start < verb_argc && !strcmp(verb_argv[cmd_start], "--"))
+				cmd_start++;
+			ret = uxc_exec(id, process_file, pid_file, detach, tty,
+				       console_socket,
+				       verb_argv + cmd_start,
+				       verb_argc - cmd_start);
+		}
+	} else if (!strcmp(verb, "update")) {
+		const char *resources_file = NULL;
+
+		while ((c = getopt_long(verb_argc, verb_argv, "+",
+					update_opts, NULL)) != -1) {
+			switch (c) {
+			case OPT_RESOURCES: resources_file = optarg; break;
+			default: goto usage_out;
+			}
+		}
+		if (optind != verb_argc - 1)
+			goto usage_out;
+		ret = uxc_update(verb_argv[optind], resources_file);
 	} else if (!strcmp(verb, "pause") || !strcmp(verb, "resume")) {
 		char *objname;
 		uint32_t id;
