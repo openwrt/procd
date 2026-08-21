@@ -317,6 +317,8 @@ enum {
 	CONF_DATA_VOLUMES,
 	CONF_OVERLAY_SIZE,
 	CONF_INITENV,
+	CONF_HOSTS_FILE,
+	CONF_PROVISION,
 	__CONF_MAX,
 };
 
@@ -333,6 +335,21 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_DATA_VOLUMES] = { .name = "data-volumes", .type = BLOBMSG_TYPE_ARRAY },
 	[CONF_OVERLAY_SIZE] = { .name = "overlay-size", .type = BLOBMSG_TYPE_STRING },
 	[CONF_INITENV] = { .name = "initenv", .type = BLOBMSG_TYPE_TABLE },
+	[CONF_HOSTS_FILE] = { .name = "hosts-file", .type = BLOBMSG_TYPE_STRING },
+	[CONF_PROVISION] = { .name = "provision", .type = BLOBMSG_TYPE_ARRAY },
+};
+
+enum {
+	PROV_SOURCE,
+	PROV_DESTINATION,
+	PROV_SECRET,
+	__PROV_MAX,
+};
+
+static const struct blobmsg_policy prov_policy[__PROV_MAX] = {
+	[PROV_SOURCE] = { .name = "source", .type = BLOBMSG_TYPE_STRING },
+	[PROV_DESTINATION] = { .name = "destination", .type = BLOBMSG_TYPE_STRING },
+	[PROV_SECRET] = { .name = "secret", .type = BLOBMSG_TYPE_BOOL },
 };
 
 static int conf_load(bool load_settings)
@@ -1181,6 +1198,9 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	char *seccomp_log = NULL;
 	char overlaypath[PATH_MAX];
 	char envpath[PATH_MAX];
+	char hostsbind[PATH_MAX];
+	char provbind[2 * PATH_MAX];
+	struct blob_attr *ptb[__PROV_MAX];
 
 	void *in, *ins, *j, *m;
 	bool found = false;
@@ -1273,6 +1293,24 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 			blobmsg_close_table(&req, m);
 			blob_buf_free(&req);
 			return ret;
+		}
+	}
+	if (tb[CONF_HOSTS_FILE]) {
+		snprintf(hostsbind, sizeof(hostsbind), "%s:/etc/hosts",
+			 blobmsg_get_string(tb[CONF_HOSTS_FILE]));
+		blobmsg_add_string(&req, hostsbind, "4");
+	}
+	if (tb[CONF_PROVISION]) {
+		blobmsg_for_each_attr(cur, tb[CONF_PROVISION], rem) {
+			blobmsg_parse(prov_policy, __PROV_MAX, ptb,
+				      blobmsg_data(cur), blobmsg_len(cur));
+			if (!ptb[PROV_SOURCE] || !ptb[PROV_DESTINATION])
+				continue;
+			snprintf(provbind, sizeof(provbind), "%s:%s",
+				 blobmsg_get_string(ptb[PROV_SOURCE]),
+				 blobmsg_get_string(ptb[PROV_DESTINATION]));
+			blobmsg_add_string(&req, provbind,
+					   (ptb[PROV_SECRET] && blobmsg_get_bool(ptb[PROV_SECRET])) ? "3" : "4");
 		}
 	}
 	blobmsg_close_table(&req, m);
