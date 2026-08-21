@@ -13,6 +13,8 @@
 #ifndef _JAIL_JAIL_H_
 #define _JAIL_JAIL_H_
 
+#include "../container.h"
+
 int mount_bind(const char *root, const char *path, int readonly, int error);
 int ns_open_pid(const char *nstype, const pid_t target_ns);
 

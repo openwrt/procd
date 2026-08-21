@@ -60,9 +60,8 @@ static uint64_t parseOCIcap(struct blob_attr *msg)
 	uint64_t caps = 0;
 	int capnum;
 
-	/* each capset is optional, set all-1 mask if absent */
 	if (!msg)
-		return JAIL_CAP_ALL;
+		return 0;
 
 	blobmsg_for_each_attr(cur, msg, rem) {
 		capnum = find_capabilities(blobmsg_get_string(cur));

@@ -15,7 +15,9 @@
 
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <fcntl.h>
 #include <glob.h>
 #include <elf.h>
@@ -643,6 +645,114 @@ int elf_load_deps(const char *path, const char *map, unsigned long map_size)
 
 	ERROR("unknown elf format %d\n", clazz);
 	return -1;
+}
+
+static char *elf_map_file(const char *path, size_t *size)
+{
+	struct stat s;
+	void *map;
+	int fd;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return NULL;
+
+	if (fstat(fd, &s) || s.st_size < (off_t)sizeof(Elf64_Ehdr)) {
+		close(fd);
+		return NULL;
+	}
+
+	map = mmap(NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	if (map == MAP_FAILED)
+		return NULL;
+
+	*size = s.st_size;
+	return map;
+}
+
+#define ELF_DYNSYM_VALUE(BITS) \
+static unsigned long elf##BITS##_dynsym_value(const char *map, unsigned long map_size, const char *want) \
+{ \
+	Elf##BITS##_Dyn *dyn; \
+	Elf##BITS##_Sym *symtab = NULL; \
+	const char *strtab = NULL; \
+	unsigned long dyn_off, dyn_size, load_off, load_vaddr, delta; \
+	unsigned long syment = sizeof(Elf##BITS##_Sym), nsyms = 0, i; \
+	\
+	if (elf##BITS##_find_section(map, map_size, PT_LOAD, &load_off, NULL, &load_vaddr)) \
+		return 0; \
+	if (elf##BITS##_find_section(map, map_size, PT_DYNAMIC, &dyn_off, &dyn_size, NULL)) \
+		return 0; \
+	delta = load_vaddr - load_off; \
+	\
+	for (dyn = (Elf##BITS##_Dyn *)(map + dyn_off); \
+	     (char *)dyn < map + dyn_off + dyn_size; dyn++) { \
+		if (dyn->d_tag == DT_SYMTAB) \
+			symtab = (Elf##BITS##_Sym *)(map + (dyn->d_un.d_ptr - delta)); \
+		else if (dyn->d_tag == DT_STRTAB) \
+			strtab = map + (dyn->d_un.d_ptr - delta); \
+		else if (dyn->d_tag == DT_SYMENT) \
+			syment = dyn->d_un.d_val; \
+		else if (dyn->d_tag == DT_HASH) \
+			nsyms = ((const uint32_t *)(map + (dyn->d_un.d_ptr - delta)))[1]; \
+	} \
+	\
+	if (!symtab || !strtab) \
+		return 0; \
+	if (!nsyms) \
+		nsyms = ((const char *)strtab - (const char *)symtab) / syment; \
+	\
+	for (i = 0; i < nsyms; i++) { \
+		Elf##BITS##_Sym *sym = (Elf##BITS##_Sym *)((const char *)symtab + i * syment); \
+		if (sym->st_value && !strcmp(strtab + sym->st_name, want)) \
+			return sym->st_value; \
+	} \
+	\
+	return 0; \
+}
+ELF_DYNSYM_VALUE(32)
+ELF_DYNSYM_VALUE(64)
+
+unsigned long elf_dynsym_value(const char *path, const char *sym)
+{
+	unsigned long val = 0;
+	size_t size = 0;
+	char *map;
+	int clazz;
+
+	map = elf_map_file(path, &size);
+	if (!map)
+		return 0;
+
+	clazz = map[EI_CLASS];
+	if (clazz == ELFCLASS32)
+		val = elf32_dynsym_value(map, size, sym);
+	else if (clazz == ELFCLASS64)
+		val = elf64_dynsym_value(map, size, sym);
+
+	munmap(map, size);
+	return val;
+}
+
+int elf_interp(const char *path, char *out, size_t outlen)
+{
+	unsigned long off, size_pt;
+	size_t size = 0;
+	char *map;
+	int ret = -1;
+
+	map = elf_map_file(path, &size);
+	if (!map)
+		return -1;
+
+	if (!elf_find_section(map, size, PT_INTERP, &off, &size_pt, NULL) && off < size) {
+		snprintf(out, outlen, "%s", map + off);
+		ret = 0;
+	}
+
+	munmap(map, size);
+	return ret;
 }
 
 static void load_ldso_conf(const char *conf)

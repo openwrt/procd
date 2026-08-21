@@ -22,23 +22,92 @@
  */
 #define _GNU_SOURCE 1
 #include <assert.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <errno.h>
 
 #include <libubox/utils.h>
 #include <libubox/blobmsg.h>
 #include <libubox/blobmsg_json.h>
 
+#include <sys/syscall.h>
+
 #include "log.h"
+#include "jail.h"
 #include "seccomp-bpf.h"
 #include "seccomp-oci.h"
 #include "../syscall-names.h"
 #include "seccomp-syscalls-helpers.h"
 
+#ifndef MAX_ERRNO
+#define MAX_ERRNO	4095
+#endif
+
+#ifndef SECCOMP_SET_MODE_FILTER
+#define SECCOMP_SET_MODE_FILTER 1
+#endif
+
+#ifndef SECCOMP_FILTER_FLAG_TSYNC
+#define SECCOMP_FILTER_FLAG_TSYNC		(1UL << 0)
+#endif
+
+#ifndef SECCOMP_FILTER_FLAG_LOG
+#define SECCOMP_FILTER_FLAG_LOG			(1UL << 1)
+#endif
+
+#ifndef SECCOMP_FILTER_FLAG_SPEC_ALLOW
+#define SECCOMP_FILTER_FLAG_SPEC_ALLOW		(1UL << 2)
+#endif
+
+#ifndef SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
+#define SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV	(1UL << 5)
+#endif
+
+#ifndef SECCOMP_FILTER_FLAG_NEW_LISTENER
+#define SECCOMP_FILTER_FLAG_NEW_LISTENER	(1UL << 3)
+#endif
+
+#ifndef SECCOMP_RET_USER_NOTIF
+#define SECCOMP_RET_USER_NOTIF	0x7fc00000U
+#endif
+
+#ifndef SECCOMP_RET_ACTION_FULL
+#define SECCOMP_RET_ACTION_FULL	0xffff0000U
+#endif
+
+#ifndef SECCOMP_RET_DATA
+#define SECCOMP_RET_DATA	0x0000ffffU
+#endif
+
+#ifndef SECCOMP_RET_KILL_PROCESS
+#define SECCOMP_RET_KILL_PROCESS	0x80000000U
+#endif
+
+#ifndef SECCOMP_RET_KILL_THREAD
+#define SECCOMP_RET_KILL_THREAD	0x00000000U
+#endif
+
+static unsigned long seccomp_filter_flags;
+static char *seccomp_listener_path;
+static char *seccomp_listener_metadata;
+static bool seccomp_uses_notify;
+static uint32_t seccomp_default_action;
+
+bool seccomp_oci_needs_inproc(void)
+{
+	return seccomp_uses_notify || seccomp_filter_flags != 0;
+}
+
 static uint32_t resolve_action(char *actname)
 {
 	if (!strcmp(actname, "SCMP_ACT_KILL"))
+		return SECCOMP_RET_KILL;
+	else if (!strcmp(actname, "SCMP_ACT_KILL_THREAD"))
 		return SECCOMP_RET_KILL;
 	else if (!strcmp(actname, "SCMP_ACT_KILL_PROCESS"))
 		return SECCOMP_RET_KILLPROCESS;
@@ -54,6 +123,8 @@ static uint32_t resolve_action(char *actname)
 		return SECCOMP_RET_ALLOW;
 	else if (!strcmp(actname, "SCMP_ACT_LOG"))
 		return SECCOMP_RET_LOGALLOW;
+	else if (!strcmp(actname, "SCMP_ACT_NOTIFY"))
+		return SECCOMP_RET_USER_NOTIF;
 	else {
 		ERROR("unknown seccomp action %s\n", actname);
 		return SECCOMP_RET_KILL;
@@ -121,6 +192,8 @@ static uint32_t resolve_architecture(char *archname)
 		return AUDIT_ARCH_AARCH64;
 	else if (!strcmp(archname, "SCMP_ARCH_LOONGARCH64"))
 		return AUDIT_ARCH_LOONGARCH64;
+	else if (!strcmp(archname, "SCMP_ARCH_RISCV64"))
+		return AUDIT_ARCH_RISCV64;
 	else if (!strcmp(archname, "SCMP_ARCH_MIPS"))
 		return AUDIT_ARCH_MIPS;
 	else if (!strcmp(archname, "SCMP_ARCH_MIPS64"))
@@ -153,18 +226,44 @@ static uint32_t resolve_architecture(char *archname)
 	}
 }
 
+const char * const seccomp_linker_base[] = {
+	"access", "arch_prctl", "brk", "close", "faccessat", "fcntl", "fstat",
+	"fstatfs", "futex", "getrandom", "mmap", "mprotect", "munmap",
+	"newfstatat", "open", "openat", "pread64", "prctl", "prlimit64", "read",
+	"readlinkat", "rseq", "rt_sigaction", "sched_getscheduler",
+	"set_robust_list", "set_tid_address", "sigaltstack", "statfs", NULL,
+};
+
+const char * const seccomp_init_base[] = {
+	"arch_prctl", "brk", "futex", "getrandom", "mmap", "mprotect", "munmap",
+	"prctl", "prlimit64", "rseq", "rt_sigaction", "sched_getscheduler",
+	"set_robust_list", "set_tid_address", "sigaltstack", NULL,
+};
+
+const char * const seccomp_loader_files[] = {
+	"access", "close", "faccessat", "fcntl", "fstat", "fstatfs",
+	"newfstatat", "open", "openat", "pread64", "read", "readlinkat",
+	"statfs", NULL,
+};
+
 enum {
 	OCI_LINUX_SECCOMP_DEFAULTACTION,
+	OCI_LINUX_SECCOMP_DEFAULTERRNORET,
 	OCI_LINUX_SECCOMP_ARCHITECTURES,
 	OCI_LINUX_SECCOMP_FLAGS,
+	OCI_LINUX_SECCOMP_LISTENERPATH,
+	OCI_LINUX_SECCOMP_LISTENERMETADATA,
 	OCI_LINUX_SECCOMP_SYSCALLS,
 	__OCI_LINUX_SECCOMP_MAX,
 };
 
 static const struct blobmsg_policy oci_linux_seccomp_policy[] = {
 	[OCI_LINUX_SECCOMP_DEFAULTACTION] = { "defaultAction", BLOBMSG_TYPE_STRING },
+	[OCI_LINUX_SECCOMP_DEFAULTERRNORET] = { "defaultErrnoRet", BLOBMSG_TYPE_INT32 },
 	[OCI_LINUX_SECCOMP_ARCHITECTURES] = { "architectures", BLOBMSG_TYPE_ARRAY },
 	[OCI_LINUX_SECCOMP_FLAGS] = { "flags", BLOBMSG_TYPE_ARRAY },
+	[OCI_LINUX_SECCOMP_LISTENERPATH] = { "listenerPath", BLOBMSG_TYPE_STRING },
+	[OCI_LINUX_SECCOMP_LISTENERMETADATA] = { "listenerMetadata", BLOBMSG_TYPE_STRING },
 	[OCI_LINUX_SECCOMP_SYSCALLS] = { "syscalls", BLOBMSG_TYPE_ARRAY },
 };
 
@@ -198,7 +297,141 @@ static const struct blobmsg_policy oci_linux_seccomp_syscalls_args_policy[] = {
 	[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP] = { "op", BLOBMSG_TYPE_STRING },
 };
 
-struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
+#define SECCOMP_CHUNK_NAMES	240
+
+#ifndef SECCOMP_RET_ACTION_FULL
+#define SECCOMP_RET_ACTION_FULL 0xffff0000U
+#endif
+
+static bool seccomp_nr_allows(const struct sock_fprog *prog, int nr,
+			      unsigned int pc, bool known, uint32_t acc,
+			      int *budget)
+{
+	const struct sock_filter *f;
+	uint32_t k;
+
+	if (--(*budget) < 0)
+		return false;
+
+	while (pc < prog->len) {
+		f = &prog->filter[pc];
+		k = f->k;
+
+		switch (f->code) {
+		case BPF_LD + BPF_W + BPF_ABS:
+			if (k == (uint32_t)arch_nr) {
+				known = true;
+				acc = ARCH_NR;
+			} else if (k == (uint32_t)syscall_nr) {
+				known = true;
+				acc = (uint32_t)nr;
+			} else {
+				known = false;
+			}
+			pc++;
+			break;
+		case BPF_ALU + BPF_AND + BPF_K:
+			if (known)
+				acc &= k;
+			pc++;
+			break;
+		case BPF_JMP + BPF_JEQ + BPF_K:
+			if (!known)
+				return seccomp_nr_allows(prog, nr, pc + 1 + f->jt, false, 0, budget) &&
+				       seccomp_nr_allows(prog, nr, pc + 1 + f->jf, false, 0, budget);
+			pc += 1 + ((acc == k) ? f->jt : f->jf);
+			break;
+		case BPF_JMP + BPF_JGE + BPF_K:
+			if (!known)
+				return seccomp_nr_allows(prog, nr, pc + 1 + f->jt, false, 0, budget) &&
+				       seccomp_nr_allows(prog, nr, pc + 1 + f->jf, false, 0, budget);
+			pc += 1 + ((acc >= k) ? f->jt : f->jf);
+			break;
+		case BPF_JMP + BPF_JGT + BPF_K:
+			if (!known)
+				return seccomp_nr_allows(prog, nr, pc + 1 + f->jt, false, 0, budget) &&
+				       seccomp_nr_allows(prog, nr, pc + 1 + f->jf, false, 0, budget);
+			pc += 1 + ((acc > k) ? f->jt : f->jf);
+			break;
+		case BPF_RET + BPF_K:
+			return (k & SECCOMP_RET_ACTION_FULL) == SECCOMP_RET_ALLOW;
+		default:
+			return false;
+		}
+	}
+
+	return false;
+}
+
+bool seccomp_profile_covers(const struct sock_fprog *prog, const char * const *names)
+{
+	int i, sc, budget;
+
+	if (!prog)
+		return false;
+
+	for (i = 0; names && names[i]; i++) {
+		sc = find_syscall(names[i]);
+		if (sc == -1)
+			continue;
+		budget = 4096;
+		if (!seccomp_nr_allows(prog, sc, 0, false, 0, &budget))
+			return false;
+	}
+
+	return true;
+}
+
+struct sock_fprog *seccomp_deny_delta(const char * const *names,
+				      const struct sock_fprog *app)
+{
+	struct sock_filter *filter;
+	struct sock_fprog *prog;
+	int deny[64], ndeny = 0;
+	int i, sc, budget, idx = 0, sz;
+
+	for (i = 0; names && names[i]; i++) {
+		if (ndeny >= (int)(sizeof(deny) / sizeof(deny[0])))
+			break;
+		sc = find_syscall(names[i]);
+		if (sc == -1)
+			continue;
+		if (app) {
+			budget = 4096;
+			if (seccomp_nr_allows(app, sc, 0, false, 0, &budget))
+				continue;
+		}
+		deny[ndeny++] = sc;
+	}
+
+	if (!ndeny)
+		return NULL;
+
+	sz = ndeny + 5;
+	filter = calloc(sz, sizeof(*filter));
+	if (!filter)
+		return NULL;
+
+	filter[idx++] = (struct sock_filter)BPF_STMT(BPF_LD + BPF_W + BPF_ABS, arch_nr);
+	filter[idx++] = (struct sock_filter)BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, ARCH_NR, 0, ndeny + 1);
+	filter[idx++] = (struct sock_filter)BPF_STMT(BPF_LD + BPF_W + BPF_ABS, syscall_nr);
+	for (i = 0; i < ndeny; i++)
+		filter[idx++] = (struct sock_filter)BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, deny[i], ndeny - i, 0);
+	filter[idx++] = (struct sock_filter)BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
+	filter[idx++] = (struct sock_filter)BPF_STMT(BPF_RET + BPF_K, seccomp_default_action);
+
+	prog = calloc(1, sizeof(*prog));
+	if (!prog) {
+		free(filter);
+		return NULL;
+	}
+	prog->len = sz;
+	prog->filter = filter;
+	return prog;
+}
+
+struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
+					const char * const *extra_allow)
 {
 	struct blob_attr *tb[__OCI_LINUX_SECCOMP_MAX];
 	struct blob_attr *tbn[__OCI_LINUX_SECCOMP_SYSCALLS_MAX];
@@ -212,6 +445,7 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	uint32_t seccomp_arch;
 	bool arch_matched;
 	char *op_str;
+	int m = 0, i, emitted = 0;
 
 	blobmsg_parse(oci_linux_seccomp_policy, __OCI_LINUX_SECCOMP_MAX,
 		      tb, blobmsg_data(msg), blobmsg_len(msg));
@@ -222,6 +456,55 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	}
 
 	default_policy = resolve_action(blobmsg_get_string(tb[OCI_LINUX_SECCOMP_DEFAULTACTION]));
+
+	free(seccomp_listener_path);
+	free(seccomp_listener_metadata);
+	seccomp_listener_path = NULL;
+	seccomp_listener_metadata = NULL;
+	seccomp_uses_notify = (default_policy == SECCOMP_RET_USER_NOTIF);
+
+	if (tb[OCI_LINUX_SECCOMP_LISTENERPATH])
+		seccomp_listener_path = strdup(blobmsg_get_string(tb[OCI_LINUX_SECCOMP_LISTENERPATH]));
+
+	if (tb[OCI_LINUX_SECCOMP_LISTENERMETADATA])
+		seccomp_listener_metadata = strdup(blobmsg_get_string(tb[OCI_LINUX_SECCOMP_LISTENERMETADATA]));
+
+	seccomp_filter_flags = 0;
+	if (tb[OCI_LINUX_SECCOMP_FLAGS]) {
+		blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_FLAGS], rem) {
+			const char *flag = blobmsg_get_string(cur);
+			if (!strcmp(flag, "SECCOMP_FILTER_FLAG_LOG"))
+				seccomp_filter_flags |= SECCOMP_FILTER_FLAG_LOG;
+			else if (!strcmp(flag, "SECCOMP_FILTER_FLAG_SPEC_ALLOW"))
+				seccomp_filter_flags |= SECCOMP_FILTER_FLAG_SPEC_ALLOW;
+			else if (!strcmp(flag, "SECCOMP_FILTER_FLAG_TSYNC"))
+				seccomp_filter_flags |= SECCOMP_FILTER_FLAG_TSYNC;
+			else if (!strcmp(flag, "SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV"))
+				seccomp_filter_flags |= SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV;
+			else {
+				ERROR("seccomp: unknown filter flag %s\n", flag);
+				return NULL;
+			}
+		}
+	}
+
+	if (default_policy == SECCOMP_RET_ERRNO) {
+		uint32_t errnoret = EPERM;
+		if (tb[OCI_LINUX_SECCOMP_DEFAULTERRNORET]) {
+			errnoret = blobmsg_get_u32(tb[OCI_LINUX_SECCOMP_DEFAULTERRNORET]);
+			if (errnoret < 1 || errnoret > MAX_ERRNO) {
+				ERROR("seccomp: defaultErrnoRet %u out of range (1..%u)\n",
+				      errnoret, MAX_ERRNO);
+				return NULL;
+			}
+		}
+		default_policy = SECCOMP_RET_ERROR(errnoret);
+	} else if (tb[OCI_LINUX_SECCOMP_DEFAULTERRNORET]) {
+		ERROR("seccomp: defaultErrnoRet only valid with SCMP_ACT_ERRNO defaultAction\n");
+		return NULL;
+	}
+
+	seccomp_default_action = default_policy;
 
 	/* verify architecture while ignoring the x86_64 anomaly for now */
 	if (tb[OCI_LINUX_SECCOMP_ARCHITECTURES]) {
@@ -240,7 +523,9 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 	}
 
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_SYSCALLS], rem) {
-		sz += 2; /* load and return */
+		int valid_names = 0;
+		int arg_instrs = 0;
+		int chunks;
 
 		blobmsg_parse(oci_linux_seccomp_syscalls_policy,
 			      __OCI_LINUX_SECCOMP_SYSCALLS_MAX,
@@ -252,40 +537,65 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 				/* TODO: support run.oci.seccomp_fail_unknown_syscall=1 annotation */
 				continue;
 			}
-			++sz;
+			++valid_names;
 		}
 
 		if (tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS]) {
 			blobmsg_for_each_attr(curarg, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remargs) {
-				sz += 2; /* load and compare */
+				arg_instrs += 2; /* load and compare */
 
 				blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
 					      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
 					      tba, blobmsg_data(curarg), blobmsg_len(curarg));
 				if (!tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX] ||
 				    !tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE] ||
-				    !tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP])
+				    !tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]) {
+					ERROR("seccomp: syscall arg missing%s%s%s\n",
+					      tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX] ? "" : " index",
+					      tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE] ? "" : " value",
+					      tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP] ? "" : " op");
 					return NULL;
+				}
 
-				if (blobmsg_get_u32(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX]) > 5)
+				if (blobmsg_get_u32(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX]) > 5) {
+					ERROR("seccomp: syscall arg index %u out of range (max 5)\n",
+					      blobmsg_get_u32(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX]));
 					return NULL;
+				}
 
 				op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
 				if (!resolve_op_ins(op_str))
 					return NULL;
 
 				if (resolve_op_is_masked(op_str))
-					++sz; /* SCMP_CMP_MASKED_EQ needs an extra BPF_AND op */
+					++arg_instrs; /* SCMP_CMP_MASKED_EQ needs an extra BPF_AND op */
 			}
 		}
+
+		chunks = valid_names ? (valid_names + SECCOMP_CHUNK_NAMES - 1) / SECCOMP_CHUNK_NAMES : 1;
+		sz += chunks * (1 + 1 + arg_instrs) + valid_names;
 	}
 
-	if (sz < 6)
+	for (i = 0; extra_allow && extra_allow[i]; i++)
+		if (find_syscall(extra_allow[i]) != -1)
+			++m;
+
+	if (extra_allow && find_syscall("seccomp") != -1)
+		++m;
+
+	if (m > 0)
+		sz += m + 2;
+
+	if (sz < 6) {
+		ERROR("seccomp: filter is empty\n");
 		return NULL;
+	}
 
 	prog = malloc(sizeof(struct sock_fprog));
-	if (!prog)
+	if (!prog) {
+		ERROR("seccomp: failed to allocate sock_fprog\n");
 		return NULL;
+	}
 
 	filter = calloc(sz, sizeof(struct sock_filter));
 	if (!filter) {
@@ -306,102 +616,154 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg)
 		uint64_t op_val, op_val2;
 		int start_rule_idx;
 		int next_rule_idx;
+		int valid_names = 0;
+		int names_emitted = 0;
+		int chunk_size;
 
 		blobmsg_parse(oci_linux_seccomp_syscalls_policy,
 			      __OCI_LINUX_SECCOMP_SYSCALLS_MAX,
 			      tbn, blobmsg_data(cur), blobmsg_len(cur));
 		action = resolve_action(blobmsg_get_string(
 				tbn[OCI_LINUX_SECCOMP_SYSCALLS_ACTION]));
+		if (action == SECCOMP_RET_USER_NOTIF)
+			seccomp_uses_notify = true;
 		if (tbn[OCI_LINUX_SECCOMP_SYSCALLS_ERRNORET]) {
-			if (action != SECCOMP_RET_ERRNO)
-				goto errout1;
+			uint32_t errnoret;
 
-			action = SECCOMP_RET_ERROR(blobmsg_get_u32(
-					tbn[OCI_LINUX_SECCOMP_SYSCALLS_ERRNORET]));
+			if (action != SECCOMP_RET_ERRNO) {
+				ERROR("seccomp: errnoRet set but action is not SCMP_ACT_ERRNO\n");
+				goto errout1;
+			}
+
+			errnoret = blobmsg_get_u32(tbn[OCI_LINUX_SECCOMP_SYSCALLS_ERRNORET]);
+			if (errnoret < 1 || errnoret > MAX_ERRNO) {
+				ERROR("seccomp: errnoRet %u out of range (1..%u)\n",
+				      errnoret, MAX_ERRNO);
+				goto errout1;
+			}
+			action = SECCOMP_RET_ERROR(errnoret);
 		} else if (action == SECCOMP_RET_ERRNO)
 			action = SECCOMP_RET_ERROR(EPERM);
 
-		/* load syscall */
-		set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_nr);
-
-		/* get number of syscall names */
-		next_rule_idx = idx;
 		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_NAMES], remn) {
-			if (find_syscall(blobmsg_get_string(curn)) == -1)
-				continue;
+			if (find_syscall(blobmsg_get_string(curn)) != -1)
+				++valid_names;
+		}
+
+		if (!valid_names && !tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS])
+			continue;
+
+		while (names_emitted < valid_names || names_emitted == 0) {
+			int names_in_chunk;
+			int names_seen;
+
+			chunk_size = valid_names - names_emitted;
+			if (chunk_size > SECCOMP_CHUNK_NAMES)
+				chunk_size = SECCOMP_CHUNK_NAMES;
+			names_in_chunk = chunk_size;
+
+			set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_nr);
+
+			next_rule_idx = idx + names_in_chunk;
+			start_rule_idx = next_rule_idx;
+
+			blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remn) {
+				blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
+					      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
+					      tba, blobmsg_data(curn), blobmsg_len(curn));
+				next_rule_idx += 2;
+				op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
+				if (resolve_op_is_masked(op_str))
+					++next_rule_idx;
+			}
 
 			++next_rule_idx;
+
+			names_seen = 0;
+			blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_NAMES], remn) {
+				sc = find_syscall(blobmsg_get_string(curn));
+				if (sc == -1)
+					continue;
+				if (names_seen < names_emitted) {
+					++names_seen;
+					continue;
+				}
+				if (names_seen >= names_emitted + names_in_chunk)
+					break;
+				set_filter(&filter[idx], BPF_JMP + BPF_JEQ + BPF_K,
+					   start_rule_idx - (idx + 1),
+					   ((idx + 1) == start_rule_idx)?(next_rule_idx - (idx + 1)):0,
+					   sc);
+				++idx;
+				++names_seen;
+			}
+
+			assert(idx == start_rule_idx);
+
+			blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remn) {
+				blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
+					      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
+					      tba, blobmsg_data(curn), blobmsg_len(curn));
+
+				op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
+				op_ins = resolve_op_ins(op_str);
+				op_inv = resolve_op_inv(op_str);
+				op_masked = resolve_op_is_masked(op_str);
+				op_idx = blobmsg_get_u32(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX]);
+				op_val = blobmsg_cast_u64(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE]);
+				if (tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO])
+					op_val2 = blobmsg_cast_u64(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO]);
+				else
+					op_val2 = 0;
+
+				/* load argument */
+				set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_arg(op_idx));
+
+				/* apply mask */
+				if (op_masked)
+					set_filter(&filter[idx++], BPF_ALU + BPF_K + BPF_AND, 0, 0, op_val);
+
+				set_filter(&filter[idx], BPF_JMP + op_ins + BPF_K,
+					   op_inv?(next_rule_idx - (idx + 1)):0,
+					   op_inv?0:(next_rule_idx - (idx + 1)),
+					   op_masked?op_val2:op_val);
+				++idx;
+			}
+
+			set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, action);
+
+			assert(idx == next_rule_idx);
+
+			names_emitted += chunk_size;
+			if (!valid_names)
+				break;
 		}
-		start_rule_idx = next_rule_idx;
+	}
 
-		/* calculate length of argument filter rules */
-		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remn) {
-			blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
-				      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
-				      tba, blobmsg_data(curn), blobmsg_len(curn));
-			next_rule_idx += 2;
-			op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
-			if (resolve_op_is_masked(op_str))
-				++next_rule_idx;
-		}
+	if (m > 0) {
+		set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_nr);
 
-		++next_rule_idx; /* account for return action */
-
-		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_NAMES], remn) {
-			sc = find_syscall(blobmsg_get_string(curn));
+		for (i = 0; extra_allow[i]; i++) {
+			sc = find_syscall(extra_allow[i]);
 			if (sc == -1)
 				continue;
-			/*
-			 * check syscall, skip other syscall checks if match is found.
-			 * if no match is found, jump to next section
-			 */
-			set_filter(&filter[idx], BPF_JMP + BPF_JEQ + BPF_K,
-				   start_rule_idx - (idx + 1),
-				   ((idx + 1) == start_rule_idx)?(next_rule_idx - (idx + 1)):0,
-				   sc);
-			++idx;
+			set_filter(&filter[idx++], BPF_JMP + BPF_JEQ + BPF_K,
+				   m - emitted, 0, sc);
+			++emitted;
 		}
 
-		assert(idx = start_rule_idx);
-
-		/* generate argument filter rules */
-		blobmsg_for_each_attr(curn, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remn) {
-			blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
-				      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
-				      tba, blobmsg_data(curn), blobmsg_len(curn));
-
-			op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
-			op_ins = resolve_op_ins(op_str);
-			op_inv = resolve_op_inv(op_str);
-			op_masked = resolve_op_is_masked(op_str);
-			op_idx = blobmsg_get_u32(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX]);
-			op_val = blobmsg_cast_u64(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE]);
-			if (tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO])
-				op_val2 = blobmsg_cast_u64(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO]);
-			else
-				op_val2 = 0;
-
-			/* load argument */
-			set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_arg(op_idx));
-
-			/* apply mask */
-			if (op_masked)
-				set_filter(&filter[idx++], BPF_ALU + BPF_K + BPF_AND, 0, 0, op_val);
-
-			set_filter(&filter[idx], BPF_JMP + op_ins + BPF_K,
-				   op_inv?(next_rule_idx - (idx + 1)):0,
-				   op_inv?0:(next_rule_idx - (idx + 1)),
-				   op_masked?op_val2:op_val);
-			++idx;
+		sc = find_syscall("seccomp");
+		if (sc != -1) {
+			set_filter(&filter[idx++], BPF_JMP + BPF_JEQ + BPF_K,
+				   m - emitted, 0, sc);
+			++emitted;
 		}
-
-		/* if we have reached until here, all conditions were met and we can return */
-		set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, action);
-
-		assert(idx == next_rule_idx);
 	}
 
 	set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, default_policy);
+
+	if (m > 0)
+		set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, SECCOMP_RET_ALLOW);
 
 	assert(idx == sz);
 
@@ -428,15 +790,193 @@ errout2:
 	return NULL;
 }
 
-
-int applyOCIlinuxseccomp(struct sock_fprog *prog)
+struct sock_fprog *seccomp_oci_audit_filter(const struct sock_fprog *prog)
 {
+	struct sock_fprog *out;
+	struct sock_filter *filter;
+	unsigned short i;
+	uint32_t action, data;
+
+	if (!prog || !prog->len)
+		return NULL;
+
+	out = malloc(sizeof(*out));
+	if (!out) {
+		ERROR("seccomp: failed to allocate audit sock_fprog\n");
+		return NULL;
+	}
+
+	filter = calloc(prog->len, sizeof(*filter));
+	if (!filter) {
+		ERROR("seccomp: failed to allocate audit filter\n");
+		free(out);
+		return NULL;
+	}
+
+	memcpy(filter, prog->filter, prog->len * sizeof(*filter));
+
+	for (i = 3; i < prog->len; i++) {
+		if (BPF_CLASS(filter[i].code) != BPF_RET)
+			continue;
+		if (BPF_RVAL(filter[i].code) != BPF_K)
+			continue;
+
+		action = filter[i].k & SECCOMP_RET_ACTION_FULL;
+		data = filter[i].k & SECCOMP_RET_DATA;
+
+		switch (action) {
+		case SECCOMP_RET_ERRNO:
+			filter[i].k = SECCOMP_RET_TRACE | data;
+			break;
+		case SECCOMP_RET_KILL_PROCESS:
+		case SECCOMP_RET_KILL_THREAD:
+			filter[i].k = SECCOMP_RET_TRACE | SECCOMP_RET_DATA;
+			break;
+		default:
+			break;
+		}
+	}
+
+	out->len = prog->len;
+	out->filter = filter;
+	return out;
+}
+
+
+static int send_seccomp_listener_fd(int listener_fd, const char *container_id,
+				    const char *bundle_path)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	struct blob_buf bb = { 0 };
+	void *fds_arr, *state;
+	struct msghdr msg = { 0 };
+	struct iovec iov;
+	struct cmsghdr *cmsg;
+	char cmsgbuf[CMSG_SPACE(sizeof(int))];
+	char *json;
+	int sock;
+	int ret = 0;
+	int saved_err;
+
+	if (strlen(seccomp_listener_path) >= sizeof(addr.sun_path)) {
+		ERROR("seccomp: listenerPath too long: %s\n", seccomp_listener_path);
+		return ENAMETOOLONG;
+	}
+
+	blob_buf_init(&bb, 0);
+	blobmsg_add_string(&bb, "ociVersion", OCI_VERSION_STRING);
+	fds_arr = blobmsg_open_array(&bb, "fds");
+	blobmsg_add_string(&bb, NULL, "seccompFd");
+	blobmsg_close_array(&bb, fds_arr);
+	blobmsg_add_u32(&bb, "pid", getpid());
+	if (seccomp_listener_metadata)
+		blobmsg_add_string(&bb, "metadata", seccomp_listener_metadata);
+	state = blobmsg_open_table(&bb, "state");
+	blobmsg_add_string(&bb, "ociVersion", OCI_VERSION_STRING);
+	if (container_id)
+		blobmsg_add_string(&bb, "id", container_id);
+	blobmsg_add_string(&bb, "status", "creating");
+	blobmsg_add_u32(&bb, "pid", getpid());
+	if (bundle_path)
+		blobmsg_add_string(&bb, "bundle", bundle_path);
+	blobmsg_close_table(&bb, state);
+
+	json = blobmsg_format_json(bb.head, true);
+	if (!json) {
+		blob_buf_free(&bb);
+		return ENOMEM;
+	}
+
+	sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sock < 0) {
+		ret = errno;
+		ERROR("socket(AF_UNIX): %m\n");
+		goto out;
+	}
+
+	memcpy(addr.sun_path, seccomp_listener_path, strlen(seccomp_listener_path) + 1);
+	if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		ret = errno;
+		ERROR("connect(%s): %m\n", seccomp_listener_path);
+		saved_err = ret;
+		close(sock);
+		ret = saved_err;
+		goto out;
+	}
+
+	iov.iov_base = json;
+	iov.iov_len = strlen(json);
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = cmsgbuf;
+	msg.msg_controllen = sizeof(cmsgbuf);
+	cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+	memcpy(CMSG_DATA(cmsg), &listener_fd, sizeof(int));
+
+	if (sendmsg(sock, &msg, 0) < 0) {
+		ret = errno;
+		ERROR("sendmsg(%s): %m\n", seccomp_listener_path);
+	}
+
+	saved_err = ret;
+	close(sock);
+	ret = saved_err;
+out:
+	free(json);
+	blob_buf_free(&bb);
+	return ret;
+}
+
+int applyOCIlinuxseccomp(struct sock_fprog *prog, const char *container_id,
+			 const char *bundle_path)
+{
+	int listener_fd = -1;
+
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
 		ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
 		goto errout;
 	}
 
-	if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, prog)) {
+	if (seccomp_uses_notify) {
+		if (!seccomp_listener_path) {
+			ERROR("seccomp: SCMP_ACT_NOTIFY used without listenerPath\n");
+			errno = EINVAL;
+			goto errout;
+		}
+
+		listener_fd = syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
+				      seccomp_filter_flags | SECCOMP_FILTER_FLAG_NEW_LISTENER,
+				      prog);
+		if (listener_fd < 0) {
+			ERROR("seccomp(SET_MODE_FILTER|NEW_LISTENER): %m\n");
+			goto errout;
+		}
+
+		if (send_seccomp_listener_fd(listener_fd, container_id, bundle_path)) {
+			int saved_err = errno;
+			close(listener_fd);
+			errno = saved_err;
+			goto errout;
+		}
+
+		close(listener_fd);
+	} else if (seccomp_filter_flags) {
+		long r = syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
+				 seccomp_filter_flags, prog);
+		if (r < 0) {
+			ERROR("seccomp(SET_MODE_FILTER, %#lx): %m\n", seccomp_filter_flags);
+			goto errout;
+		}
+		if (r > 0) {
+			ERROR("seccomp(SET_MODE_FILTER, %#lx) TSYNC failed at tid %ld\n",
+			      seccomp_filter_flags, r);
+			errno = EAGAIN;
+			goto errout;
+		}
+	} else if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, prog)) {
 		ERROR("prctl(PR_SET_SECCOMP) failed: %m\n");
 		goto errout;
 	}

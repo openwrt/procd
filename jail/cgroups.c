@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -101,13 +102,106 @@ void cgroups_free(void)
 	}
 }
 
-void cgroups_apply(pid_t pid)
+static int cgroups_write_attr(const char *attr, const char *val, size_t vlen)
+{
+	char *ent;
+	int fd, ret = 0;
+	size_t len;
+
+	if (!cgroup_path)
+		return -ENODEV;
+
+	len = strlen(cgroup_path) + 1 + strlen(attr) + 1;
+	ent = malloc(len);
+	if (!ent)
+		return -ENOMEM;
+
+	snprintf(ent, len, "%s/%s", cgroup_path, attr);
+	fd = open(ent, O_WRONLY);
+	if (fd < 0) {
+		ret = -errno;
+		free(ent);
+		return ret;
+	}
+
+	if (write(fd, val, vlen) < 0)
+		ret = -errno;
+
+	close(fd);
+	free(ent);
+	return ret;
+}
+
+int cgroups_kill_all(void)
+{
+	return cgroups_write_attr("cgroup.kill", "1", 1);
+}
+
+int cgroups_set_frozen(bool frozen)
+{
+	return cgroups_write_attr("cgroup.freeze", frozen ? "1" : "0", 1);
+}
+
+int cgroups_reclaim(int64_t bytes, int32_t swappiness)
+{
+	char val[64];
+	int len, ret;
+	int attempt;
+
+	if (bytes < 0)
+		return -EINVAL;
+
+	if (swappiness >= 0)
+		len = snprintf(val, sizeof(val), "%" PRId64 " swappiness=%" PRId32,
+			       bytes, swappiness);
+	else
+		len = snprintf(val, sizeof(val), "%" PRId64, bytes);
+	if (len < 0 || len >= (int)sizeof(val))
+		return -EINVAL;
+
+	for (attempt = 0; attempt < 2; ++attempt) {
+		ret = cgroups_write_attr("memory.reclaim", val, len);
+		if (ret != -EINTR)
+			break;
+	}
+	if (ret == -ENOENT)
+		ret = -ENODEV;
+	return ret;
+}
+
+int cgroups_attach_pid(pid_t pid)
+{
+	char *ent;
+	int fd, ret = 0;
+	size_t len;
+
+	if (!cgroup_path)
+		return -ENODEV;
+
+	len = strlen(cgroup_path) + strlen("/cgroup.procs") + 1;
+	ent = malloc(len);
+	if (!ent)
+		return -ENOMEM;
+
+	snprintf(ent, len, "%s/cgroup.procs", cgroup_path);
+	fd = open(ent, O_WRONLY);
+	if (fd < 0) {
+		ret = -errno;
+		free(ent);
+		return ret;
+	}
+
+	if (dprintf(fd, "%d", pid) < 0)
+		ret = -errno;
+
+	close(fd);
+	free(ent);
+	return ret;
+}
+
+static void cgroups_compute_subtree_control(char *out, size_t outlen)
 {
 	struct cgval *valp;
-	char *cdir, *ent;
-	int fd;
-	size_t maxlen = strlen("cgroup.subtree_control");
-
 	bool cpuset = false,
 	     cpu = false,
 	     hugetlb = false,
@@ -115,17 +209,12 @@ void cgroups_apply(pid_t pid)
 	     memory = false,
 	     pids = false,
 	     rdma = false;
+	char *p;
 
-	char subtree_control[64] = { 0 };
+	out[0] = '\0';
 
-	DEBUG("using cgroup path %s\n", cgroup_path);
-	mkdir_p(cgroup_path, 0700);
-
-	/* find which controllers need to be enabled */
 	avl_for_each_element(&cgvals, valp, avl) {
-		ent = (char *)valp->avl.key;
-		if (strlen(ent) > maxlen)
-			maxlen = strlen(ent);
+		const char *ent = (const char *)valp->avl.key;
 
 		if (!strncmp("cpuset.", ent, 7))
 			cpuset = true;
@@ -143,36 +232,71 @@ void cgroups_apply(pid_t pid)
 			rdma = true;
 	}
 
-	maxlen += strlen(cgroup_path) + 2;
-
 	if (cpuset)
-		strcat(subtree_control, "+cpuset ");
+		strncat(out, "+cpuset ", outlen - strlen(out) - 1);
 
 	if (cpu)
-		strcat(subtree_control, "+cpu ");
+		strncat(out, "+cpu ", outlen - strlen(out) - 1);
 
 	if (hugetlb)
-		strcat(subtree_control, "+hugetlb ");
+		strncat(out, "+hugetlb ", outlen - strlen(out) - 1);
 
 	if (io)
-		strcat(subtree_control, "+io ");
+		strncat(out, "+io ", outlen - strlen(out) - 1);
 
 	if (memory)
-		strcat(subtree_control, "+memory ");
+		strncat(out, "+memory ", outlen - strlen(out) - 1);
 
 	if (pids)
-		strcat(subtree_control, "+pids ");
+		strncat(out, "+pids ", outlen - strlen(out) - 1);
 
 	if (rdma)
-		strcat(subtree_control, "+rdma ");
+		strncat(out, "+rdma ", outlen - strlen(out) - 1);
 
-	/* remove trailing space (length is > 0) */
-	ent = strchr(subtree_control, '\0');
-	if (ent > subtree_control) {
-		ent -= 1;
-		*ent = '\0';
+	p = strchr(out, '\0');
+	if (p > out && p[-1] == ' ')
+		p[-1] = '\0';
+}
+
+void cgroups_destroy(void)
+{
+	char *sep;
+
+	if (!cgroup_path)
+		return;
+
+	cgroups_kill_all();
+
+	(void)rmdir(cgroup_path);
+
+	sep = strrchr(cgroup_path, '/');
+	if (sep && sep != cgroup_path) {
+		*sep = '\0';
+		(void)rmdir(cgroup_path);
+		*sep = '/';
+	}
+}
+
+void cgroups_create(void)
+{
+	char subtree_control[64] = { 0 };
+	char *cdir, *ent;
+	size_t maxlen;
+	int fd;
+
+	if (!cgroup_path)
+		return;
+
+	DEBUG("creating cgroup %s\n", cgroup_path);
+	mkdir_p(cgroup_path, 0700);
+
+	cgroups_compute_subtree_control(subtree_control, sizeof(subtree_control));
+	if (!subtree_control[0]) {
+		DEBUG("no cgroup controllers requested, skipping subtree_control walk\n");
+		return;
 	}
 
+	maxlen = strlen(cgroup_path) + strlen("/cgroup.subtree_control") + 1;
 	ent = malloc(maxlen);
 	if (!ent)
 		exit(ENOMEM);
@@ -185,18 +309,38 @@ void cgroups_apply(pid_t pid)
 		DEBUG(" * %s\n", ent);
 		if ((fd = open(ent, O_WRONLY)) < 0) {
 			ERROR("can't open %s: %m\n", ent);
+			*cdir = '/';
 			continue;
 		}
-
-		if (write(fd, subtree_control, strlen(subtree_control)) == -1) {
+		if (write(fd, subtree_control, strlen(subtree_control)) == -1)
 			ERROR("can't write to %s: %m\n", ent);
-			close(fd);
-			continue;
-		}
-
 		close(fd);
 		*cdir = '/';
 	}
+	free(ent);
+}
+
+void cgroups_configure(void)
+{
+	struct cgval *valp;
+	char *ent;
+	size_t maxlen = 0;
+	int fd, dirfd;
+
+	if (!cgroup_path)
+		return;
+
+	avl_for_each_element(&cgvals, valp, avl) {
+		size_t klen = strlen((char *)valp->avl.key);
+
+		if (klen > maxlen)
+			maxlen = klen;
+	}
+	maxlen += strlen(cgroup_path) + 2;
+
+	ent = malloc(maxlen);
+	if (!ent)
+		exit(ENOMEM);
 
 	avl_for_each_element(&cgvals, valp, avl) {
 		DEBUG("applying cgroup2 %s=\"%s\"\n", (char *)valp->avl.key, valp->val);
@@ -206,30 +350,26 @@ void cgroups_apply(pid_t pid)
 			ERROR("can't open %s: %m\n", ent);
 			continue;
 		}
-		if (dprintf(fd, "%s", valp->val) < 0) {
+		if (dprintf(fd, "%s", valp->val) < 0)
 			ERROR("can't write to %s: %m\n", ent);
-		};
 		close(fd);
 	}
+	free(ent);
 
-	int dirfd = open(cgroup_path, O_DIRECTORY);
+	dirfd = open(cgroup_path, O_DIRECTORY);
 	if (dirfd < 0) {
 		ERROR("can't open %s: %m\n", cgroup_path);
 	} else {
 		attach_cgroups_ebpf(dirfd);
 		close(dirfd);
 	}
+}
 
-	snprintf(ent, maxlen, "%s/%s", cgroup_path, "cgroup.procs");
-	fd = open(ent, O_WRONLY);
-	if (fd < 0) {
-		ERROR("can't open %s: %m\n", cgroup_path);
-	} else {
-		dprintf(fd, "%d", pid);
-		close(fd);
-	}
-
-	free(ent);
+void cgroups_apply(pid_t pid)
+{
+	cgroups_create();
+	cgroups_configure();
+	cgroups_attach_pid(pid);
 }
 
 enum {
@@ -584,6 +724,8 @@ enum {
 	OCI_LINUX_CGROUPS_CPU_SHARES,
 	OCI_LINUX_CGROUPS_CPU_PERIOD,
 	OCI_LINUX_CGROUPS_CPU_QUOTA,
+	OCI_LINUX_CGROUPS_CPU_BURST,
+	OCI_LINUX_CGROUPS_CPU_IDLE,
 	OCI_LINUX_CGROUPS_CPU_REALTIMERUNTIME,
 	OCI_LINUX_CGROUPS_CPU_REALTIMEPERIOD,
 	OCI_LINUX_CGROUPS_CPU_CPUS,
@@ -595,6 +737,8 @@ static const struct blobmsg_policy oci_linux_cgroups_cpu_policy[] = {
 	[OCI_LINUX_CGROUPS_CPU_SHARES] = { "shares", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_PERIOD] = { "period", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_QUOTA] = { "quota", BLOBMSG_CAST_INT64 }, /* signed int64! */
+	[OCI_LINUX_CGROUPS_CPU_BURST] = { "burst", BLOBMSG_CAST_INT64 },
+	[OCI_LINUX_CGROUPS_CPU_IDLE] = { "idle", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_REALTIMEPERIOD] = { "realtimePeriod", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_REALTIMERUNTIME] = { "realtimeRuntime", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_CPU_CPUS] = { "cpus", BLOBMSG_TYPE_STRING },
@@ -644,6 +788,18 @@ static int parseOCIlinuxcgroups_legacy_cpu(struct blob_attr *msg)
 	if (tmp[0])
 		cgroups_set("cpu.max", tmp);
 
+	if (tb[OCI_LINUX_CGROUPS_CPU_BURST]) {
+		snprintf(tmp, sizeof(tmp), "%" PRIu64,
+			 blobmsg_cast_u64(tb[OCI_LINUX_CGROUPS_CPU_BURST]));
+		cgroups_set("cpu.max.burst", tmp);
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_CPU_IDLE]) {
+		snprintf(tmp, sizeof(tmp), "%" PRId64,
+			 blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_CPU_IDLE]));
+		cgroups_set("cpu.idle", tmp);
+	}
+
 	if (tb[OCI_LINUX_CGROUPS_CPU_CPUS])
 		cgroups_set("cpuset.cpus", blobmsg_get_string(tb[OCI_LINUX_CGROUPS_CPU_CPUS]));
 
@@ -663,6 +819,7 @@ enum {
 	OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS,
 	OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER,
 	OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY,
+	OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE,
 	__OCI_LINUX_CGROUPS_MEMORY_MAX,
 };
 
@@ -675,9 +832,71 @@ static const struct blobmsg_policy oci_linux_cgroups_memory_policy[] = {
 	[OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS] = { "swappiness", BLOBMSG_CAST_INT64 },
 	[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER] = { "disableOOMKiller", BLOBMSG_TYPE_BOOL },
 	[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY] = { "useHierarchy", BLOBMSG_TYPE_BOOL },
+	[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE] = { "checkBeforeUpdate", BLOBMSG_TYPE_BOOL },
 };
 
-static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
+static int64_t read_int64_file(const char *path)
+{
+	char buf[32];
+	char *end;
+	int64_t v;
+	int fd;
+	ssize_t n;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	do {
+		n = read(fd, buf, sizeof(buf) - 1);
+	} while (n < 0 && errno == EINTR);
+	close(fd);
+	if (n <= 0)
+		return -1;
+	buf[n] = '\0';
+	v = strtoll(buf, &end, 10);
+	if (end == buf || (*end != '\0' && *end != '\n'))
+		return -1;
+	return v;
+}
+
+int64_t cgroups_read_int64(const char *attr)
+{
+	char path[PATH_MAX];
+
+	if (!cgroup_path)
+		return -1;
+
+	snprintf(path, sizeof(path), "%s/%s", cgroup_path, attr);
+	return read_int64_file(path);
+}
+
+int cgroups_open_attr(const char *attr)
+{
+	char path[PATH_MAX];
+
+	if (!cgroup_path)
+		return -1;
+
+	snprintf(path, sizeof(path), "%s/%s", cgroup_path, attr);
+	return open(path, O_RDONLY | O_CLOEXEC);
+}
+
+int cgroups_open_dir(void)
+{
+	if (!cgroup_path)
+		return -1;
+	return open(cgroup_path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+}
+
+void cgroups_set_memory_limit(int64_t bytes)
+{
+	char tmp[32];
+
+	snprintf(tmp, sizeof(tmp), "%" PRId64, bytes);
+	cgroups_set("memory.max", tmp);
+}
+
+static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg, bool is_update)
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MEMORY_MAX];
 	char tmp[32] = { 0 };
@@ -699,6 +918,35 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 	    tb[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY])
 		return ENOTSUP;
 
+	if (is_update && tb[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE] &&
+	    blobmsg_get_bool(tb[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE])) {
+		char path[PATH_MAX];
+		int64_t current;
+
+		snprintf(path, sizeof(path), "%s/memory.current", cgroup_path);
+		current = read_int64_file(path);
+		if (current < 0) {
+			ERROR("memory.checkBeforeUpdate: cannot read %s: %m\n", path);
+			return EIO;
+		}
+
+		if (tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]) {
+			int64_t new_limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]);
+			if (new_limit != -1 && new_limit < current) {
+				ERROR("memory.checkBeforeUpdate: new limit %" PRId64
+				      " < current usage %" PRId64 "\n", new_limit, current);
+				return EBUSY;
+			}
+		}
+		if (tb[OCI_LINUX_CGROUPS_MEMORY_RESERVATION]) {
+			int64_t new_res = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_RESERVATION]);
+			if (new_res != -1 && new_res < current) {
+				ERROR("memory.checkBeforeUpdate: new reservation %" PRId64
+				      " < current usage %" PRId64 "\n", new_res, current);
+				return EBUSY;
+			}
+		}
+	}
 
 	if (tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]) {
 		limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]);
@@ -732,7 +980,7 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 		else
 			snprintf(tmp, sizeof(tmp), "%" PRId64, limit - swap);
 
-		cgroups_set("memory.swap_max", tmp);
+		cgroups_set("memory.swap.max", tmp);
 	}
 
 	return 0;
@@ -752,13 +1000,18 @@ static int parseOCIlinuxcgroups_legacy_pids(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MEMORY_MAX];
 	char tmp[32] = { 0 };
+	int64_t limit;
 
 	blobmsg_parse(oci_linux_cgroups_pids_policy, __OCI_LINUX_CGROUPS_PIDS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
 	if (!tb[OCI_LINUX_CGROUPS_PIDS_LIMIT])
-		return EINVAL;
+		return 0;
 
-	snprintf(tmp, sizeof(tmp), "%" PRIu64, blobmsg_cast_u64(tb[OCI_LINUX_CGROUPS_PIDS_LIMIT]));
+	limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_PIDS_LIMIT]);
+	if (limit < 0)
+		strcpy(tmp, "max");
+	else
+		snprintf(tmp, sizeof(tmp), "%" PRId64, limit);
 
 	cgroups_set("pids.max", tmp);
 
@@ -815,7 +1068,7 @@ static const struct blobmsg_policy oci_linux_cgroups_policy[] = {
 	[OCI_LINUX_CGROUPS_UNIFIED] = { "unified", BLOBMSG_TYPE_TABLE },
 };
 
-int parseOCIlinuxcgroups(struct blob_attr *msg)
+int parseOCIlinuxcgroups(struct blob_attr *msg, bool is_update)
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MAX];
 	int ret;
@@ -847,7 +1100,7 @@ int parseOCIlinuxcgroups(struct blob_attr *msg)
 	}
 
 	if (tb[OCI_LINUX_CGROUPS_MEMORY]) {
-		ret = parseOCIlinuxcgroups_legacy_memory(tb[OCI_LINUX_CGROUPS_MEMORY]);
+		ret = parseOCIlinuxcgroups_legacy_memory(tb[OCI_LINUX_CGROUPS_MEMORY], is_update);
 		if (ret)
 			return ret;
 	}

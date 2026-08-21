@@ -65,37 +65,51 @@ struct seccomp_data {
 #define syscall_arg(x) (offsetof(struct seccomp_data, args[x]))
 
 #if defined(__aarch64__)
-# define REG_SYSCALL	regs.regs[8]
 # define ARCH_NR	AUDIT_ARCH_AARCH64
 #elif defined(__amd64__)
-# define REG_SYSCALL	REG_RAX
 # define ARCH_NR	AUDIT_ARCH_X86_64
 #elif defined(__arm__) && (defined(__ARM_EABI__) || defined(__thumb__))
-# define REG_SYSCALL	regs.uregs[7]
 # if __BYTE_ORDER == __LITTLE_ENDIAN
 #  define ARCH_NR	AUDIT_ARCH_ARM
 # else
 #  define ARCH_NR	AUDIT_ARCH_ARMEB
 # endif
 #elif defined(__i386__)
-# define REG_SYSCALL	REG_EAX
 # define ARCH_NR	AUDIT_ARCH_I386
 #elif defined(__loongarch_lp64)
-# define REG_SYSCALL	regs[11]
 # define ARCH_NR	AUDIT_ARCH_LOONGARCH64
 #elif defined(__mips__)
-# define REG_SYSCALL	regs[2]
-# if __BYTE_ORDER == __LITTLE_ENDIAN
-#  define ARCH_NR	AUDIT_ARCH_MIPSEL
+# if _MIPS_SIM == _ABI64
+#  if __BYTE_ORDER == __LITTLE_ENDIAN
+#   define ARCH_NR	AUDIT_ARCH_MIPSEL64
+#  else
+#   define ARCH_NR	AUDIT_ARCH_MIPS64
+#  endif
+# elif _MIPS_SIM == _ABIN32
+#  if __BYTE_ORDER == __LITTLE_ENDIAN
+#   define ARCH_NR	AUDIT_ARCH_MIPSEL64N32
+#  else
+#   define ARCH_NR	AUDIT_ARCH_MIPS64N32
+#  endif
 # else
-#  define ARCH_NR	AUDIT_ARCH_MIPS
+#  if __BYTE_ORDER == __LITTLE_ENDIAN
+#   define ARCH_NR	AUDIT_ARCH_MIPSEL
+#  else
+#   define ARCH_NR	AUDIT_ARCH_MIPS
+#  endif
+# endif
+#elif defined(__powerpc64__)
+# if __BYTE_ORDER == __LITTLE_ENDIAN
+#  define ARCH_NR	AUDIT_ARCH_PPC64LE
+# else
+#  define ARCH_NR	AUDIT_ARCH_PPC64
 # endif
 #elif defined(__PPC__)
-# define REG_SYSCALL	regs.gpr[0]
 # define ARCH_NR	AUDIT_ARCH_PPC
+#elif defined(__riscv) && __riscv_xlen == 64
+# define ARCH_NR	AUDIT_ARCH_RISCV64
 #else
 # warning "Platform does not support seccomp filter yet"
-# define REG_SYSCALL	0
 # define ARCH_NR	0
 #endif
 

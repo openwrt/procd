@@ -61,6 +61,8 @@ enum {
 	INSTANCE_ATTR_JAIL,
 	INSTANCE_ATTR_TRACE,
 	INSTANCE_ATTR_SECCOMP,
+	INSTANCE_ATTR_SECCOMP_MODE,
+	INSTANCE_ATTR_SECCOMP_LOG,
 	INSTANCE_ATTR_CAPABILITIES,
 	INSTANCE_ATTR_PIDFILE,
 	INSTANCE_ATTR_RELOADSIG,
@@ -94,6 +96,8 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_JAIL] = { "jail", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_TRACE] = { "trace", BLOBMSG_TYPE_BOOL },
 	[INSTANCE_ATTR_SECCOMP] = { "seccomp", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_SECCOMP_MODE] = { "seccomp_mode", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_SECCOMP_LOG] = { "seccomp_log", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_CAPABILITIES] = { "capabilities", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
@@ -124,6 +128,10 @@ enum {
 	JAIL_ATTR_IMMEDIATELY,
 	JAIL_ATTR_PIDFILE,
 	JAIL_ATTR_SETNS,
+	JAIL_ATTR_IDMAP_OFFSET,
+	JAIL_ATTR_CONSOLESOCKET,
+	JAIL_ATTR_SYSTEMDCGROUP,
+	JAIL_ATTR_ENVFILE,
 	__JAIL_ATTR_MAX,
 };
 
@@ -145,6 +153,10 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_IMMEDIATELY] = { "immediately", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_SETNS] = { "setns", BLOBMSG_TYPE_ARRAY },
+	[JAIL_ATTR_IDMAP_OFFSET] = { "idmap_offset", BLOBMSG_TYPE_STRING },
+	[JAIL_ATTR_CONSOLESOCKET] = { "consolesocket", BLOBMSG_TYPE_STRING },
+	[JAIL_ATTR_SYSTEMDCGROUP] = { "systemdcgroup", BLOBMSG_TYPE_BOOL },
+	[JAIL_ATTR_ENVFILE] = { "envfile", BLOBMSG_TYPE_STRING },
 };
 
 enum {
@@ -292,6 +304,7 @@ instance_gen_setns_argstr(struct blob_attr *attr)
 static inline int
 jail_run(struct service_instance *in, char **argv)
 {
+	static char notify_fd_str[12];
 	char *term_timeout_str;
 	struct blobmsg_list_node *var;
 	struct jail *jail = &in->jail;
@@ -318,6 +331,16 @@ jail_run(struct service_instance *in, char **argv)
 	if (in->seccomp) {
 		argv[argc++] = "-S";
 		argv[argc++] = in->seccomp;
+	}
+
+	if (in->seccomp_mode) {
+		argv[argc++] = "-m";
+		argv[argc++] = in->seccomp_mode;
+	}
+
+	if (in->seccomp_log) {
+		argv[argc++] = "-M";
+		argv[argc++] = in->seccomp_log;
 	}
 
 	if (in->user) {
@@ -391,6 +414,29 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = jail->pidfile;
 	}
 
+	if (jail->idmap_offset) {
+		argv[argc++] = "-I";
+		argv[argc++] = jail->idmap_offset;
+	}
+	if (jail->consolesocket) {
+		argv[argc++] = "-Y";
+		argv[argc++] = jail->consolesocket;
+	}
+
+	if (jail->envfile) {
+		argv[argc++] = "-x";
+		argv[argc++] = jail->envfile;
+	}
+
+	if (in->notify_fd > -1) {
+		snprintf(notify_fd_str, sizeof(notify_fd_str), "%d", in->notify_fd);
+		argv[argc++] = "-a";
+		argv[argc++] = notify_fd_str;
+	}
+
+	if (jail->systemd_cgroup)
+		argv[argc++] = "-Z";
+
 	if (in->bundle) {
 		argv[argc++] = "-J";
 		argv[argc++] = in->bundle;
@@ -407,7 +453,13 @@ jail_run(struct service_instance *in, char **argv)
 	blobmsg_list_for_each(&jail->mount, var) {
 		const char *type = blobmsg_data(var->data);
 
-		if (*type == '1')
+		if (*type == '4')
+			argv[argc++] = "-b";
+		else if (*type == '3')
+			argv[argc++] = "-k";
+		else if (*type == '2')
+			argv[argc++] = "-V";
+		else if (*type == '1')
 			argv[argc++] = "-w";
 		else
 			argv[argc++] = "-r";
@@ -473,6 +525,7 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	char **argv;
 	int argc = 1; /* NULL terminated */
 	int rem, _stdin;
+	int jail_argc = in->jail.argc;
 	bool seccomp = !in->trace && !in->has_jail && in->seccomp;
 	bool setlbf = _stdout >= 0;
 
@@ -497,7 +550,12 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	if (in->trace || seccomp)
 		argc += 1;
 
-	argv = alloca(sizeof(char *) * (argc + in->jail.argc));
+	if (in->has_jail && in->notify_fd > -1) {
+		fcntl(in->notify_fd, F_SETFD, 0);
+		jail_argc += 2;
+	}
+
+	argv = alloca(sizeof(char *) * (argc + jail_argc));
 	argc = 0;
 
 #ifdef SECCOMP_SUPPORT
@@ -512,9 +570,9 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 
 	if (in->has_jail) {
 		argc = jail_run(in, argv);
-		if (argc != in->jail.argc)
+		if (argc != jail_argc)
 			ULOG_WARN("expected %i jail params, used %i for %s::%s\n",
-				in->jail.argc, argc, in->srv->name, in->name);
+				jail_argc, argc, in->srv->name, in->name);
 	}
 
 	blobmsg_for_each_attr(cur, in->command, rem)
@@ -522,12 +580,19 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 
 	argv[argc] = NULL;
 
-	_stdin = open("/dev/null", O_RDONLY);
+	if (in->stdio_fd[0] > -1)
+		_stdin = in->stdio_fd[0];
+	else
+		_stdin = open("/dev/null", O_RDONLY);
 
-	if (_stdout == -1)
+	if (in->stdio_fd[1] > -1)
+		_stdout = in->stdio_fd[1];
+	else if (_stdout == -1)
 		_stdout = open("/dev/null", O_WRONLY);
 
-	if (_stderr == -1)
+	if (in->stdio_fd[2] > -1)
+		_stderr = in->stdio_fd[2];
+	else if (_stderr == -1)
 		_stderr = open("/dev/null", O_WRONLY);
 
 	if (_stdin > -1) {
@@ -595,6 +660,36 @@ instance_add_cgroup(const char *service, const char *instance)
 }
 
 static void
+instance_remove_cgroup(const char *service, const char *instance)
+{
+	char cgnamebuf[256];
+	char *sep;
+	int fd, ret;
+
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s/cgroup.kill",
+		       CGROUP_BASEDIR, service, instance);
+	if (ret >= (int)sizeof(cgnamebuf))
+		return;
+
+	fd = open(cgnamebuf, O_WRONLY);
+	if (fd >= 0) {
+		if (write(fd, "1", 1) < 0)
+			ret = -1;
+		close(fd);
+	}
+
+	sep = strrchr(cgnamebuf, '/');
+	if (sep)
+		*sep = '\0';
+	(void)rmdir(cgnamebuf);
+
+	sep = strrchr(cgnamebuf, '/');
+	if (sep)
+		*sep = '\0';
+	(void)rmdir(cgnamebuf);
+}
+
+static void
 instance_free_stdio(struct service_instance *in)
 {
 	if (in->_stdout.fd.fd > -1) {
@@ -646,14 +741,14 @@ instance_start(struct service_instance *in)
 	}
 
 	instance_free_stdio(in);
-	if (in->_stdout.fd.fd > -2) {
+	if (in->_stdout.fd.fd > -2 && in->stdio_fd[1] < 0) {
 		if (pipe(opipe)) {
 			ULOG_WARN("pipe() failed: %m\n");
 			opipe[0] = opipe[1] = -1;
 		}
 	}
 
-	if (in->_stderr.fd.fd > -2) {
+	if (in->_stderr.fd.fd > -2 && in->stdio_fd[2] < 0) {
 		if (pipe(epipe)) {
 			ULOG_WARN("pipe() failed: %m\n");
 			epipe[0] = epipe[1] = -1;
@@ -1011,6 +1106,12 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->seccomp, in_new->seccomp))
 		return true;
 
+	if (string_changed(in->seccomp_mode, in_new->seccomp_mode))
+		return true;
+
+	if (string_changed(in->seccomp_log, in_new->seccomp_log))
+		return true;
+
 	if (string_changed(in->capabilities, in_new->capabilities))
 		return true;
 
@@ -1048,6 +1149,12 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 		return true;
 
 	if (string_changed(in->jail.pidfile, in_new->jail.pidfile))
+		return true;
+
+	if (string_changed(in->jail.consolesocket, in_new->jail.consolesocket))
+		return true;
+
+	if (string_changed(in->jail.envfile, in_new->jail.envfile))
 		return true;
 
 	if (in->jail.flags != in_new->jail.flags)
@@ -1222,6 +1329,25 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->argc += 2;
 	}
 
+	if (tb[JAIL_ATTR_IDMAP_OFFSET]) {
+		jail->idmap_offset = strdup(blobmsg_get_string(tb[JAIL_ATTR_IDMAP_OFFSET]));
+		jail->argc += 2;
+	}
+	if (tb[JAIL_ATTR_CONSOLESOCKET]) {
+		jail->consolesocket = strdup(blobmsg_get_string(tb[JAIL_ATTR_CONSOLESOCKET]));
+		jail->argc += 2;
+	}
+
+	if (tb[JAIL_ATTR_SYSTEMDCGROUP] && blobmsg_get_bool(tb[JAIL_ATTR_SYSTEMDCGROUP])) {
+		jail->systemd_cgroup = true;
+		jail->argc++;
+	}
+
+	if (tb[JAIL_ATTR_ENVFILE]) {
+		jail->envfile = strdup(blobmsg_get_string(tb[JAIL_ATTR_ENVFILE]));
+		jail->argc += 2;
+	}
+
 	if (tb[JAIL_ATTR_SETNS]) {
 		struct blob_attr *cur;
 		int rem;
@@ -1245,6 +1371,12 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		jail->argc += 2;
 
 	if (in->seccomp)
+		jail->argc += 2;
+
+	if (in->seccomp_mode)
+		jail->argc += 2;
+
+	if (in->seccomp_log)
 		jail->argc += 2;
 
 	if (in->capabilities)
@@ -1378,6 +1510,12 @@ instance_config_parse(struct service_instance *in)
 
 	if (!in->trace && tb[INSTANCE_ATTR_SECCOMP])
 		in->seccomp = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP]));
+
+	if (tb[INSTANCE_ATTR_SECCOMP_MODE])
+		in->seccomp_mode = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP_MODE]));
+
+	if (tb[INSTANCE_ATTR_SECCOMP_LOG])
+		in->seccomp_log = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_SECCOMP_LOG]));
 
 	if (tb[INSTANCE_ATTR_CAPABILITIES])
 		in->capabilities = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_CAPABILITIES]));
@@ -1553,6 +1691,8 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 
 	instance_config_move_strdup(&in->pidfile, in_src->pidfile);
 	instance_config_move_strdup(&in->seccomp, in_src->seccomp);
+	instance_config_move_strdup(&in->seccomp_mode, in_src->seccomp_mode);
+	instance_config_move_strdup(&in->seccomp_log, in_src->seccomp_log);
 	instance_config_move_strdup(&in->capabilities, in_src->capabilities);
 	instance_config_move_strdup(&in->bundle, in_src->bundle);
 	instance_config_move_strdup(&in->extroot, in_src->extroot);
@@ -1563,6 +1703,8 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	instance_config_move_strdup(&in->jail.name, in_src->jail.name);
 	instance_config_move_strdup(&in->jail.hostname, in_src->jail.hostname);
 	instance_config_move_strdup(&in->jail.pidfile, in_src->jail.pidfile);
+	instance_config_move_strdup(&in->jail.consolesocket, in_src->jail.consolesocket);
+	instance_config_move_strdup(&in->jail.envfile, in_src->jail.envfile);
 
 	free(in->config);
 	in->config = in_src->config;
@@ -1575,6 +1717,12 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 	bool changed = instance_config_changed(in, in_new);
 	bool running = in->proc.pending;
 	bool stopping = in->halt;
+
+	if (in_new->stdio_fd[1] > -1)
+		instance_stdio_set(in, in_new->stdio_fd);
+
+	if (in_new->notify_fd > -1)
+		instance_notify_set(in, &in_new->notify_fd);
 
 	if (!running || stopping) {
 		instance_config_move(in, in_new);
@@ -1591,16 +1739,65 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 	}
 }
 
+static void
+instance_free_stdio_fds(struct service_instance *in)
+{
+	int i;
+
+	for (i = 0; i < 3; i++) {
+		if (in->stdio_fd[i] < 0)
+			continue;
+
+		close(in->stdio_fd[i]);
+		in->stdio_fd[i] = -1;
+	}
+}
+
+void
+instance_stdio_set(struct service_instance *in, int *fds)
+{
+	int i;
+
+	instance_free_stdio_fds(in);
+
+	for (i = 0; i < 3; i++) {
+		in->stdio_fd[i] = fds[i];
+		fds[i] = -1;
+	}
+}
+
+static void
+instance_free_notify_fd(struct service_instance *in)
+{
+	if (in->notify_fd < 0)
+		return;
+
+	close(in->notify_fd);
+	in->notify_fd = -1;
+}
+
+void
+instance_notify_set(struct service_instance *in, int *fd)
+{
+	instance_free_notify_fd(in);
+
+	in->notify_fd = *fd;
+	*fd = -1;
+}
+
 void
 instance_free(struct service_instance *in)
 {
 	service_data_trigger(&in->data);
 	instance_free_stdio(in);
+	instance_free_stdio_fds(in);
+	instance_free_notify_fd(in);
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	uloop_timeout_cancel(&in->watchdog.timeout);
 	trigger_del(in);
 	watch_del(in);
+	instance_remove_cgroup(in->srv->name, in->name);
 	instance_config_cleanup(in);
 	free(in->config);
 	free(in->data_blob);
@@ -1613,7 +1810,11 @@ instance_free(struct service_instance *in)
 	free(in->jail.name);
 	free(in->jail.hostname);
 	free(in->jail.pidfile);
+	free(in->jail.idmap_offset);
+	free(in->jail.consolesocket);
 	free(in->seccomp);
+	free(in->seccomp_mode);
+	free(in->seccomp_log);
 	free(in->capabilities);
 	free(in->pidfile);
 	free(in);
@@ -1633,6 +1834,9 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->exit_code = 0;
 	in->require_jail = false;
 	in->immediately = false;
+
+	in->stdio_fd[0] = in->stdio_fd[1] = in->stdio_fd[2] = -1;
+	in->notify_fd = -1;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;

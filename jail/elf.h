@@ -31,6 +31,8 @@ extern struct avl_tree libraries;
 
 void alloc_library(const char *path, const char *name);
 int elf_load_deps(const char *path, const char *map, unsigned long map_size);
+unsigned long elf_dynsym_value(const char *path, const char *sym);
+int elf_interp(const char *path, char *out, size_t outlen);
 const char* find_lib(const char *file);
 void init_library_search(void);
 int lib_open(char **fullpath, const char *file);

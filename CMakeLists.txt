@@ -101,17 +101,12 @@ ADD_CUSTOM_TARGET(capabilities-names-h DEPENDS capabilities-names.h)
 
 IF(SECCOMP_SUPPORT)
 ADD_DEFINITIONS(-DSECCOMP_SUPPORT)
-ADD_LIBRARY(preload-seccomp SHARED jail/preload.c jail/seccomp.c jail/seccomp-oci.c)
-TARGET_LINK_LIBRARIES(preload-seccomp dl ${ubox} ${blobmsg_json})
-INSTALL(TARGETS preload-seccomp
-	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
-ADD_DEPENDENCIES(preload-seccomp syscall-names-h)
-SET(SOURCES_OCI_SECCOMP jail/seccomp-oci.c)
+SET(SOURCES_OCI_SECCOMP jail/seccomp-oci.c jail/seccomp-inject.c)
+SET(SOURCES_JAIL_TRACE jail/seccomp-trace.c)
 ENDIF()
 
 IF(JAIL_SUPPORT)
-ADD_EXECUTABLE(ujail jail/jail.c jail/cgroups.c jail/cgroups-bpf.c jail/elf.c jail/fs.c jail/capabilities.c jail/netifd.c ${SOURCES_OCI_SECCOMP})
+ADD_EXECUTABLE(ujail jail/jail.c jail/cgroups.c jail/cgroups-bpf.c jail/elf.c jail/fs.c jail/capabilities.c jail/landlock.c jail/netifd.c ${SOURCES_OCI_SECCOMP} ${SOURCES_JAIL_TRACE})
 TARGET_LINK_LIBRARIES(ujail ${ubox} ${ubus} ${uci} ${blobmsg_json})
 INSTALL(TARGETS ujail
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
@@ -119,6 +114,7 @@ INSTALL(TARGETS ujail
 ADD_DEPENDENCIES(ujail capabilities-names-h)
 IF(SECCOMP_SUPPORT)
   ADD_DEPENDENCIES(ujail syscall-names-h)
+  TARGET_LINK_LIBRARIES(ujail ${udebug})
 ENDIF()
 
 ADD_EXECUTABLE(uxc uxc.c)
@@ -126,19 +122,17 @@ TARGET_LINK_LIBRARIES(uxc ${ubox} ${ubus} ${blobmsg_json})
 INSTALL(TARGETS uxc
 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
 )
+INSTALL(PROGRAMS jail/uxc-net
+	DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+INSTALL(PROGRAMS uxc-stack
+	DESTINATION ${CMAKE_INSTALL_SBINDIR}
+)
+INSTALL(FILES uxc-stack.uc
+	DESTINATION ${CMAKE_INSTALL_DATADIR}/uxc
+)
 endif()
 
 IF(UTRACE_SUPPORT)
-ADD_EXECUTABLE(utrace trace/trace.c)
-TARGET_LINK_LIBRARIES(utrace ${ubox} ${json} ${blobmsg_json})
-INSTALL(TARGETS utrace
-	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
-)
-ADD_DEPENDENCIES(utrace syscall-names-h)
-
-ADD_LIBRARY(preload-trace SHARED trace/preload.c)
-TARGET_LINK_LIBRARIES(preload-trace dl)
-INSTALL(TARGETS preload-trace
-	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
+INSTALL(PROGRAMS trace2seccomp.uc DESTINATION ${CMAKE_INSTALL_SBINDIR} RENAME trace2seccomp)
 endif()
