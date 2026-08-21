@@ -431,7 +431,8 @@ void jail_fs_set_userns(bool enabled)
 static bool mount_opts_has(const char *opts, const char *needle);
 
 static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
-		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner)
+		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner,
+		    int source_fd)
 {
 	struct stat s;
 	char new[PATH_MAX];
@@ -441,15 +442,20 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	int fd, ret = 0;
 	bool is_bind = (orig_mountflags & MS_BIND);
 	bool is_mask = (source == (void *)(-1));
+	bool use_fd = false;
 	unsigned long mountflags = orig_mountflags;
 
 	assert(!(inner && is_mask));
 	assert(!(inner && !orig_source));
 
 	if (source && is_bind && stat(source, &s)) {
-		if (error)
-			ERROR("stat(%s) failed: %m\n", source);
-		return error;
+		if (source_fd >= 0 && !fstatat(source_fd, "", &s, AT_EMPTY_PATH)) {
+			use_fd = true;
+		} else {
+			if (error)
+				ERROR("stat(%s) failed: %m\n", source);
+			return error;
+		}
 	}
 
 	if (inner)
@@ -509,7 +515,14 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	}
 
 	if (is_bind) {
-		if (mount(source?:new, new, filesystemtype?:"bind", MS_BIND | (mountflags & MS_REC), optstr)) {
+		if (use_fd) {
+			if (sys_move_mount(source_fd, "", AT_FDCWD, new, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
+				if (error)
+					ERROR("move_mount(%s -> %s): %m\n", source, new);
+				ret = error;
+				goto free_source_out;
+			}
+		} else if (mount(source?:new, new, filesystemtype?:"bind", MS_BIND | (mountflags & MS_REC), optstr)) {
 			if (error)
 				ERROR("failed to mount -B %s %s: %m\n", source, new);
 
@@ -641,6 +654,7 @@ static int _add_mount(const char *source, const char *target, const char *filesy
 		return ENOMEM;
 
 	m->idmap_treefd = -1;
+	m->source_fd = -1;
 	m->avl.key = m->target = strdup(target);
 	if (source) {
 		if (source != (void*)(-1))
@@ -1053,6 +1067,46 @@ bool mount_is_defined(const char *target)
 	return m != NULL;
 }
 
+static struct blob_attr *single_idmap(uint32_t container_id)
+{
+	struct blob_buf b = {};
+	void *arr, *tbl;
+	struct blob_attr *ret;
+
+	blob_buf_init(&b, 0);
+	arr = blobmsg_open_array(&b, "m");
+	tbl = blobmsg_open_table(&b, NULL);
+	blobmsg_add_u32(&b, "containerID", container_id);
+	blobmsg_add_u32(&b, "hostID", 0);
+	blobmsg_add_u32(&b, "size", 1);
+	blobmsg_close_table(&b, tbl);
+	blobmsg_close_array(&b, arr);
+	ret = blob_memdup(blobmsg_data(b.head));
+	blob_buf_free(&b);
+
+	return ret;
+}
+
+int fs_mount_enable_idmap(const char *target, uint32_t uid, uint32_t gid)
+{
+	struct mount *m = avl_find_element(&mounts, target, m, avl);
+
+	if (!m)
+		return ENOENT;
+
+	free(m->uidmappings);
+	free(m->gidmappings);
+	m->uidmappings = single_idmap(uid);
+	m->gidmappings = single_idmap(gid);
+	if (!m->uidmappings || !m->gidmappings)
+		return ENOMEM;
+
+	m->idmap = true;
+	m->idmap_recursive = false;
+
+	return 0;
+}
+
 static void build_noafile(void) {
 	int fd;
 
@@ -1144,7 +1198,7 @@ static int idmap_mount_target(const char *root, struct mount *m, char *target, s
 	return 0;
 }
 
-static int idmap_tree_fd(const char *source, int userns_fd, unsigned long mountflags, bool recursive)
+static int idmap_tree_fd(const char *source, int source_fd, int userns_fd, unsigned long mountflags, bool recursive)
 {
 	struct ujail_mount_attr attr = { 0 };
 	unsigned int open_flags = OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC;
@@ -1156,7 +1210,10 @@ static int idmap_tree_fd(const char *source, int userns_fd, unsigned long mountf
 		setattr_flags |= AT_RECURSIVE;
 	}
 
-	treefd = sys_open_tree(AT_FDCWD, source, open_flags);
+	if (source_fd >= 0)
+		treefd = sys_open_tree(source_fd, "", open_flags | AT_EMPTY_PATH);
+	else
+		treefd = sys_open_tree(AT_FDCWD, source, open_flags);
 	if (treefd < 0) {
 		ERROR("open_tree(%s): %m\n", source);
 		return -1;
@@ -1212,7 +1269,7 @@ static int do_idmap_mount(const char *root, struct mount *m)
 	if (idmap_mount_target(root, m, target, sizeof(target)))
 		goto out_close;
 
-	treefd = idmap_tree_fd(m->source, userns_fd, m->mountflags, m->idmap_recursive);
+	treefd = idmap_tree_fd(m->source, m->source_fd, userns_fd, m->mountflags, m->idmap_recursive);
 	if (treefd < 0)
 		goto out_close;
 
@@ -1285,7 +1342,7 @@ int jail_idmap_build(const char *extroot,
 
 	if (n >= maxfds)
 		goto err;
-	fd = idmap_tree_fd(extroot, userns_fd, 0, false);
+	fd = idmap_tree_fd(extroot, -1, userns_fd, 0, false);
 	if (fd < 0)
 		goto err;
 	fds[n++] = fd;
@@ -1452,7 +1509,7 @@ int mount_all(const char *jailroot, const char *jail_dev) {
 				goto out;
 			}
 		} else if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags,
-				    m->propflags, m->optstr, m->error, m->inner)) {
+				    m->propflags, m->optstr, m->error, m->inner, m->source_fd)) {
 			ret = -1;
 			goto out;
 		}
@@ -1472,6 +1529,8 @@ void mount_free(void) {
 	avl_remove_all_elements(&mounts, m, avl, tmp) {
 		if (m->source != (void*)(-1))
 			free((void*)m->source);
+		if (m->source_fd >= 0)
+			close(m->source_fd);
 		free((void*)m->target);
 		free((void*)m->filesystemtype);
 		free((void*)m->optstr);
@@ -1521,6 +1580,7 @@ int add_2paths_and_deps(const char *path, const char *path2, int readonly, int e
 	char *map = NULL;
 	char *fullpath = NULL;
 	int fd, ret = -1;
+	struct mount *bm = NULL;
 	if (path[0] == '/') {
 		if (avl_find(&mounts, path2))
 			return 0;
@@ -1528,6 +1588,10 @@ int add_2paths_and_deps(const char *path, const char *path2, int readonly, int e
 		if (fd < 0)
 			return error;
 		_add_mount_bind(path, path2, readonly, error);
+		bm = avl_find_element(&mounts, path2, bm, avl);
+		if (bm && bm->source_fd < 0)
+			bm->source_fd = sys_open_tree(AT_FDCWD, path,
+						      OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
 	} else {
 		if (avl_find(&libraries, path))
 			return 0;
@@ -1586,4 +1650,27 @@ out:
 	free(fullpath);
 
 	return ret;
+}
+
+int add_2paths_nodeps(const char *path, const char *path2, int readonly, int error)
+{
+	struct mount *bm = NULL;
+
+	if (path[0] != '/') {
+		ERROR("%s is not an absolute path\n", path);
+		return error;
+	}
+
+	if (avl_find(&mounts, path2))
+		return 0;
+
+	if (_add_mount_bind(path, path2, readonly, error))
+		return error;
+
+	bm = avl_find_element(&mounts, path2, bm, avl);
+	if (bm && bm->source_fd < 0)
+		bm->source_fd = sys_open_tree(AT_FDCWD, path,
+					      OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
+
+	return 0;
 }

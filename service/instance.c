@@ -446,7 +446,11 @@ jail_run(struct service_instance *in, char **argv)
 	blobmsg_list_for_each(&jail->mount, var) {
 		const char *type = blobmsg_data(var->data);
 
-		if (*type == '2')
+		if (*type == '4')
+			argv[argc++] = "-b";
+		else if (*type == '3')
+			argv[argc++] = "-k";
+		else if (*type == '2')
 			argv[argc++] = "-V";
 		else if (*type == '1')
 			argv[argc++] = "-w";

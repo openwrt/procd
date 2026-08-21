@@ -40,6 +40,7 @@ int add_mount_inner(const char *source, const char *target, const char *filesyst
 	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error);
 int add_mount_bind(const char *path, int readonly, int error);
 int add_mount_volume(const char *source, const char *target, int error);
+int fs_mount_enable_idmap(const char *target, uint32_t uid, uint32_t gid);
 char *resolve_mount_source(const char *source);
 int add_mount_fd(int fd, const char *target, int error);
 int mask_path_now(const char *path);
@@ -75,6 +76,7 @@ int parseOCImount(struct blob_attr *msg);
 bool mount_is_defined(const char *target);
 int add_2paths_and_deps(const char *path, const char *path2, int readonly, int error, int lib);
 unsigned long detect_atime_flag(const char *mountpoint);
+int add_2paths_nodeps(const char *path, const char *path2, int readonly, int error);
 
 static inline int add_path_and_deps(const char *path, int readonly, int error, int lib)
 {

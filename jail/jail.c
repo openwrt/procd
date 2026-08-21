@@ -100,7 +100,11 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
+#define OPT_ARGS	"b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
+
+#define JAIL_MAX_CREDENTIALS	16
+static const char *cred_targets[JAIL_MAX_CREDENTIALS];
+static int n_cred_targets;
 
 struct hook_execvpe {
 	char *file;
@@ -5432,6 +5436,7 @@ int main(int argc, char **argv)
 	const char ubus[] = "/var/run/ubus/ubus.sock";
 	const char udebug[] = "/var/run/udebug.sock";
 	int ret = EXIT_FAILURE;
+	int credidx;
 	int ch;
 	char *tmp;
 	struct list_head envl = LIST_HEAD_INIT(envl);
@@ -5519,6 +5524,17 @@ int main(int argc, char **argv)
 		case 'j':
 			jail_join_ns(optarg);
 			break;
+		case 'b':
+			if (!opts.ocibundle)
+				opts.namespace |= CLONE_NEWNS;
+			tmp = strchr(optarg, ':');
+			if (tmp) {
+				*(tmp++) = '\0';
+				add_2paths_nodeps(optarg, tmp, 1, 0);
+			} else {
+				add_2paths_nodeps(optarg, optarg, 1, 0);
+			}
+			break;
 		case 'r':
 			if (!opts.ocibundle)
 				opts.namespace |= CLONE_NEWNS;
@@ -5540,6 +5556,20 @@ int main(int argc, char **argv)
 			} else {
 				add_path_and_deps(optarg, 0, 0, 0);
 			}
+			break;
+		case 'k':
+			if (!opts.ocibundle)
+				opts.namespace |= CLONE_NEWNS;
+			tmp = strchr(optarg, ':');
+			if (!tmp) {
+				ERROR("credential needs a src:dest pair: %s\n", optarg);
+				return -1;
+			}
+			*(tmp++) = '\0';
+			if (add_2paths_and_deps(optarg, tmp, 1, 0, 0))
+				return -1;
+			if (n_cred_targets < JAIL_MAX_CREDENTIALS)
+				cred_targets[n_cred_targets++] = strdup(tmp);
 			break;
 		case 'V':
 			tmp = strchr(optarg, ':');
@@ -5698,6 +5728,18 @@ int main(int argc, char **argv)
 		if (ocires) {
 			ERROR("parsing of OCI JSON spec has failed: %s (%d)\n", strerror(ocires), ocires);
 			ret=ocires;
+			goto errout;
+		}
+	}
+
+	for (credidx = 0; credidx < n_cred_targets; credidx++) {
+		ret = fs_mount_enable_idmap(cred_targets[credidx],
+					    opts.pw_uid > 0 ? (uint32_t)opts.pw_uid : 0,
+					    opts.pw_gid > 0 ? (uint32_t)opts.pw_gid : 0);
+		if (ret) {
+			ERROR("failed to idmap credential %s: %s\n",
+			      cred_targets[credidx], strerror(ret));
+			ret = -1;
 			goto errout;
 		}
 	}
