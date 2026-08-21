@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -895,7 +896,7 @@ void cgroups_set_memory_limit(int64_t bytes)
 	cgroups_set("memory.max", tmp);
 }
 
-static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
+static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg, bool is_update)
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MEMORY_MAX];
 	char tmp[32] = { 0 };
@@ -916,6 +917,36 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg)
 	    tb[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER] ||
 	    tb[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY])
 		return ENOTSUP;
+
+	if (is_update && tb[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE] &&
+	    blobmsg_get_bool(tb[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE])) {
+		char path[PATH_MAX];
+		int64_t current;
+
+		snprintf(path, sizeof(path), "%s/memory.current", cgroup_path);
+		current = read_int64_file(path);
+		if (current < 0) {
+			ERROR("memory.checkBeforeUpdate: cannot read %s: %m\n", path);
+			return EIO;
+		}
+
+		if (tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]) {
+			int64_t new_limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]);
+			if (new_limit != -1 && new_limit < current) {
+				ERROR("memory.checkBeforeUpdate: new limit %" PRId64
+				      " < current usage %" PRId64 "\n", new_limit, current);
+				return EBUSY;
+			}
+		}
+		if (tb[OCI_LINUX_CGROUPS_MEMORY_RESERVATION]) {
+			int64_t new_res = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_RESERVATION]);
+			if (new_res != -1 && new_res < current) {
+				ERROR("memory.checkBeforeUpdate: new reservation %" PRId64
+				      " < current usage %" PRId64 "\n", new_res, current);
+				return EBUSY;
+			}
+		}
+	}
 
 	if (tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]) {
 		limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]);
@@ -1037,7 +1068,7 @@ static const struct blobmsg_policy oci_linux_cgroups_policy[] = {
 	[OCI_LINUX_CGROUPS_UNIFIED] = { "unified", BLOBMSG_TYPE_TABLE },
 };
 
-int parseOCIlinuxcgroups(struct blob_attr *msg)
+int parseOCIlinuxcgroups(struct blob_attr *msg, bool is_update)
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MAX];
 	int ret;
@@ -1069,7 +1100,7 @@ int parseOCIlinuxcgroups(struct blob_attr *msg)
 	}
 
 	if (tb[OCI_LINUX_CGROUPS_MEMORY]) {
-		ret = parseOCIlinuxcgroups_legacy_memory(tb[OCI_LINUX_CGROUPS_MEMORY]);
+		ret = parseOCIlinuxcgroups_legacy_memory(tb[OCI_LINUX_CGROUPS_MEMORY], is_update);
 		if (ret)
 			return ret;
 	}

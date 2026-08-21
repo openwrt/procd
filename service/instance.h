@@ -36,6 +36,7 @@ struct jail {
 			uint32_t userns:1;
 			uint32_t cgroupsns:1;
 			uint32_t console:1;
+			uint32_t systemd_cgroup:1;
 		};
 		uint32_t flags;
 	};
