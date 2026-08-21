@@ -25,6 +25,7 @@
 #include <sys/personality.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <poll.h>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
@@ -47,6 +48,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sched.h>
+#include <limits.h>
 #include <linux/filter.h>
 #include <linux/landlock.h>
 #include <linux/limits.h>
@@ -55,6 +57,7 @@
 #include <linux/securebits.h>
 #include <signal.h>
 #include <inttypes.h>
+#include <limits.h>
 
 #include "capabilities.h"
 #include "elf.h"
@@ -92,7 +95,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:ln:NoO:pP:r:R:sS:uU:w:t:T:y"
+#define OPT_ARGS	"cC:d:De:EfFG:h:iI:j:J:ln:NoO:pP:r:R:sS:uU:w:t:T:yY:"
 
 #define OCI_VERSION_STRING "1.0.2"
 
@@ -155,6 +158,9 @@ static struct {
 	int ronly;
 	int sysfs;
 	int console;
+	char *console_socket;
+	unsigned short console_height;
+	unsigned short console_width;
 	int pw_uid;
 	int pw_gid;
 	int gr_gid;
@@ -218,6 +224,8 @@ static int jail_process_pidfd = -1;
 static struct ubus_context *parent_ctx;
 
 int console_fd;
+static int console_slave_fd = -1;
+static char console_slave_name[64];
 
 
 static inline bool has_namespaces(void)
@@ -441,56 +449,143 @@ static void pass_console(int console_fd)
 	ubus_free(child_ctx);
 }
 
-static int create_dev_console(const char *jail_root)
+static int parse_inherited_console_fd(const char *spec)
 {
-	char *console_fname;
-	char dev_console_path[PATH_MAX];
-	int slave_console_fd, dev_console_dummy;
+	char *endptr;
+	long fd;
 
-	/* Open UNIX/98 virtual console */
-	console_fd = posix_openpt(O_RDWR | O_NOCTTY);
-	if (console_fd < 0)
+	if (!spec || !*spec)
 		return -1;
 
-	console_fname = ptsname(console_fd);
-	DEBUG("got console fd %d and PTS client name %s\n", console_fd, console_fname);
-	if (!console_fname)
-		goto no_console;
+	errno = 0;
+	fd = strtol(spec, &endptr, 10);
+	if (errno || *endptr || endptr == spec || fd < 0 || fd > INT_MAX)
+		return -1;
 
-	grantpt(console_fd);
-	unlockpt(console_fd);
+	if (fcntl((int)fd, F_GETFD) == -1)
+		return -1;
 
-	/* pass PTY master to procd */
-	pass_console(console_fd);
+	return (int)fd;
+}
 
-	/* mount-bind PTY slave to /dev/console in jail */
+static int open_console_sock(const char *spec, bool *owned, bool path_only)
+{
+	int sock;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+
+	*owned = false;
+	if (!path_only) {
+		sock = parse_inherited_console_fd(spec);
+		if (sock >= 0) {
+			int dom = 0, typ = 0;
+			socklen_t slen = sizeof(dom);
+
+			if (getsockopt(sock, SOL_SOCKET, SO_DOMAIN, &dom, &slen) < 0 ||
+			    dom != AF_UNIX) {
+				ERROR("console-socket: inherited fd %d is not AF_UNIX\n", sock);
+				return -1;
+			}
+			slen = sizeof(typ);
+			if (getsockopt(sock, SOL_SOCKET, SO_TYPE, &typ, &slen) < 0 ||
+			    typ != SOCK_STREAM) {
+				ERROR("console-socket: inherited fd %d is not SOCK_STREAM\n", sock);
+				return -1;
+			}
+			return sock;
+		}
+	}
+
+	if (strlen(spec) >= sizeof(addr.sun_path)) {
+		ERROR("console-socket path too long: %s\n", spec);
+		return -1;
+	}
+	memcpy(addr.sun_path, spec, strlen(spec) + 1);
+
+	sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sock < 0) {
+		ERROR("console-socket: socket(): %m\n");
+		return -1;
+	}
+	if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		ERROR("console-socket: connect(%s): %m\n", spec);
+		close(sock);
+		return -1;
+	}
+	*owned = true;
+	return sock;
+}
+
+static int sendmsg_console_fd(int sock, int console_fd, const char *slave_name)
+{
+	struct msghdr msg = { 0 };
+	struct cmsghdr *cmsg;
+	struct iovec iov;
+	char cbuf[CMSG_SPACE(sizeof(int))] = { 0 };
+
+	iov.iov_base = (void *)slave_name;
+	iov.iov_len = strlen(slave_name);
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = cbuf;
+	msg.msg_controllen = sizeof(cbuf);
+
+	cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+	memcpy(CMSG_DATA(cmsg), &console_fd, sizeof(int));
+
+	if (sendmsg(sock, &msg, 0) < 0) {
+		ERROR("console-socket: sendmsg: %m\n");
+		return -1;
+	}
+	return 0;
+}
+
+static int send_console_fd(const char *spec, int console_fd, const char *slave_name)
+{
+	bool owned;
+	int sock, ret;
+
+	sock = open_console_sock(spec, &owned, false);
+	if (sock < 0)
+		return -1;
+	ret = sendmsg_console_fd(sock, console_fd, slave_name);
+	if (owned)
+		close(sock);
+	return ret;
+}
+
+static int create_dev_console(const char *jail_root)
+{
+	char dev_console_path[PATH_MAX];
+	char fdpath[64];
+	int dev_console_dummy;
+
+	if (console_slave_fd < 0)
+		return 1;
+
 	snprintf(dev_console_path, sizeof(dev_console_path), "%s/dev/console", jail_root);
 	dev_console_dummy = creat(dev_console_path, 0620);
 	if (dev_console_dummy < 0)
-		goto no_console;
-
+		return 1;
 	close(dev_console_dummy);
 
-	if (mount(console_fname, dev_console_path, "bind", MS_BIND, NULL))
-		goto no_console;
+	snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", console_slave_fd);
+	if (mount(fdpath, dev_console_path, "bind", MS_BIND, NULL))
+		return 1;
 
-	/* use PTY slave for stdio */
-	slave_console_fd = open(console_fname, O_RDWR); /* | O_NOCTTY */
-	if (slave_console_fd < 0)
-		goto no_console;
+	setsid();
+	if (ioctl(console_slave_fd, TIOCSCTTY, 0) < 0)
+		WARNING("TIOCSCTTY on guest console failed: %m\n");
 
-	dup2(slave_console_fd, 0);
-	dup2(slave_console_fd, 1);
-	dup2(slave_console_fd, 2);
-	close(slave_console_fd);
-
-	INFO("using guest console %s\n", console_fname);
+	dup2(console_slave_fd, 0);
+	dup2(console_slave_fd, 1);
+	dup2(console_slave_fd, 2);
+	if (console_slave_fd > 2)
+		close(console_slave_fd);
 
 	return 0;
-
-no_console:
-	close(console_fd);
-	return 1;
 }
 
 static int hook_running = 0;
@@ -1015,6 +1110,12 @@ static int build_jail_fs(void)
 	int ret;
 
 	old_umask = umask(0);
+
+	if (opts.console && console_slave_name[0]) {
+		console_slave_fd = open(console_slave_name, O_RDWR);
+		if (console_slave_fd < 0)
+			WARNING("open guest console slave %s: %m\n", console_slave_name);
+	}
 
 	if (mkdtemp(jail_root) == NULL) {
 		ERROR("mkdtemp(%s) failed: %m\n", jail_root);
@@ -1888,6 +1989,7 @@ static void usage(void)
 	fprintf(stderr, "  -T <size>\tuse tmpfs r/w overlayfs with <size>\n");
 	fprintf(stderr, "  -E\t\tfail if jail cannot be setup\n");
 	fprintf(stderr, "  -y\t\tprovide jail console\n");
+	fprintf(stderr, "  -Y <spec>\tsend PTY master fd via inherited fd or AF_UNIX path\n");
 	fprintf(stderr, "  -J <dir>\tcreate container from OCI bundle\n");
 	fprintf(stderr, "  -i\t\tstart container immediately\n");
 	fprintf(stderr, "  -P <pidfile>\tcreate <pidfile>\n");
@@ -3220,6 +3322,7 @@ enum {
 	OCI_PROCESS_APPARMORPROFILE,
 	OCI_PROCESS_ARGS,
 	OCI_PROCESS_CAPABILITIES,
+	OCI_PROCESS_CONSOLESIZE,
 	OCI_PROCESS_CWD,
 	OCI_PROCESS_ENV,
 	OCI_PROCESS_EXECCPUAFFINITY,
@@ -3238,6 +3341,7 @@ static const struct blobmsg_policy oci_process_policy[] = {
 	[OCI_PROCESS_APPARMORPROFILE] = { "apparmorProfile", BLOBMSG_TYPE_STRING },
 	[OCI_PROCESS_ARGS] = { "args", BLOBMSG_TYPE_ARRAY },
 	[OCI_PROCESS_CAPABILITIES] = { "capabilities", BLOBMSG_TYPE_TABLE },
+	[OCI_PROCESS_CONSOLESIZE] = { "consoleSize", BLOBMSG_TYPE_TABLE },
 	[OCI_PROCESS_CWD] = { "cwd", BLOBMSG_TYPE_STRING },
 	[OCI_PROCESS_ENV] = { "env", BLOBMSG_TYPE_ARRAY },
 	[OCI_PROCESS_EXECCPUAFFINITY] = { "execCPUAffinity", BLOBMSG_TYPE_TABLE },
@@ -3250,6 +3354,41 @@ static const struct blobmsg_policy oci_process_policy[] = {
 	[OCI_PROCESS_TERMINAL] = { "terminal", BLOBMSG_TYPE_BOOL },
 	[OCI_PROCESS_USER] = { "user", BLOBMSG_TYPE_TABLE },
 };
+
+enum {
+	OCI_PROCESS_CONSOLESIZE_HEIGHT,
+	OCI_PROCESS_CONSOLESIZE_WIDTH,
+	__OCI_PROCESS_CONSOLESIZE_MAX,
+};
+
+static const struct blobmsg_policy oci_process_consolesize_policy[] = {
+	[OCI_PROCESS_CONSOLESIZE_HEIGHT] = { "height", BLOBMSG_TYPE_INT32 },
+	[OCI_PROCESS_CONSOLESIZE_WIDTH] = { "width", BLOBMSG_TYPE_INT32 },
+};
+
+static int parseOCIprocessconsolesize(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_PROCESS_CONSOLESIZE_MAX];
+	uint32_t height, width;
+
+	blobmsg_parse(oci_process_consolesize_policy, __OCI_PROCESS_CONSOLESIZE_MAX, tb,
+		      blobmsg_data(msg), blobmsg_len(msg));
+
+	if (!tb[OCI_PROCESS_CONSOLESIZE_HEIGHT] || !tb[OCI_PROCESS_CONSOLESIZE_WIDTH])
+		return ENODATA;
+
+	height = blobmsg_get_u32(tb[OCI_PROCESS_CONSOLESIZE_HEIGHT]);
+	width = blobmsg_get_u32(tb[OCI_PROCESS_CONSOLESIZE_WIDTH]);
+	if (!height || !width || height > USHRT_MAX || width > USHRT_MAX) {
+		ERROR("consoleSize: %u x %u out of range\n", height, width);
+		return EINVAL;
+	}
+
+	opts.console_height = height;
+	opts.console_width = width;
+
+	return 0;
+}
 
 
 static int parseOCIprocess(struct blob_attr *msg)
@@ -3278,6 +3417,12 @@ static int parseOCIprocess(struct blob_attr *msg)
 
 	if (tb[OCI_PROCESS_TERMINAL])
 		opts.console = blobmsg_get_bool(tb[OCI_PROCESS_TERMINAL]);
+
+	if (opts.console && tb[OCI_PROCESS_CONSOLESIZE]) {
+		res = parseOCIprocessconsolesize(tb[OCI_PROCESS_CONSOLESIZE]);
+		if (res)
+			return res;
+	}
 
 	if (tb[OCI_PROCESS_SCHEDULER]) {
 		res = parseOCIprocessscheduler(tb[OCI_PROCESS_SCHEDULER]);
@@ -4731,6 +4876,22 @@ int main(int argc, char **argv)
 		case 'P':
 			opts.pidfile = optarg;
 			break;
+		case 'Y':
+			opts.console_socket = optarg;
+			break;
+		}
+	}
+
+	if (opts.console_socket && parse_inherited_console_fd(opts.console_socket) < 0) {
+		static char fdspec[16];
+		bool owned;
+		int csfd;
+
+		csfd = open_console_sock(opts.console_socket, &owned, false);
+		if (csfd >= 0) {
+			fcntl(csfd, F_SETFD, 0);
+			snprintf(fdspec, sizeof(fdspec), "%d", csfd);
+			opts.console_socket = fdspec;
 		}
 	}
 
@@ -5114,6 +5275,51 @@ static void post_main(struct uloop_timeout *t)
 			if (seteuid(opts.root_map_uid)) {
 				ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
 				free_and_exit(EXIT_FAILURE);
+			}
+		}
+
+		if (opts.console) {
+			char *slave_name;
+			int parent_master;
+
+			parent_master = posix_openpt(O_RDWR | O_NOCTTY);
+			if (parent_master < 0) {
+				ERROR("posix_openpt: %m\n");
+				free_and_exit(-1);
+			}
+			if (grantpt(parent_master) || unlockpt(parent_master) ||
+			    !(slave_name = ptsname(parent_master))) {
+				ERROR("grantpt/unlockpt/ptsname failed\n");
+				close(parent_master);
+				free_and_exit(-1);
+			}
+			if (opts.console_height && opts.console_width) {
+				struct winsize ws = {
+					.ws_row = opts.console_height,
+					.ws_col = opts.console_width,
+				};
+				ioctl(parent_master, TIOCSWINSZ, &ws);
+			}
+			strncpy(console_slave_name, slave_name, sizeof(console_slave_name) - 1);
+			console_slave_name[sizeof(console_slave_name) - 1] = '\0';
+			if (opts.console_socket) {
+				if (send_console_fd(opts.console_socket, parent_master, slave_name)) {
+					ERROR("send_console_fd failed\n");
+					close(parent_master);
+					free_and_exit(-1);
+				}
+				close(parent_master);
+			} else {
+				console_fd = parent_master;
+				if ((opts.namespace & CLONE_NEWUSER) && seteuid(0)) {
+					ERROR("seteuid(0) failed: %m\n");
+					free_and_exit(EXIT_FAILURE);
+				}
+				pass_console(console_fd);
+				if ((opts.namespace & CLONE_NEWUSER) && seteuid(opts.root_map_uid)) {
+					ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
+					free_and_exit(EXIT_FAILURE);
+				}
 			}
 		}
 
