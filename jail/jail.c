@@ -1481,6 +1481,9 @@ static void free_and_exit(int ret)
 static void post_jail_fs(void);
 static void enter_userns(void);
 static int userns_wait_idmaps(void);
+#ifdef CLONE_NEWTIME
+static int timens_create(void);
+#endif
 static void remask_after_unshare(void);
 static void remount_proc_sys_after_unshare(void);
 static void enter_jail_fs(void)
@@ -1562,6 +1565,12 @@ static void enter_userns(void)
 
 	if (userns_wait_idmaps())
 		free_and_exit(-1);
+
+#ifdef CLONE_NEWTIME
+	if ((opts.namespace & CLONE_NEWTIME) && opts.setns.time == -1 &&
+	    timens_create())
+		free_and_exit(-1);
+#endif
 
 	if ((opts.namespace & CLONE_NEWNS) && unshare(CLONE_NEWNS)) {
 		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
@@ -2702,6 +2711,35 @@ static int applyOCIlinuxtimeoffsets(void)
 	return 0;
 }
 
+static int timens_create(void)
+{
+	int fd;
+
+	if (unshare(CLONE_NEWTIME)) {
+		ERROR("unshare(CLONE_NEWTIME) failed: %m\n");
+		return -1;
+	}
+
+	if ((timens_offsets.monotonic.set || timens_offsets.boottime.set) &&
+	    applyOCIlinuxtimeoffsets())
+		return -1;
+
+	fd = open("/proc/self/ns/time_for_children", O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		ERROR("open(/proc/self/ns/time_for_children): %m\n");
+		return -1;
+	}
+
+	if (setns(fd, CLONE_NEWTIME)) {
+		ERROR("setns(CLONE_NEWTIME): %m\n");
+		close(fd);
+		return -1;
+	}
+
+	close(fd);
+	return 0;
+}
+
 static void pre_exec_jail(struct uloop_timeout *t);
 static struct uloop_timeout pre_exec_timeout = {
 	.cb = pre_exec_jail,
@@ -2744,6 +2782,10 @@ static int exec_jail(void *arg)
 		ret = setns_open(CLONE_NEWIPC);
 	if (!ret)
 		ret = setns_open(CLONE_NEWUTS);
+#ifdef CLONE_NEWTIME
+	if (!ret)
+		ret = setns_open(CLONE_NEWTIME);
+#endif
 	if (ret) {
 		ERROR("failed to join namespace: %s\n", strerror(ret));
 		return EXIT_FAILURE;
@@ -2828,6 +2870,12 @@ static int exec_jail(void *arg)
 				"dropping supplementary groups\n");
 		}
 	}
+
+#ifdef CLONE_NEWTIME
+	if ((opts.namespace & CLONE_NEWTIME) && opts.setns.time == -1 &&
+	    !userns_deferred() && timens_create())
+		free_and_exit(EXIT_FAILURE);
+#endif
 
 	if (((opts.namespace & CLONE_NEWUTS) || opts.setns.uts != -1)
 			&& opts.hostname && strlen(opts.hostname) > 0
@@ -5684,7 +5732,6 @@ static struct uloop_timeout post_main_timeout = {
 	.cb = post_main,
 };
 static int pidns_fd;
-static int timens_fd;
 static void post_create_runtime(void);
 
 struct env_e {
@@ -6328,22 +6375,6 @@ static void post_main(struct uloop_timeout *t)
 			free_and_exit(EXIT_FAILURE);
 		}
 
-		if (opts.setns.time != -1) {
-			timens_fd = ns_open_pid("time", getpid());
-			setns_open(CLONE_NEWTIME);
-		} else if (opts.namespace & CLONE_NEWTIME) {
-			timens_fd = ns_open_pid("time", getpid());
-			if (unshare(CLONE_NEWTIME)) {
-				ERROR("unshare(CLONE_NEWTIME) failed: %m\n");
-				free_and_exit(EXIT_FAILURE);
-			}
-			if ((timens_offsets.monotonic.set || timens_offsets.boottime.set) &&
-			    applyOCIlinuxtimeoffsets())
-				free_and_exit(EXIT_FAILURE);
-		} else {
-			timens_fd = -1;
-		}
-
 		if ((opts.namespace & CLONE_NEWNS) && prepare_jail_dev()) {
 			ERROR("prepare_jail_dev() failed\n");
 			free_and_exit(EXIT_FAILURE);
@@ -6462,10 +6493,6 @@ static void post_main(struct uloop_timeout *t)
 			setns(pidns_fd, CLONE_NEWPID);
 			close(pidns_fd);
 		}
-		if (timens_fd != -1) {
-			setns(timens_fd, CLONE_NEWTIME);
-			close(timens_fd);
-		}
 		if (opts.setns.net != -1)
 			close(opts.setns.net);
 		if (opts.setns.ns != -1)
@@ -6478,6 +6505,10 @@ static void post_main(struct uloop_timeout *t)
 			close(opts.setns.user);
 		if (opts.setns.cgroup != -1)
 			close(opts.setns.cgroup);
+#ifdef CLONE_NEWTIME
+		if (opts.setns.time != -1)
+			close(opts.setns.time);
+#endif
 		close(pipes[1]);
 		close(pipes[2]);
 		close(userns_pipe[1]);
