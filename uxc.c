@@ -282,6 +282,9 @@ static int usage(void) {
 	printf("\t\t[--write-overlay-path <path>]\t\tuse overlay on {path}\n");
 	printf("\t\t[--mounts <v1>,<v2>,...,<vN>]\t\trequire filesystems to be available\n");
 	printf("\tstart [--console] <conf>\t\tstart container <conf>\n");
+	printf("\ttrace <conf>\t\t\t\trun <conf> logging every syscall (seccomp trace)\n");
+	printf("\taudit <conf>\t\t\t\trun <conf> enforcing its seccomp filter and logging denials\n");
+	printf("\tcomplain <conf>\t\t\t\trun <conf> permitting but logging seccomp denials\n");
 	printf("\tstate <conf>\t\t\t\tget state of container <conf>\n");
 	printf("\tkill [--signal <sig>] [--all] <conf> [<sig>]\tsignal <conf> (no signal: graceful stop); --all+KILL: whole cgroup\n");
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
@@ -976,7 +979,7 @@ static int uxc_exists(char *name)
 }
 
 static int uxc_create(char *name, bool immediately, const char *console_socket,
-		      bool systemd_cgroup)
+		      bool systemd_cgroup, const char *seccomp_mode)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -984,6 +987,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	uint32_t id;
 	struct settings *usettings = NULL;
 	char *path = NULL, *jailname = NULL, *pidfile = NULL, *tmprwsize = NULL, *writepath = NULL;
+	char *seccomp_log = NULL;
 
 	void *in, *ins, *j;
 	bool found = false;
@@ -1034,6 +1038,14 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	ins = blobmsg_open_table(&req, "instances");
 	in = blobmsg_open_table(&req, name);
 	blobmsg_add_string(&req, "bundle", path);
+	if (seccomp_mode) {
+		blobmsg_add_string(&req, "seccomp_mode", seccomp_mode);
+		if (asprintf(&seccomp_log, "/tmp/uxc-%s.%s.json", name, seccomp_mode) > 0) {
+			blobmsg_add_string(&req, "seccomp_log", seccomp_log);
+			fprintf(stderr, "uxc: %s log: %s\n", seccomp_mode, seccomp_log);
+			free(seccomp_log);
+		}
+	}
 	j = blobmsg_open_table(&req, "jail");
 	blobmsg_add_string(&req, "name", jailname?:name);
 	blobmsg_add_u8(&req, "immediately", immediately);
@@ -1601,7 +1613,7 @@ static int uxc_boot(void)
 		if (uxc_exists(name))
 			continue;
 
-		if (uxc_create(name, true, NULL, false))
+		if (uxc_create(name, true, NULL, false, NULL))
 			++ret;
 
 		free(name);
@@ -1883,6 +1895,11 @@ next_global:
 		if (optind != verb_argc - 1)
 			goto usage_out;
 		ret = uxc_start(verb_argv[optind], console);
+	} else if (!strcmp(verb, "trace") || !strcmp(verb, "audit") ||
+		   !strcmp(verb, "complain")) {
+		if (verb_argc != 2)
+			goto usage_out;
+		ret = uxc_create(verb_argv[1], true, NULL, false, verb);
 	} else if (!strcmp(verb, "state")) {
 		if (verb_argc != 2)
 			goto usage_out;
@@ -1987,7 +2004,7 @@ next_global:
 		if (ret > 0)
 			reload_conf();
 
-		ret = uxc_create(name, false, console_socket, systemd_cgroup);
+		ret = uxc_create(name, false, console_socket, systemd_cgroup, NULL);
 	} else if (!strcmp(verb, "exec")) {
 		const char *process_file = NULL;
 		const char *pid_file = NULL;
