@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include <signal.h>
 #include <termios.h>
 #include <unistd.h>
@@ -47,7 +48,7 @@
 
 static bool verbose = false;
 static bool json_output = false;
-static char *confdir = UXC_ETC_CONFDIR;
+static const char *confdir = UXC_ETC_CONFDIR;
 static struct ustream_fd cufd;
 static struct ustream_fd lufd;
 
@@ -75,17 +76,23 @@ struct settings {
 
 enum {
 	OPT_CONSOLE_SOCKET	= 0x100,
+	OPT_NO_PIVOT,
+	OPT_NO_NEW_KEYRING,
+	OPT_PRESERVE_FDS,
 };
 
 static const struct option create_opts[] = {
-	{"autostart",		no_argument,		0,	'a'	},
-	{"bundle",		required_argument,	0,	'b'	},
+	{"autostart",		no_argument,		0,	'a'			},
+	{"bundle",		required_argument,	0,	'b'			},
 	{"console-socket",	required_argument,	0,	OPT_CONSOLE_SOCKET	},
-	{"mounts",		required_argument,	0,	'm'	},
-	{"pid-file",		required_argument,	0,	'p'	},
-	{"temp-overlay-size",	required_argument,	0,	't'	},
-	{"write-overlay-path",	required_argument,	0,	'w'	},
-	{0,			0,			0,	0	}
+	{"mounts",		required_argument,	0,	'm'			},
+	{"no-new-keyring",	no_argument,		0,	OPT_NO_NEW_KEYRING	},
+	{"no-pivot",		no_argument,		0,	OPT_NO_PIVOT		},
+	{"pid-file",		required_argument,	0,	'p'			},
+	{"preserve-fds",	required_argument,	0,	OPT_PRESERVE_FDS	},
+	{"temp-overlay-size",	required_argument,	0,	't'			},
+	{"write-overlay-path",	required_argument,	0,	'w'			},
+	{0,			0,			0,	0			}
 };
 
 static const struct option start_opts[] = {
@@ -240,12 +247,19 @@ static struct blob_attr *fstabinfo;
 static struct ubus_context *ctx;
 
 static int usage(void) {
-	printf("syntax: uxc <command> [parameters ...]\n");
+	printf("syntax: uxc [global options] <command> [parameters ...]\n");
+	printf("global options:\n");
+	printf("\t[--debug|-v] [--log <path>] [--log-format <text|json>]\n");
+	printf("\t[--root <dir>] [--rootless[=auto|true|false]]\n");
+	printf("\t[--systemd-cgroup] [--criu <path>]\n");
 	printf("commands:\n");
-	printf("\tlist [--json]\t\t\t\tlist all configured containers\n");
+	printf("\tlist [--json]\t\t\t\tlist all configured containers (runc-compatible)\n");
 	printf("\tattach <conf>\t\t\t\tattach to container console\n");
 	printf("\tcreate <conf>\t\t\t\t(re-)create <conf>\n");
 	printf("\t\t[--bundle <path>]\t\t\tOCI bundle at <path>\n");
+	printf("\t\t[--pid-file <path>]\t\t\twrite container PID to <path>\n");
+	printf("\t\t[--console-socket <path>]\t\tAF_UNIX socket to receive the PTY master fd\n");
+	printf("\t\t[--no-pivot|--no-new-keyring|--preserve-fds <N>] runc-compat, currently ignored\n");
 	printf("\t\t[--autostart]\t\t\t\tstart on boot\n");
 	printf("\t\t[--temp-overlay-size <size>]\t\tuse tmpfs overlay with {size}\n");
 	printf("\t\t[--write-overlay-path <path>]\t\tuse overlay on {path}\n");
@@ -296,7 +310,7 @@ static int conf_load(bool load_settings)
 	struct stat sb;
 	struct blob_buf *target;
 
-	if (asprintf(&globstr, "%s/%s*.json", UXC_ETC_CONFDIR, load_settings?"settings/":"") == -1)
+	if (asprintf(&globstr, "%s/%s*.json", confdir, load_settings?"settings/":"") == -1)
 		return -ENOMEM;
 
 	res = glob(globstr, gl_flags, NULL, &gl);
@@ -810,6 +824,7 @@ static int uxc_state(char *name)
 	blobmsg_add_string(&buf, "id", jail_name);
 	blobmsg_add_string(&buf, "status", rsstate?"stopped":"uninitialized");
 	blobmsg_add_string(&buf, "bundle", bundle);
+	blobmsg_close_table(&buf, blobmsg_open_table(&buf, "annotations"));
 
 	tmp = blobmsg_format_json_indent(buf.head, true, 0);
 	if (!tmp) {
@@ -828,79 +843,90 @@ static int uxc_state(char *name)
 static int uxc_list(void)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX], *ts[__STATE_MAX];
-	int rem;
+	int rem, pass;
 	struct runtime_state *rsstate = NULL;
-	struct settings *usettings = NULL;
-	char *name, *ocistatus, *status, *tmp;
-	int container_pid = -1;
-	bool autostart;
+	char *name, *bundle, *ocistatus, *status, *created, *tmp;
+	int container_pid;
 	static struct blob_buf buf;
-	void *arr, *obj;
+	void *arr, *obj, *ann;
+	size_t id_w = 2, pid_w = 3, status_w = 6, bundle_w = 6, created_w = 7;
+	char pidstr[12];
 
 	if (json_output) {
 		blob_buf_init(&buf, 0);
 		arr = blobmsg_open_array(&buf, "");
 	}
 
-	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
-		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
-		if (!tb[CONF_NAME] || !tb[CONF_PATH])
-			continue;
+	for (pass = json_output ? 1 : 0; pass < 2; pass++) {
+		if (pass == 1 && !json_output)
+			printf("%-*s %-*s %-*s %-*s %-*s %s\n",
+			       (int)id_w, "ID", (int)pid_w, "PID",
+			       (int)status_w, "STATUS", (int)bundle_w, "BUNDLE",
+			       (int)created_w, "CREATED", "OWNER");
 
-		autostart = tb[CONF_AUTOSTART] && blobmsg_get_bool(tb[CONF_AUTOSTART]);
+		blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
+			blobmsg_parse(conf_policy, __CONF_MAX, tb,
+				      blobmsg_data(cur), blobmsg_len(cur));
+			if (!tb[CONF_NAME] || !tb[CONF_PATH])
+				continue;
 
-		ocistatus = NULL;
-		container_pid = 0;
-		name = blobmsg_get_string(tb[CONF_NAME]);
-		rsstate = avl_find_element(&runtime, name, rsstate, avl);
+			name = blobmsg_get_string(tb[CONF_NAME]);
+			bundle = blobmsg_get_string(tb[CONF_PATH]);
 
-		if (rsstate && rsstate->ocistate) {
-			blobmsg_parse(state_policy, __STATE_MAX, ts, blobmsg_data(rsstate->ocistate), blobmsg_len(rsstate->ocistate));
-			ocistatus = blobmsg_get_string(ts[STATE_STATUS]);
-			container_pid = blobmsg_get_u32(ts[STATE_PID]);
-		}
+			ocistatus = NULL;
+			container_pid = 0;
+			created = "-";
+			rsstate = avl_find_element(&runtime, name, rsstate, avl);
+			if (rsstate && rsstate->ocistate) {
+				blobmsg_parse(state_policy, __STATE_MAX, ts,
+					      blobmsg_data(rsstate->ocistate),
+					      blobmsg_len(rsstate->ocistate));
+				if (ts[STATE_STATUS])
+					ocistatus = blobmsg_get_string(ts[STATE_STATUS]);
+				if (ts[STATE_PID])
+					container_pid = blobmsg_get_u32(ts[STATE_PID]);
+				if (ts[STATE_BUNDLE])
+					bundle = blobmsg_get_string(ts[STATE_BUNDLE]);
+			}
+			status = ocistatus?:(rsstate && rsstate->running)?"creating":(rsstate?"stopped":"uninitialized");
 
-		status = ocistatus?:(rsstate && rsstate->running)?"creating":"stopped";
-
-		usettings = avl_find_element(&settings, name, usettings, avl);
-
-		if (usettings && (usettings->autostart >= 0))
-			autostart = !!(usettings->autostart);
-
-		if (json_output) {
-			obj = blobmsg_open_table(&buf, "");
-			blobmsg_add_string(&buf, "name", name);
-			blobmsg_add_string(&buf, "status", status);
-			blobmsg_add_u8(&buf, "autostart", autostart);
-		} else {
-			printf("[%c] %s %s", autostart?'*':' ', name, status);
-		}
-
-		if (rsstate && !rsstate->running && (rsstate->exitcode >= 0)) {
-			if (json_output)
-				blobmsg_add_u32(&buf, "exitcode", rsstate->exitcode);
+			if (container_pid > 0)
+				snprintf(pidstr, sizeof(pidstr), "%d", container_pid);
 			else
-				printf(" exitcode: %d (%s)", rsstate->exitcode, strerror(rsstate->exitcode));
-		}
+				snprintf(pidstr, sizeof(pidstr), "%s", "-");
 
-		if (rsstate && rsstate->running && (rsstate->runtime_pid >= 0)) {
-			if (json_output)
-				blobmsg_add_u32(&buf, "runtime_pid", rsstate->runtime_pid);
-			else
-				printf(" runtime pid: %d", rsstate->runtime_pid);
-		}
+			if (pass == 0) {
+				if (strlen(name) > id_w) id_w = strlen(name);
+				if (strlen(pidstr) > pid_w) pid_w = strlen(pidstr);
+				if (strlen(status) > status_w) status_w = strlen(status);
+				if (strlen(bundle) > bundle_w) bundle_w = strlen(bundle);
+				if (strlen(created) > created_w) created_w = strlen(created);
+				continue;
+			}
 
-		if (rsstate && rsstate->running && (container_pid >= 0)) {
-			if (json_output)
-				blobmsg_add_u32(&buf, "container_pid", container_pid);
-			else
-				printf(" container pid: %d", container_pid);
+			if (json_output) {
+				obj = blobmsg_open_table(&buf, "");
+				blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
+				blobmsg_add_string(&buf, "id", name);
+				if (container_pid > 0)
+					blobmsg_add_u32(&buf, "pid", container_pid);
+				blobmsg_add_string(&buf, "status", status);
+				blobmsg_add_string(&buf, "bundle", bundle);
+				if (rsstate && rsstate->ocistate && ts[STATE_ANNOTATIONS]) {
+					blobmsg_add_blob(&buf, ts[STATE_ANNOTATIONS]);
+				} else {
+					ann = blobmsg_open_table(&buf, "annotations");
+					blobmsg_close_table(&buf, ann);
+				}
+				blobmsg_add_string(&buf, "owner", "root");
+				blobmsg_close_table(&buf, obj);
+			} else {
+				printf("%-*s %-*s %-*s %-*s %-*s %s\n",
+				       (int)id_w, name, (int)pid_w, pidstr,
+				       (int)status_w, status, (int)bundle_w, bundle,
+				       (int)created_w, created, "root");
+			}
 		}
-
-		if (!json_output)
-			printf("\n");
-		else
-			blobmsg_close_table(&buf, obj);
 	}
 
 	if (json_output) {
@@ -913,7 +939,7 @@ static int uxc_list(void)
 		printf("%s\n", tmp);
 		free(tmp);
 		blob_buf_free(&buf);
-	};
+	}
 
 	return 0;
 }
@@ -929,7 +955,8 @@ static int uxc_exists(char *name)
 	return 0;
 }
 
-static int uxc_create(char *name, bool immediately, const char *console_socket)
+static int uxc_create(char *name, bool immediately, const char *console_socket,
+		      bool systemd_cgroup)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -998,6 +1025,9 @@ static int uxc_create(char *name, bool immediately, const char *console_socket)
 		blobmsg_add_string(&req, "idmap_offset", blobmsg_get_string(tb[CONF_IDMAP_OFFSET]));
 	if (console_socket)
 		blobmsg_add_string(&req, "consolesocket", console_socket);
+
+	if (systemd_cgroup)
+		blobmsg_add_u8(&req, "systemdcgroup", 1);
 
 	blobmsg_close_table(&req, j);
 
@@ -1426,7 +1456,7 @@ static int uxc_boot(void)
 		if (uxc_exists(name))
 			continue;
 
-		if (uxc_create(name, true, NULL))
+		if (uxc_create(name, true, NULL, false))
 			++ret;
 
 		free(name);
@@ -1556,11 +1586,16 @@ int main(int argc, char **argv)
 {
 	int ret = -EINVAL;
 	const char *verb;
+	const char *log_path = NULL;
+	const char *log_format = NULL;
+	const char *criu_path = NULL;
+	bool systemd_cgroup = false;
 	int verb_argc, c, i;
 	char **verb_argv;
 
 	for (i = 1; i < argc; ++i) {
 		const char *a = argv[i];
+		const char *eq;
 
 		if (a[0] != '-')
 			break;
@@ -1575,17 +1610,76 @@ int main(int argc, char **argv)
 			return 0;
 		}
 
-		if (!strcmp(a, "-v") || !strcmp(a, "--verbose")) {
+		if (!strcmp(a, "-v") || !strcmp(a, "--verbose") || !strcmp(a, "--debug")) {
 			verbose = true;
 			continue;
 		}
 
+		if (!strcmp(a, "--systemd-cgroup")) {
+			systemd_cgroup = true;
+			continue;
+		}
+
+		eq = strchr(a, '=');
+
+#define GLOBAL_OPT_VAL(name, dst) \
+		do { \
+			size_t _n = strlen(name); \
+			if (eq && !strncmp(a, name, _n) && a[_n] == '=') { \
+				dst = eq + 1; \
+				goto next_global; \
+			} \
+			if (!strcmp(a, name)) { \
+				if (i + 1 >= argc) { \
+					fprintf(stderr, "uxc: %s requires an argument\n", a); \
+					return -EINVAL; \
+				} \
+				dst = argv[++i]; \
+				goto next_global; \
+			} \
+		} while (0)
+
+		GLOBAL_OPT_VAL("--root",       confdir);
+		GLOBAL_OPT_VAL("--log",        log_path);
+		GLOBAL_OPT_VAL("--log-format", log_format);
+		GLOBAL_OPT_VAL("--criu",       criu_path);
+#undef GLOBAL_OPT_VAL
+
+		if (eq && !strncmp(a, "--rootless=", 11))
+			continue;
+		if (!strcmp(a, "--rootless"))
+			continue;
+
 		fprintf(stderr, "uxc: unknown option '%s'\n", a);
 		return usage();
+next_global:
+		continue;
 	}
 
 	if (i >= argc)
 		return usage();
+
+	if (log_path) {
+		int fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		if (fd < 0) {
+			fprintf(stderr, "uxc: cannot open --log path %s: %m\n", log_path);
+			return -EIO;
+		}
+		if (dup2(fd, STDERR_FILENO) < 0) {
+			dprintf(fd, "uxc: dup2(--log path) failed: %m\n");
+			close(fd);
+			return -EIO;
+		}
+		close(fd);
+	}
+
+	if (log_format && strcmp(log_format, "text"))
+		fprintf(stderr, "uxc: --log-format=%s accepted but only text output is emitted\n",
+			log_format);
+
+	if (criu_path)
+		fprintf(stderr, "uxc: --criu=%s accepted but ignored (no checkpoint/restore support)\n",
+			criu_path);
 
 	verb = argv[i];
 	verb_argc = argc - i;
@@ -1705,9 +1799,9 @@ int main(int argc, char **argv)
 	} else if (!strcmp(verb, "create")) {
 		char *bundle = NULL, *pidfile = NULL;
 		char *tmprwsize = NULL, *writepath = NULL, *requiredmounts = NULL;
+		char *console_socket = NULL;
 		signed char autostart = -1;
 		char *name;
-		const char *console_socket = NULL;
 
 		while ((c = getopt_long(verb_argc, verb_argv, "ab:m:p:t:w:",
 					create_opts, NULL)) != -1) {
@@ -1720,6 +1814,15 @@ int main(int argc, char **argv)
 			case 'w': writepath = optarg; break;
 			case OPT_CONSOLE_SOCKET:
 				console_socket = optarg;
+				break;
+			case OPT_NO_PIVOT:
+				fprintf(stderr, "uxc: --no-pivot accepted but ignored (ujail does not pivot_root in this mode)\n");
+				break;
+			case OPT_NO_NEW_KEYRING:
+				fprintf(stderr, "uxc: --no-new-keyring accepted but ignored (ujail does not create kernel keyrings)\n");
+				break;
+			case OPT_PRESERVE_FDS:
+				fprintf(stderr, "uxc: --preserve-fds=%s accepted but ignored\n", optarg);
 				break;
 			default: goto usage_out;
 			}
@@ -1739,7 +1842,7 @@ int main(int argc, char **argv)
 		if (ret > 0)
 			reload_conf();
 
-		ret = uxc_create(name, false, console_socket);
+		ret = uxc_create(name, false, console_socket, systemd_cgroup);
 	} else if (!strcmp(verb, "pause") || !strcmp(verb, "resume")) {
 		char *objname;
 		uint32_t id;
