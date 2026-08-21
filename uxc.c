@@ -90,6 +90,7 @@ static const struct option start_opts[] = {
 
 static const struct option kill_opts[] = {
 	{"signal",		required_argument,	0,	's'	},
+	{"all",			no_argument,		0,	'a'	},
 	{0,			0,			0,	0	}
 };
 
@@ -246,10 +247,12 @@ static int usage(void) {
 	printf("\t\t[--mounts <v1>,<v2>,...,<vN>]\t\trequire filesystems to be available\n");
 	printf("\tstart [--console] <conf>\t\tstart container <conf>\n");
 	printf("\tstate <conf>\t\t\t\tget state of container <conf>\n");
-	printf("\tkill <conf> [--signal <signal>]\t\tsend signal to container <conf>\n");
+	printf("\tkill [--signal <sig>] [--all] <conf> [<sig>]\tsignal <conf> (no signal: graceful stop); --all+KILL: whole cgroup\n");
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
 	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
 	printf("\tdelete <conf> [--force]\t\t\tdelete <conf>\n");
+	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
+	printf("\tresume <conf>\t\t\t\tthaw a previously paused container <conf>\n");
 	return -EINVAL;
 }
 
@@ -1024,7 +1027,7 @@ static int uxc_start(const char *name, bool console)
 	return ubus_invoke(ctx, id, "start", NULL, NULL, NULL, 3000);
 }
 
-static int uxc_kill(char *name, int signal)
+static int uxc_kill(char *name, int signal, bool all)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -1057,6 +1060,8 @@ static int uxc_kill(char *name, int signal)
 	blob_buf_init(&req, 0);
 	blobmsg_add_u32(&req, "signal", signal);
 	blobmsg_add_string(&req, "name", name);
+	if (all)
+		blobmsg_add_u8(&req, "all", 1);
 
 	if (asprintf(&objname, "container.%s", name) == -1)
 		return -ENOMEM;
@@ -1437,7 +1442,7 @@ static int uxc_delete(char *name, bool force)
 
 	if (rsstate && rsstate->running) {
 		if (force) {
-			ret = uxc_kill(name, SIGKILL);
+			ret = uxc_kill(name, SIGKILL, true);
 			if (ret)
 				goto errout;
 
@@ -1620,21 +1625,39 @@ int main(int argc, char **argv)
 			goto usage_out;
 		ret = uxc_state(verb_argv[1]);
 	} else if (!strcmp(verb, "kill")) {
-		int signal = SIGTERM;
+		int signal = -1;
+		bool signal_from_flag = false;
+		bool all = false;
 
-		while ((c = getopt_long(verb_argc, verb_argv, "s:", kill_opts, NULL)) != -1) {
+		while ((c = getopt_long(verb_argc, verb_argv, "+s:a", kill_opts, NULL)) != -1) {
 			switch (c) {
 			case 's':
 				signal = get_signum(optarg);
 				if (signal < 0)
 					goto usage_out;
+				signal_from_flag = true;
+				break;
+			case 'a':
+				all = true;
 				break;
 			default: goto usage_out;
 			}
 		}
-		if (optind != verb_argc - 1)
+		if (optind == verb_argc - 2) {
+			if (signal_from_flag)
+				goto usage_out;
+			signal = get_signum(verb_argv[optind + 1]);
+			if (signal < 0)
+				goto usage_out;
+		} else if (optind != verb_argc - 1) {
 			goto usage_out;
-		ret = uxc_kill(verb_argv[optind], signal);
+		}
+		if (all && signal != SIGKILL) {
+			fprintf(stderr, "uxc: --all is only valid with SIGKILL\n");
+			ret = -ENOTSUP;
+			goto runtime_out;
+		}
+		ret = uxc_kill(verb_argv[optind], signal, all);
 	} else if (!strcmp(verb, "enable")) {
 		if (verb_argc != 2)
 			goto usage_out;
@@ -1689,6 +1712,25 @@ int main(int argc, char **argv)
 			reload_conf();
 
 		ret = uxc_create(name, false);
+	} else if (!strcmp(verb, "pause") || !strcmp(verb, "resume")) {
+		char *objname;
+		uint32_t id;
+
+		if (verb_argc != 2)
+			goto usage_out;
+		if (asprintf(&objname, "container.%s", verb_argv[1]) == -1) {
+			ret = -ENOMEM;
+			goto runtime_out;
+		}
+		ret = ubus_lookup_id(ctx, objname, &id);
+		free(objname);
+		if (ret) {
+			ret = -ENOENT;
+			goto runtime_out;
+		}
+		ret = ubus_invoke(ctx, id, verb, NULL, NULL, NULL, 3000);
+		if (ret)
+			ret = -EIO;
 	} else {
 		fprintf(stderr, "uxc: unknown command '%s'\n", verb);
 		goto usage_out;
