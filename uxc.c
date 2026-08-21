@@ -73,9 +73,14 @@ struct settings {
 	struct blob_attr *volumes;
 };
 
+enum {
+	OPT_CONSOLE_SOCKET	= 0x100,
+};
+
 static const struct option create_opts[] = {
 	{"autostart",		no_argument,		0,	'a'	},
 	{"bundle",		required_argument,	0,	'b'	},
+	{"console-socket",	required_argument,	0,	OPT_CONSOLE_SOCKET	},
 	{"mounts",		required_argument,	0,	'm'	},
 	{"pid-file",		required_argument,	0,	'p'	},
 	{"temp-overlay-size",	required_argument,	0,	't'	},
@@ -661,8 +666,10 @@ static int uxc_attach(const char *container_name)
 	struct ubus_context *ctx;
 	uint32_t id;
 	static struct blob_buf req;
-	int client_fd, server_fd, tty_fd;
+	int client_fd = -1, server_fd = -1, tty_fd = -1;
 	struct termios oldtermios;
+	bool tty_raw = false;
+	int rc;
 
 	ctx = ubus_connect(NULL);
 	if (!ctx) {
@@ -670,64 +677,64 @@ static int uxc_attach(const char *container_name)
 		return -ECONNREFUSED;
 	}
 
-	/* open pseudo-terminal pair */
 	client_fd = posix_openpt(O_RDWR | O_NOCTTY);
 	if (client_fd < 0) {
 		fprintf(stderr, "can't create virtual console!\n");
-		ubus_free(ctx);
-		return -EIO;
+		rc = -EIO;
+		goto out;
 	}
-	setup_tios(client_fd, &oldtermios);
 	grantpt(client_fd);
 	unlockpt(client_fd);
 	server_fd = open(ptsname(client_fd), O_RDWR | O_NOCTTY);
 	if (server_fd < 0) {
 		fprintf(stderr, "can't open virtual console!\n");
-		close(client_fd);
-		ubus_free(ctx);
-		return -EIO;
+		rc = -EIO;
+		goto out;
 	}
-	setup_tios(server_fd, &oldtermios);
 
 	tty_fd = open("/dev/tty", O_RDWR);
 	if (tty_fd < 0) {
 		fprintf(stderr, "can't open local console!\n");
-		close(server_fd);
-		close(client_fd);
-		ubus_free(ctx);
-		return -EIO;
+		rc = -EIO;
+		goto out;
 	}
-	setup_tios(tty_fd, &oldtermios);
+	if (!setup_tios(tty_fd, &oldtermios))
+		tty_raw = true;
 
-	/* register server-side with procd */
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", container_name);
 	blobmsg_add_string(&req, "instance", container_name);
 
-	if (ubus_lookup_id(ctx, "container", &id) ||
-	    ubus_invoke_fd(ctx, id, "console_attach", req.head, NULL, NULL, 3000, server_fd)) {
-		fprintf(stderr, "ubus request failed\n");
-		close(tty_fd);
-		close(server_fd);
-		close(client_fd);
+	if (ubus_lookup_id(ctx, "container", &id)) {
+		fprintf(stderr, "uxc: 'container' ubus object not found\n");
 		blob_buf_free(&req);
-		ubus_free(ctx);
-		return -ENXIO;
+		rc = -ENXIO;
+		goto out;
+	}
+	rc = ubus_invoke_fd(ctx, id, "console_attach", req.head, NULL, NULL, 3000, server_fd);
+	blob_buf_free(&req);
+	if (rc) {
+		if (rc == UBUS_STATUS_NOT_SUPPORTED)
+			fprintf(stderr, "uxc: container '%s' has no console; "
+				"re-create it with console=true (OCI process.terminal=true)\n",
+				container_name);
+		else
+			fprintf(stderr, "uxc: console_attach failed: %s\n", ubus_strerror(rc));
+		rc = -ENXIO;
+		goto out;
 	}
 
 	close(server_fd);
-	blob_buf_free(&req);
+	server_fd = -1;
 	ubus_free(ctx);
+	ctx = NULL;
 
 	uloop_init();
 
-	/* forward between stdio and client_fd until detach is requested */
 	lufd.stream.notify_read = local_cb;
 	ustream_fd_init(&lufd, tty_fd);
 
 	cufd.stream.notify_read = client_cb;
-/* ToDo: handle remote close and other events */
-//	cufd.stream.notify_state = client_state_cb;
 	ustream_fd_init(&cufd, client_fd);
 
 	fprintf(stderr, "attaching to jail console. press [CTRL]+[B] to exit.\n");
@@ -736,12 +743,22 @@ static int uxc_attach(const char *container_name)
 	close(2);
 	uloop_run();
 
-	tcsetattr(tty_fd, TCSAFLUSH, &oldtermios);
 	ustream_free(&lufd.stream);
 	ustream_free(&cufd.stream);
-	close(client_fd);
+	rc = 0;
 
-	return 0;
+out:
+	if (tty_raw && tty_fd >= 0)
+		tcsetattr(tty_fd, TCSAFLUSH, &oldtermios);
+	if (tty_fd >= 0)
+		close(tty_fd);
+	if (server_fd >= 0)
+		close(server_fd);
+	if (client_fd >= 0)
+		close(client_fd);
+	if (ctx)
+		ubus_free(ctx);
+	return rc;
 }
 
 static int uxc_state(char *name)
@@ -912,7 +929,7 @@ static int uxc_exists(char *name)
 	return 0;
 }
 
-static int uxc_create(char *name, bool immediately)
+static int uxc_create(char *name, bool immediately, const char *console_socket)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
@@ -979,6 +996,9 @@ static int uxc_create(char *name, bool immediately)
 
 	if (tb[CONF_IDMAP_OFFSET])
 		blobmsg_add_string(&req, "idmap_offset", blobmsg_get_string(tb[CONF_IDMAP_OFFSET]));
+	if (console_socket)
+		blobmsg_add_string(&req, "consolesocket", console_socket);
+
 	blobmsg_close_table(&req, j);
 
 	if (writepath)
@@ -1406,7 +1426,7 @@ static int uxc_boot(void)
 		if (uxc_exists(name))
 			continue;
 
-		if (uxc_create(name, true))
+		if (uxc_create(name, true, NULL))
 			++ret;
 
 		free(name);
@@ -1687,6 +1707,7 @@ int main(int argc, char **argv)
 		char *tmprwsize = NULL, *writepath = NULL, *requiredmounts = NULL;
 		signed char autostart = -1;
 		char *name;
+		const char *console_socket = NULL;
 
 		while ((c = getopt_long(verb_argc, verb_argv, "ab:m:p:t:w:",
 					create_opts, NULL)) != -1) {
@@ -1697,6 +1718,9 @@ int main(int argc, char **argv)
 			case 'p': pidfile = optarg; break;
 			case 't': tmprwsize = optarg; break;
 			case 'w': writepath = optarg; break;
+			case OPT_CONSOLE_SOCKET:
+				console_socket = optarg;
+				break;
 			default: goto usage_out;
 			}
 		}
@@ -1715,7 +1739,7 @@ int main(int argc, char **argv)
 		if (ret > 0)
 			reload_conf();
 
-		ret = uxc_create(name, false);
+		ret = uxc_create(name, false, console_socket);
 	} else if (!strcmp(verb, "pause") || !strcmp(verb, "resume")) {
 		char *objname;
 		uint32_t id;
@@ -1735,6 +1759,10 @@ int main(int argc, char **argv)
 		ret = ubus_invoke(ctx, id, verb, NULL, NULL, NULL, 3000);
 		if (ret)
 			ret = -EIO;
+	} else if (!strcmp(verb, "events") || !strcmp(verb, "checkpoint") ||
+		   !strcmp(verb, "restore")) {
+		fprintf(stderr, "uxc: '%s' is not supported\n", verb);
+		ret = -ENOTSUP;
 	} else {
 		fprintf(stderr, "uxc: unknown command '%s'\n", verb);
 		goto usage_out;
