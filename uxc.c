@@ -45,6 +45,7 @@
 
 #include "container.h"
 #include "log.h"
+#include "stdio-fds.h"
 
 #define UXC_VERSION "0.3"
 #define UXC_ETC_CONFDIR "/etc/uxc"
@@ -53,6 +54,7 @@
 
 static bool verbose = false;
 static bool json_output = false;
+static int stdio_fds[STDIO_FDS_NUM] = { STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO };
 static const char *confdir = UXC_ETC_CONFDIR;
 static struct ustream_fd cufd;
 static struct ustream_fd lufd;
@@ -1449,9 +1451,6 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (tmprwsize)
 		blobmsg_add_string(&req, "tmpoverlaysize", tmprwsize);
 
-	blobmsg_add_u8(&req, "stdout", 1);
-	blobmsg_add_u8(&req, "stderr", 1);
-
 	blobmsg_close_table(&req, in);
 	blobmsg_close_table(&req, ins);
 
@@ -1478,7 +1477,8 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (uxc_wait_arm(&wait_state))
 		fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
 
-	if (ubus_invoke(ctx, id, "add", req.head, NULL, NULL, 3000)) {
+	if (ubus_invoke_fd(ctx, id, "add", req.head, NULL, NULL, 3000,
+			   stdio_fds_send(stdio_fds))) {
 		blob_buf_free(&req);
 		uxc_wait_disarm();
 		return -EIO;
@@ -1625,8 +1625,9 @@ static int uxc_exec(const char *name, const char *process_file,
 		return -ENOENT;
 	}
 
-	ret = ubus_invoke(ctx, id, "exec", req.head,
-			  uxc_exec_reply_cb, &reply, 0);
+	ret = ubus_invoke_fd(ctx, id, "exec", req.head,
+			     uxc_exec_reply_cb, &reply, 0,
+			     tty ? -1 : stdio_fds_send(stdio_fds));
 	blob_buf_free(&req);
 
 	if (ret)
@@ -2576,6 +2577,12 @@ next_global:
 		int fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 		if (fd < 0) {
 			fprintf(stderr, "uxc: cannot open --log path %s: %m\n", log_path);
+			return -EIO;
+		}
+		stdio_fds[2] = dup(STDERR_FILENO);
+		if (stdio_fds[2] < 0) {
+			fprintf(stderr, "uxc: cannot preserve stderr: %m\n");
+			close(fd);
 			return -EIO;
 		}
 		if (dup2(fd, STDERR_FILENO) < 0) {
