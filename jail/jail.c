@@ -101,7 +101,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
+#define OPT_ARGS	"a:b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
 
 #define JAIL_MAX_CREDENTIALS	16
 static const char *cred_targets[JAIL_MAX_CREDENTIALS];
@@ -156,6 +156,7 @@ static struct {
 	struct blob_attr *gidmappings;
 	unsigned int idmap_offset;
 	char *pidfile;
+	int notify_fd;
 	struct sysctl_val **sysctl;
 	int no_new_privs;
 	int namespace;
@@ -1343,10 +1344,91 @@ static int build_jail_fs(void)
 
 static bool exit_from_child;
 static void emit_instance_event(const char *event);
+static bool pidfile_sibling(const char *pidfile, const char *name, char *path, size_t len)
+{
+	char *slash;
+
+	if (!pidfile)
+		return false;
+
+	if (snprintf(path, len, "%s", pidfile) >= (int)len)
+		return false;
+
+	slash = strrchr(path, '/');
+	if (!slash)
+		return false;
+
+	if ((size_t)(slash - path) + strlen(name) + 1 >= len)
+		return false;
+
+	strcpy(slash, name);
+
+	return true;
+}
+
+static void jail_write_exit_status(const char *pidfile, int status)
+{
+	char path[PATH_MAX], tmp[PATH_MAX];
+	char buf[12];
+	int fd, len;
+
+	if (!pidfile_sibling(pidfile, "/exit_status", path, sizeof(path)))
+		return;
+
+	if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
+		return;
+
+	len = snprintf(buf, sizeof(buf), "%d", status);
+	if (len < 0 || len >= (int)sizeof(buf))
+		return;
+
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0)
+		return;
+
+	if (write(fd, buf, len) != len) {
+		close(fd);
+		unlink(tmp);
+		return;
+	}
+
+	if (close(fd)) {
+		unlink(tmp);
+		return;
+	}
+
+	if (rename(tmp, path))
+		unlink(tmp);
+}
+
+static void jail_clear_exit_status(const char *pidfile)
+{
+	char path[PATH_MAX];
+
+	if (pidfile_sibling(pidfile, "/exit_status", path, sizeof(path)))
+		unlink(path);
+}
+
+static void notify_signal(int fd)
+{
+	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+
+	if (fd < 0)
+		return;
+
+	if (poll(&pfd, 1, 0) > 0)
+		return;
+
+	syscall(SYS_pidfd_send_signal, fd, SIGCHLD, NULL, 0);
+}
+
 static bool jail_ptrace_seccomp(void);
 
 static void free_and_exit(int ret)
 {
+	if (!exit_from_child)
+		notify_signal(opts.notify_fd);
+
 	if (!exit_from_child && opts.jail_network_started) {
 		jail_network_teardown();
 		opts.jail_network_started = false;
@@ -1984,6 +2066,7 @@ static void usage(void)
 	fprintf(stderr, "  -J <dir>\tcreate container from OCI bundle\n");
 	fprintf(stderr, "  -i\t\tstart container immediately\n");
 	fprintf(stderr, "  -P <pidfile>\tcreate <pidfile>\n");
+	fprintf(stderr, "  -a <fd>\tsend SIGCHLD through inherited pidfd <fd> once the container is gone\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -2053,6 +2136,7 @@ static void jail_process_handler(struct uloop_process *c, int ret)
 		jail_return_code = 128 + WTERMSIG(ret);
 		INFO("jail (%d) exited with signal: %d\n", c->pid, WTERMSIG(ret));
 	}
+	jail_write_exit_status(opts.pidfile, jail_return_code);
 	jail_running = 0;
 	poststop();
 }
@@ -4857,6 +4941,9 @@ struct container_exec {
 	struct ubus_context *ctx;
 	struct ubus_request_data req;
 	struct uloop_process exec_proc;
+	char *pidfile;
+	int notify_fd;
+	int stdio_fds[STDIO_FDS_NUM];
 };
 
 static struct container_exec *current_exec;
@@ -4892,18 +4979,28 @@ static void container_exec_free_strarray(char **a)
 	free(a);
 }
 
+static int wait_status_decode(int wstatus)
+{
+	if (WIFEXITED(wstatus))
+		return WEXITSTATUS(wstatus);
+
+	if (WIFSIGNALED(wstatus))
+		return 128 + WTERMSIG(wstatus);
+
+	return 255;
+}
+
 static void container_exec_done_reply(struct uloop_process *p, int wstatus)
 {
 	struct container_exec *e = container_of(p, struct container_exec, exec_proc);
 	static struct blob_buf bb;
-	int status;
+	int status = wait_status_decode(wstatus);
 
-	if (WIFEXITED(wstatus))
-		status = WEXITSTATUS(wstatus);
-	else if (WIFSIGNALED(wstatus))
-		status = 128 + WTERMSIG(wstatus);
-	else
-		status = 255;
+	jail_write_exit_status(e->pidfile, status);
+	stdio_fds_close(e->stdio_fds);
+	notify_signal(e->notify_fd);
+	if (e->notify_fd >= 0)
+		close(e->notify_fd);
 
 	blob_buf_init(&bb, 0);
 	blobmsg_add_u32(&bb, "status", status);
@@ -4911,6 +5008,7 @@ static void container_exec_done_reply(struct uloop_process *p, int wstatus)
 	ubus_complete_deferred_request(e->ctx, &e->req, 0);
 	if (current_exec == e)
 		current_exec = NULL;
+	free(e->pidfile);
 	free(e);
 }
 
@@ -4918,8 +5016,15 @@ static void container_exec_done_reap(struct uloop_process *p, int wstatus)
 {
 	struct container_exec *e = container_of(p, struct container_exec, exec_proc);
 
+	jail_write_exit_status(e->pidfile, wait_status_decode(wstatus));
+	stdio_fds_close(e->stdio_fds);
+	notify_signal(e->notify_fd);
+	if (e->notify_fd >= 0)
+		close(e->notify_fd);
+
 	if (current_exec == e)
 		current_exec = NULL;
+	free(e->pidfile);
 	free(e);
 }
 
@@ -4957,6 +5062,7 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 	int pipe_fds[2] = { -1, -1 };
 	int stdio_fds[STDIO_FDS_NUM] = { -1, -1, -1 };
 	int stdio_sock;
+	int notify_fd = -1;
 	pid_t exec_pid, grandchild = -1;
 	struct container_exec *e = NULL;
 	char nspath[64];
@@ -5000,8 +5106,8 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 
 	stdio_sock = ubus_request_get_caller_fd(req);
 	if (stdio_sock > -1) {
-		if (stdio_fds_recv(stdio_sock, stdio_fds))
-			ERROR("exec: cannot receive caller stdio: %m\n");
+		if (stdio_notify_fds_recv(stdio_sock, stdio_fds, &notify_fd))
+			ERROR("exec: cannot receive caller descriptors: %m\n");
 
 		close(stdio_sock);
 	}
@@ -5010,8 +5116,8 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 		      blobmsg_data(msg), blobmsg_data_len(msg));
 
 	if (!tb[CONTAINER_EXEC_ATTR_ARGS]) {
-		stdio_fds_close(stdio_fds);
-		return UBUS_STATUS_INVALID_ARGUMENT;
+		rc = UBUS_STATUS_INVALID_ARGUMENT;
+		goto out;
 	}
 
 	args = container_exec_strarray(tb[CONTAINER_EXEC_ATTR_ARGS]);
@@ -5319,6 +5425,7 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 			ERROR("exec: waitpid(%d): %m\n", grandchild);
 			_exit(126);
 		}
+
 		if (WIFEXITED(wstatus))
 			_exit(WEXITSTATUS(wstatus));
 		_exit(128 + WTERMSIG(wstatus));
@@ -5353,8 +5460,6 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 	close(pipe_fds[0]);
 	pipe_fds[0] = -1;
 
-	stdio_fds_close(stdio_fds);
-
 	for (i = 0; i < (int)ARRAY_SIZE(ns_names); i++)
 		if (ns_fds[i] >= 0) {
 			close(ns_fds[i]);
@@ -5379,6 +5484,8 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 	free(exec_additional_gids);
 	exec_additional_gids = NULL;
 
+	jail_clear_exit_status(pidfile);
+
 	if (pidfile && grandchild > 0) {
 		FILE *pf = fopen(pidfile, "w");
 		if (pf) {
@@ -5389,11 +5496,23 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 
 	e = calloc(1, sizeof(*e));
 	if (!e) {
+		stdio_fds_close(stdio_fds);
+		if (notify_fd >= 0)
+			close(notify_fd);
 		kill(exec_pid, SIGKILL);
 		return UBUS_STATUS_UNKNOWN_ERROR;
 	}
+
+	for (i = 0; i < STDIO_FDS_NUM; i++) {
+		e->stdio_fds[i] = stdio_fds[i];
+		stdio_fds[i] = -1;
+	}
 	e->ctx = ctx;
 	e->exec_proc.pid = exec_pid;
+	e->notify_fd = notify_fd;
+	notify_fd = -1;
+	if (pidfile)
+		e->pidfile = strdup(pidfile);
 	current_exec = e;
 
 	if (detach) {
@@ -5416,6 +5535,8 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 
 out:
 	stdio_fds_close(stdio_fds);
+	if (notify_fd >= 0)
+		close(notify_fd);
 	for (i = 0; i < (int)ARRAY_SIZE(ns_names); i++)
 		if (ns_fds[i] >= 0)
 			close(ns_fds[i]);
@@ -5440,6 +5561,8 @@ jail_writepid(pid_t pid)
 
 	if (!opts.pidfile)
 		return 0;
+
+	jail_clear_exit_status(opts.pidfile);
 
 	_pidfile = fopen(opts.pidfile, "w");
 	if (_pidfile == NULL)
@@ -5572,6 +5695,7 @@ int main(int argc, char **argv)
 	opts.setns.user = -1;
 	opts.setns.cgroup = -1;
 	opts.setns.time = -1;
+	opts.notify_fd = -1;
 
 	/* default 5 seconds timeout after SIGTERM before SIGKILL is sent */
 	opts.term_timeout = 5;
@@ -5740,6 +5864,13 @@ int main(int argc, char **argv)
 			break;
 		case 'P':
 			opts.pidfile = optarg;
+			break;
+		case 'a':
+			opts.notify_fd = atoi(optarg);
+			if (opts.notify_fd <= STDERR_FILENO ||
+			    fcntl(opts.notify_fd, F_SETFD, FD_CLOEXEC) ||
+			    syscall(SYS_pidfd_send_signal, opts.notify_fd, 0, NULL, 0))
+				opts.notify_fd = -1;
 			break;
 		case 'Y':
 			opts.console_socket = optarg;

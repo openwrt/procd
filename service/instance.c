@@ -304,6 +304,7 @@ instance_gen_setns_argstr(struct blob_attr *attr)
 static inline int
 jail_run(struct service_instance *in, char **argv)
 {
+	static char notify_fd_str[12];
 	char *term_timeout_str;
 	struct blobmsg_list_node *var;
 	struct jail *jail = &in->jail;
@@ -427,6 +428,12 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = jail->envfile;
 	}
 
+	if (in->notify_fd > -1) {
+		snprintf(notify_fd_str, sizeof(notify_fd_str), "%d", in->notify_fd);
+		argv[argc++] = "-a";
+		argv[argc++] = notify_fd_str;
+	}
+
 	if (jail->systemd_cgroup)
 		argv[argc++] = "-Z";
 
@@ -518,6 +525,7 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	char **argv;
 	int argc = 1; /* NULL terminated */
 	int rem, _stdin;
+	int jail_argc = in->jail.argc;
 	bool seccomp = !in->trace && !in->has_jail && in->seccomp;
 	bool setlbf = _stdout >= 0;
 
@@ -542,7 +550,12 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	if (in->trace || seccomp)
 		argc += 1;
 
-	argv = alloca(sizeof(char *) * (argc + in->jail.argc));
+	if (in->has_jail && in->notify_fd > -1) {
+		fcntl(in->notify_fd, F_SETFD, 0);
+		jail_argc += 2;
+	}
+
+	argv = alloca(sizeof(char *) * (argc + jail_argc));
 	argc = 0;
 
 #ifdef SECCOMP_SUPPORT
@@ -557,9 +570,9 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 
 	if (in->has_jail) {
 		argc = jail_run(in, argv);
-		if (argc != in->jail.argc)
+		if (argc != jail_argc)
 			ULOG_WARN("expected %i jail params, used %i for %s::%s\n",
-				in->jail.argc, argc, in->srv->name, in->name);
+				jail_argc, argc, in->srv->name, in->name);
 	}
 
 	blobmsg_for_each_attr(cur, in->command, rem)
@@ -1708,6 +1721,9 @@ instance_update(struct service_instance *in, struct service_instance *in_new)
 	if (in_new->stdio_fd[1] > -1)
 		instance_stdio_set(in, in_new->stdio_fd);
 
+	if (in_new->notify_fd > -1)
+		instance_notify_set(in, &in_new->notify_fd);
+
 	if (!running || stopping) {
 		instance_config_move(in, in_new);
 		instance_start(in);
@@ -1750,12 +1766,32 @@ instance_stdio_set(struct service_instance *in, int *fds)
 	}
 }
 
+static void
+instance_free_notify_fd(struct service_instance *in)
+{
+	if (in->notify_fd < 0)
+		return;
+
+	close(in->notify_fd);
+	in->notify_fd = -1;
+}
+
+void
+instance_notify_set(struct service_instance *in, int *fd)
+{
+	instance_free_notify_fd(in);
+
+	in->notify_fd = *fd;
+	*fd = -1;
+}
+
 void
 instance_free(struct service_instance *in)
 {
 	service_data_trigger(&in->data);
 	instance_free_stdio(in);
 	instance_free_stdio_fds(in);
+	instance_free_notify_fd(in);
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	uloop_timeout_cancel(&in->watchdog.timeout);
@@ -1800,6 +1836,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->immediately = false;
 
 	in->stdio_fd[0] = in->stdio_fd[1] = in->stdio_fd[2] = -1;
+	in->notify_fd = -1;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;

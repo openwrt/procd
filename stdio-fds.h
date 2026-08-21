@@ -19,36 +19,41 @@
 #include <unistd.h>
 
 #define STDIO_FDS_NUM	3
+#define FDS_NUM_MAX	(STDIO_FDS_NUM + 1)
 
 /*
- * ubus carries a single file descriptor per request, so the three standard
- * descriptors travel as SCM_RIGHTS over a socket pair whose receiving end is
- * what gets passed to ubus_invoke_fd().
+ * ubus carries a single file descriptor per request, so descriptor sets
+ * travel as SCM_RIGHTS over a socket pair whose receiving end is what gets
+ * passed to ubus_invoke_fd(). The payload byte carries the count.
  */
-static inline int stdio_fds_send(const int *fds)
+static inline int fds_send(const int *fds, int num)
 {
-	char cmsgbuf[CMSG_SPACE(STDIO_FDS_NUM * sizeof(int))];
+	char cmsgbuf[CMSG_SPACE(FDS_NUM_MAX * sizeof(int))];
 	struct msghdr msg = { 0 };
 	struct cmsghdr *cmsg;
 	struct iovec iov;
-	char dummy = 0;
+	char count;
 	int sp[2];
+
+	if (num < 1 || num > FDS_NUM_MAX)
+		return -1;
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp))
 		return -1;
 
-	iov.iov_base = &dummy;
-	iov.iov_len = sizeof(dummy);
+	count = num;
+	iov.iov_base = &count;
+	iov.iov_len = sizeof(count);
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 	msg.msg_control = cmsgbuf;
-	msg.msg_controllen = sizeof(cmsgbuf);
+	msg.msg_controllen = CMSG_SPACE(num * sizeof(int));
 
 	cmsg = CMSG_FIRSTHDR(&msg);
 	cmsg->cmsg_level = SOL_SOCKET;
 	cmsg->cmsg_type = SCM_RIGHTS;
-	cmsg->cmsg_len = CMSG_LEN(STDIO_FDS_NUM * sizeof(int));
-	memcpy(CMSG_DATA(cmsg), fds, STDIO_FDS_NUM * sizeof(int));
+	cmsg->cmsg_len = CMSG_LEN(num * sizeof(int));
+	memcpy(CMSG_DATA(cmsg), fds, num * sizeof(int));
 
 	if (sendmsg(sp[0], &msg, 0) < 0) {
 		close(sp[0]);
@@ -61,33 +66,87 @@ static inline int stdio_fds_send(const int *fds)
 	return sp[1];
 }
 
-static inline int stdio_fds_recv(int sock, int *fds)
+static inline int fds_recv(int sock, int *fds, int max)
 {
-	char cmsgbuf[CMSG_SPACE(STDIO_FDS_NUM * sizeof(int))];
+	char cmsgbuf[CMSG_SPACE(FDS_NUM_MAX * sizeof(int))];
+	int tmp[FDS_NUM_MAX];
 	struct msghdr msg = { 0 };
 	struct cmsghdr *cmsg;
 	struct iovec iov;
-	char dummy;
+	char count;
+	int num, i;
 
-	iov.iov_base = &dummy;
-	iov.iov_len = sizeof(dummy);
+	iov.iov_base = &count;
+	iov.iov_len = sizeof(count);
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 	msg.msg_control = cmsgbuf;
 	msg.msg_controllen = sizeof(cmsgbuf);
 
-	if (recvmsg(sock, &msg, MSG_CMSG_CLOEXEC) < 0)
+	if (recvmsg(sock, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT) < 1)
 		return -1;
 
 	cmsg = CMSG_FIRSTHDR(&msg);
 	if (!cmsg || cmsg->cmsg_level != SOL_SOCKET ||
 	    cmsg->cmsg_type != SCM_RIGHTS ||
-	    cmsg->cmsg_len != CMSG_LEN(STDIO_FDS_NUM * sizeof(int)))
+	    cmsg->cmsg_len < CMSG_LEN(sizeof(int)) ||
+	    cmsg->cmsg_len > CMSG_LEN(FDS_NUM_MAX * sizeof(int)))
 		return -1;
 
-	memcpy(fds, CMSG_DATA(cmsg), STDIO_FDS_NUM * sizeof(int));
+	num = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+	memcpy(tmp, CMSG_DATA(cmsg), num * sizeof(int));
 
-	return 0;
+	if (num != count || num > max) {
+		for (i = 0; i < num; i++)
+			close(tmp[i]);
+		return -1;
+	}
+
+	memcpy(fds, tmp, num * sizeof(int));
+
+	return num;
+}
+
+static inline int stdio_notify_fds_send(const int *stdio_fds, int notify_fd)
+{
+	int fds[FDS_NUM_MAX];
+	int num = 0;
+
+	if (stdio_fds) {
+		memcpy(fds, stdio_fds, STDIO_FDS_NUM * sizeof(int));
+		num = STDIO_FDS_NUM;
+	}
+
+	if (notify_fd > -1)
+		fds[num++] = notify_fd;
+
+	if (!num)
+		return -1;
+
+	return fds_send(fds, num);
+}
+
+static inline int stdio_notify_fds_recv(int sock, int *stdio_fds, int *notify_fd)
+{
+	int fds[FDS_NUM_MAX];
+	int num;
+
+	num = fds_recv(sock, fds, FDS_NUM_MAX);
+	switch (num) {
+	case 1:
+		*notify_fd = fds[0];
+		return 0;
+	case STDIO_FDS_NUM + 1:
+		*notify_fd = fds[STDIO_FDS_NUM];
+		/* fallthrough */
+	case STDIO_FDS_NUM:
+		memcpy(stdio_fds, fds, STDIO_FDS_NUM * sizeof(int));
+		return 0;
+	default:
+		while (num > 0)
+			close(fds[--num]);
+		return -1;
+	}
 }
 
 static inline void stdio_fds_close(int *fds)

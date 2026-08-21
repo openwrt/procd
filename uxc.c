@@ -30,6 +30,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -1303,12 +1304,34 @@ static void uxc_instance_drop(const char *name)
 	blob_buf_free(&req);
 }
 
+static int uxc_invoker_pidfd(void)
+{
+	pid_t ppid;
+	int fd;
+
+	ppid = getppid();
+	fd = syscall(SYS_pidfd_open, ppid, 0);
+	if (fd < 0) {
+		fprintf(stderr, "uxc: warning: cannot watch the invoker, it will not be notified: %s\n",
+			strerror(errno));
+		return -1;
+	}
+
+	if (getppid() != ppid) {
+		close(fd);
+		return -1;
+	}
+
+	return fd;
+}
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode)
 {
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	int rem, ret = 0;
+	int notify_fd;
 	uint32_t id;
 	struct settings *usettings = NULL;
 	char *path = NULL, *jailname = NULL, *pidfile = NULL, *tmprwsize = NULL, *writepath = NULL;
@@ -1477,8 +1500,13 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (uxc_wait_arm(&wait_state))
 		fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
 
-	if (ubus_invoke_fd(ctx, id, "add", req.head, NULL, NULL, 3000,
-			   stdio_fds_send(stdio_fds))) {
+	notify_fd = uxc_invoker_pidfd();
+	ret = ubus_invoke_fd(ctx, id, "add", req.head, NULL, NULL, 3000,
+			     stdio_notify_fds_send(stdio_fds, notify_fd));
+	if (notify_fd >= 0)
+		close(notify_fd);
+
+	if (ret) {
 		blob_buf_free(&req);
 		uxc_wait_disarm();
 		return -EIO;
@@ -1574,6 +1602,7 @@ static int uxc_exec(const char *name, const char *process_file,
 	struct uxc_exec_reply reply = { .status = 0 };
 	char *objname;
 	uint32_t id;
+	int notify_fd;
 	int ret;
 
 	if (tty && !console_socket) {
@@ -1625,9 +1654,12 @@ static int uxc_exec(const char *name, const char *process_file,
 		return -ENOENT;
 	}
 
+	notify_fd = uxc_invoker_pidfd();
 	ret = ubus_invoke_fd(ctx, id, "exec", req.head,
 			     uxc_exec_reply_cb, &reply, 0,
-			     tty ? -1 : stdio_fds_send(stdio_fds));
+			     stdio_notify_fds_send(tty ? NULL : stdio_fds, notify_fd));
+	if (notify_fd >= 0)
+		close(notify_fd);
 	blob_buf_free(&req);
 
 	if (ret)
