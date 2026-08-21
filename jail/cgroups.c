@@ -131,6 +131,16 @@ static int cgroups_write_attr(const char *attr, const char *val, size_t vlen)
 	return ret;
 }
 
+int cgroups_kill_all(void)
+{
+	return cgroups_write_attr("cgroup.kill", "1", 1);
+}
+
+int cgroups_set_frozen(bool frozen)
+{
+	return cgroups_write_attr("cgroup.freeze", frozen ? "1" : "0", 1);
+}
+
 int cgroups_reclaim(int64_t bytes, int32_t swappiness)
 {
 	char val[64];

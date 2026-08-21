@@ -3982,6 +3982,7 @@ enum {
 	OCI_STATE_CREATING,
 	OCI_STATE_CREATED,
 	OCI_STATE_RUNNING,
+	OCI_STATE_PAUSED,
 	OCI_STATE_STOPPED,
 };
 
@@ -4020,6 +4021,9 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 		case OCI_STATE_RUNNING:
 			statusstr = "running";
 			break;
+		case OCI_STATE_PAUSED:
+			statusstr = "paused";
+			break;
 		case OCI_STATE_STOPPED:
 			statusstr = "stopped";
 			break;
@@ -4032,7 +4036,8 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_add_string(&bb, "id", opts.name);
 	blobmsg_add_string(&bb, "status", statusstr);
 	if (jail_oci_state == OCI_STATE_CREATED ||
-	    jail_oci_state == OCI_STATE_RUNNING) {
+	    jail_oci_state == OCI_STATE_RUNNING ||
+	    jail_oci_state == OCI_STATE_PAUSED) {
 		int64_t v;
 
 		blobmsg_add_u32(&bb, "pid", jail_process.pid);
@@ -4084,11 +4089,13 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 
 enum {
 	CONTAINER_KILL_ATTR_SIGNAL,
+	CONTAINER_KILL_ATTR_ALL,
 	__CONTAINER_KILL_ATTR_MAX,
 };
 
 static const struct blobmsg_policy container_kill_attrs[__CONTAINER_KILL_ATTR_MAX] = {
 	[CONTAINER_KILL_ATTR_SIGNAL] = { "signal", BLOBMSG_TYPE_INT32 },
+	[CONTAINER_KILL_ATTR_ALL]    = { "all",    BLOBMSG_TYPE_BOOL  },
 };
 
 static int
@@ -4098,6 +4105,7 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	struct blob_attr *tb[__CONTAINER_KILL_ATTR_MAX], *cur;
 	int sig = SIGTERM;
+	bool all = false;
 
 	blobmsg_parse(container_kill_attrs, __CONTAINER_KILL_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
@@ -4105,8 +4113,21 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	if (cur)
 		sig = blobmsg_get_u32(cur);
 
+	cur = tb[CONTAINER_KILL_ATTR_ALL];
+	if (cur)
+		all = blobmsg_get_bool(cur);
+
 	if (jail_oci_state == OCI_STATE_CREATING)
 		return UBUS_STATUS_NOT_FOUND;
+	if (jail_oci_state == OCI_STATE_PAUSED && sig != SIGKILL && sig != 0)
+		return UBUS_STATUS_PERMISSION_DENIED;
+
+	if (all && sig == SIGKILL) {
+		int rc = cgroups_kill_all();
+		if (rc == 0)
+			return 0;
+		DEBUG("cgroup.kill unavailable (%d), falling back to per-pid kill\n", rc);
+	}
 
 	if (kill(jail_process.pid, sig) == 0)
 		return 0;
@@ -4118,6 +4139,61 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	}
 
 	return UBUS_STATUS_UNKNOWN_ERROR;
+}
+
+static int
+container_handle_pause(struct ubus_context *ctx, struct ubus_object *obj,
+		      struct ubus_request_data *req, const char *method,
+		      struct blob_attr *msg)
+{
+	int rc;
+
+	if (jail_oci_state != OCI_STATE_CREATED &&
+	    jail_oci_state != OCI_STATE_RUNNING)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	rc = cgroups_set_frozen(true);
+	if (rc < 0) {
+		switch (rc) {
+		case -ENODEV:
+		case -ENOENT:
+			return UBUS_STATUS_NOT_SUPPORTED;
+		case -EINVAL:
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		default:
+			return UBUS_STATUS_UNKNOWN_ERROR;
+		}
+	}
+
+	jail_oci_state = OCI_STATE_PAUSED;
+	return UBUS_STATUS_OK;
+}
+
+static int
+container_handle_resume(struct ubus_context *ctx, struct ubus_object *obj,
+		       struct ubus_request_data *req, const char *method,
+		       struct blob_attr *msg)
+{
+	int rc;
+
+	if (jail_oci_state != OCI_STATE_PAUSED)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	rc = cgroups_set_frozen(false);
+	if (rc < 0) {
+		switch (rc) {
+		case -ENODEV:
+		case -ENOENT:
+			return UBUS_STATUS_NOT_SUPPORTED;
+		case -EINVAL:
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		default:
+			return UBUS_STATUS_UNKNOWN_ERROR;
+		}
+	}
+
+	jail_oci_state = OCI_STATE_RUNNING;
+	return UBUS_STATUS_OK;
 }
 
 enum {
@@ -4211,6 +4287,8 @@ static struct ubus_method container_methods[] = {
 	UBUS_METHOD_NOARG("start", handle_start),
 	UBUS_METHOD_NOARG("state", handle_state),
 	UBUS_METHOD("kill", container_handle_kill, container_kill_attrs),
+	UBUS_METHOD_NOARG("pause", container_handle_pause),
+	UBUS_METHOD_NOARG("resume", container_handle_resume),
 	UBUS_METHOD("reclaim", container_handle_reclaim, container_reclaim_attrs),
 };
 
