@@ -14,6 +14,7 @@
 
 #include <fcntl.h>
 #include <pwd.h>
+#include <sys/mount.h>
 #include <sys/reboot.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,6 +185,8 @@ static void state_enter(void)
 		break;
 
 	case STATE_HALT:
+		/* logd is gone by now, log to the console instead */
+		ulog_open(ULOG_STDIO, LOG_DAEMON, "procd");
 		// To prevent killed processes from interrupting the sleep
 		signal(SIGCHLD, SIG_IGN);
 		LOG("- SIGTERM processes -\n");
@@ -195,6 +198,17 @@ static void state_enter(void)
 		sync();
 		sleep(1);
 #ifndef DISABLE_INIT
+		/*
+		 * sync() writes the data back, but does not leave the root
+		 * filesystem clean: a journalling filesystem only commits its
+		 * superblock on remount or unmount, and the remount is only
+		 * possible now that no process is left to hold a file on it
+		 * open for writing. The root of a container is the host's.
+		 */
+		if (!is_container() &&
+		    mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL))
+			ERROR("failed to remount / read-only: %m\n");
+
 		perform_halt();
 #else
 		exit(EXIT_SUCCESS);
