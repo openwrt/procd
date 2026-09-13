@@ -636,6 +636,16 @@ instance_add_cgroup(const char *service, const char *instance)
 	if (stat("/sys/fs/cgroup/cgroup.subtree_control", &sb))
 		return 0;
 
+	/* Enable controllers in the parent cgroup before creating the child */
+	fd = open("/sys/fs/cgroup/cgroup.subtree_control", O_WRONLY);
+	if (fd >= 0) {
+		if (write(fd, "+cpu +memory +pids", 18) < 0) {
+			/* Ignore errors; controllers may already be enabled
+			 * or not available. */
+		}
+		close(fd);
+	}
+
 	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
 		       service, instance);
 	if (ret >= sizeof(cgnamebuf))
