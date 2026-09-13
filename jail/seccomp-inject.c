@@ -408,6 +408,9 @@ typedef struct { unsigned long gregs[ELF_NGREG]; } inj_regs;
 #define INJ_SYSCALL_ASM	"syscall"
 #define INJ_BP_ASM	"break"
 #define INJ_NO_SINGLESTEP	1
+/* injected code runs at an even PC, so it must be classic MIPS encoding */
+#define INJ_ASM_PUSH	".set push\n.set nomips16\n.set nomicromips\n.align 2\n"
+#define INJ_ASM_POP	".set pop\n"
 static unsigned long inj_pc(const inj_regs *r)
 {
 	return r->gregs[MIPS_EF_EPC];
@@ -595,6 +598,11 @@ static void inj_get_call(const inj_regs *r, long *nr, long *args)
 #error "unsupported architecture for seccomp ptrace injection"
 #endif
 
+#ifndef INJ_ASM_PUSH
+#define INJ_ASM_PUSH	""
+#define INJ_ASM_POP	""
+#endif
+
 #if defined(__arm__)
 __asm__ (
 	".pushsection .text\n"
@@ -619,10 +627,12 @@ extern const unsigned char inj_bp_insn_thumb[], inj_bp_insn_thumb_end[];
 #else
 __asm__ (
 	".pushsection .text\n"
+	INJ_ASM_PUSH
 	".globl inj_syscall_insn\ninj_syscall_insn:\n\t" INJ_SYSCALL_ASM "\n"
 	".globl inj_syscall_insn_end\ninj_syscall_insn_end:\n"
 	".globl inj_bp_insn\ninj_bp_insn:\n\t" INJ_BP_ASM "\n"
 	".globl inj_bp_insn_end\ninj_bp_insn_end:\n"
+	INJ_ASM_POP
 	".popsection\n"
 );
 extern const unsigned char inj_syscall_insn[], inj_syscall_insn_end[];
