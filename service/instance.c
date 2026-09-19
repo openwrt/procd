@@ -664,23 +664,13 @@ instance_remove_cgroup(const char *service, const char *instance)
 {
 	char cgnamebuf[256];
 	char *sep;
-	int fd, ret;
+	int ret;
 
-	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s/cgroup.kill",
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s",
 		       CGROUP_BASEDIR, service, instance);
 	if (ret >= (int)sizeof(cgnamebuf))
 		return;
 
-	fd = open(cgnamebuf, O_WRONLY);
-	if (fd >= 0) {
-		if (write(fd, "1", 1) < 0)
-			ret = -1;
-		close(fd);
-	}
-
-	sep = strrchr(cgnamebuf, '/');
-	if (sep)
-		*sep = '\0';
 	(void)rmdir(cgnamebuf);
 
 	sep = strrchr(cgnamebuf, '/');
@@ -912,6 +902,7 @@ instance_delete(struct service_instance *in)
 	struct service *s = in->srv;
 
 	avl_delete(&s->instances.avl, &in->node.avl);
+	instance_remove_cgroup(in->srv->name, in->name);
 	instance_free(in);
 	service_stopped(s);
 }
@@ -1797,7 +1788,6 @@ instance_free(struct service_instance *in)
 	uloop_timeout_cancel(&in->watchdog.timeout);
 	trigger_del(in);
 	watch_del(in);
-	instance_remove_cgroup(in->srv->name, in->name);
 	instance_config_cleanup(in);
 	free(in->config);
 	free(in->data_blob);
