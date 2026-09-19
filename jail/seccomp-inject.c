@@ -611,17 +611,21 @@ __asm__ (
 	".globl inj_syscall_insn_arm_end\ninj_syscall_insn_arm_end:\n"
 	".globl inj_bp_insn_arm\ninj_bp_insn_arm:\n\t.inst 0xe7f001f0\n"
 	".globl inj_bp_insn_arm_end\ninj_bp_insn_arm_end:\n"
+#ifdef __ARM_ARCH_ISA_THUMB
 	".thumb\n"
 	".globl inj_syscall_insn_thumb\ninj_syscall_insn_thumb:\n\t" INJ_SYSCALL_ASM "\n"
 	".globl inj_syscall_insn_thumb_end\ninj_syscall_insn_thumb_end:\n"
 	".globl inj_bp_insn_thumb\ninj_bp_insn_thumb:\n\t.inst.n 0xde01\n"
 	".globl inj_bp_insn_thumb_end\ninj_bp_insn_thumb_end:\n"
+#endif
 	".popsection\n"
 );
 extern const unsigned char inj_syscall_insn_arm[], inj_syscall_insn_arm_end[];
-extern const unsigned char inj_syscall_insn_thumb[], inj_syscall_insn_thumb_end[];
 extern const unsigned char inj_bp_insn_arm[], inj_bp_insn_arm_end[];
+#ifdef __ARM_ARCH_ISA_THUMB
+extern const unsigned char inj_syscall_insn_thumb[], inj_syscall_insn_thumb_end[];
 extern const unsigned char inj_bp_insn_thumb[], inj_bp_insn_thumb_end[];
+#endif
 
 #define INJ_INSN_MAX		16
 #else
@@ -829,20 +833,24 @@ static int arm_thumb_at(unsigned long entry)
 
 static const unsigned char *arm_bp_insn(int thumb, size_t *len)
 {
+#ifdef __ARM_ARCH_ISA_THUMB
 	if (thumb) {
 		*len = (size_t)(inj_bp_insn_thumb_end - inj_bp_insn_thumb);
 		return inj_bp_insn_thumb;
 	}
+#endif
 	*len = (size_t)(inj_bp_insn_arm_end - inj_bp_insn_arm);
 	return inj_bp_insn_arm;
 }
 
 static const unsigned char *arm_syscall_insn(int thumb, size_t *len)
 {
+#ifdef __ARM_ARCH_ISA_THUMB
 	if (thumb) {
 		*len = (size_t)(inj_syscall_insn_thumb_end - inj_syscall_insn_thumb);
 		return inj_syscall_insn_thumb;
 	}
+#endif
 	*len = (size_t)(inj_syscall_insn_arm_end - inj_syscall_insn_arm);
 	return inj_syscall_insn_arm;
 }
