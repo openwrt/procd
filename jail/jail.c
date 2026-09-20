@@ -1022,6 +1022,7 @@ static ssize_t xwrite_byte(int fd, char byte)
 
 static char tmpovdir[] = "/tmp/ujail-overlay-XXXXXX";
 static mode_t old_umask;
+static int jail_tmp_dirfd = -1;
 #define JAIL_IDMAP_MAX_FDS 64
 
 static int idmap_fds[JAIL_IDMAP_MAX_FDS];
@@ -1247,6 +1248,17 @@ static int detach_inherited_mounts(void)
 	return 0;
 }
 
+static void jail_tmpdir_remove(const char *dir)
+{
+	const char *base;
+
+	if (jail_tmp_dirfd < 0)
+		return;
+
+	base = strrchr(dir, '/');
+	unlinkat(jail_tmp_dirfd, base ? base + 1 : dir, AT_REMOVEDIR);
+}
+
 static int build_jail_fs(void)
 {
 	char *overlaydir = NULL;
@@ -1259,6 +1271,8 @@ static int build_jail_fs(void)
 		if (console_slave_fd < 0)
 			WARNING("open guest console slave %s: %m\n", console_slave_name);
 	}
+
+	jail_tmp_dirfd = open("/tmp", O_PATH | O_DIRECTORY | O_CLOEXEC);
 
 	if (mkdtemp(jail_root) == NULL) {
 		ERROR("mkdtemp(%s) failed: %m\n", jail_root);
@@ -1563,6 +1577,15 @@ static void enter_jail_fs(void)
 		ERROR("umount2() of the old root failed: %m\n");
 		free_and_exit(-1);
 	}
+
+	jail_tmpdir_remove(jail_root);
+	if (opts.tmpoverlaysize)
+		jail_tmpdir_remove(tmpovdir);
+	if (jail_tmp_dirfd >= 0) {
+		close(jail_tmp_dirfd);
+		jail_tmp_dirfd = -1;
+	}
+
 	if (chdir("/")) {
 		ERROR("chdir(/) (after pivot_root) failed: %m\n");
 		free_and_exit(-1);
