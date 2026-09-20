@@ -585,6 +585,43 @@ static struct json_script_ctx jctx = {
 	.handle_file = rule_handle_file,
 };
 
+static int hotplug_rules_reload(struct ubus_context *ctx,
+				struct ubus_object *obj,
+				struct ubus_request_data *req,
+				const char *method, struct blob_attr *msg)
+{
+	json_script_free(&jctx);
+	json_script_init(&jctx);
+
+	return UBUS_STATUS_OK;
+}
+
+static const struct ubus_method hotplug_rules_methods[] = {
+	UBUS_METHOD_NOARG("reload", hotplug_rules_reload),
+};
+
+static struct ubus_object_type hotplug_rules_object_type =
+	UBUS_OBJECT_TYPE("hotplug", hotplug_rules_methods);
+
+static struct ubus_object hotplug_rules_object = {
+	.name = "hotplug",
+	.type = &hotplug_rules_object_type,
+	.methods = hotplug_rules_methods,
+	.n_methods = ARRAY_SIZE(hotplug_rules_methods),
+};
+
+void ubus_init_hotplug_rules(struct ubus_context *ctx)
+{
+	int ret;
+
+	if (!rule_file)
+		return;
+
+	ret = ubus_add_object(ctx, &hotplug_rules_object);
+	if (ret)
+		ERROR("Failed to add object: %s\n", ubus_strerror(ret));
+}
+
 static void hotplug_handler_debug(struct blob_attr *data)
 {
 	char *str;

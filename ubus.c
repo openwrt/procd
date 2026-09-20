@@ -77,6 +77,7 @@ ubus_connect_cb(struct uloop_timeout *timeout)
 	udebug_ubus_init(&udebug, ctx, "procd", procd_udebug_cb);
 	ctx->connection_lost = ubus_disconnect_cb;
 	ubus_init_hotplug(ctx);
+	ubus_init_hotplug_rules(ctx);
 	ubus_init_service(ctx);
 	ubus_init_system(ctx);
 	watch_ubus(ctx);

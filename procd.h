@@ -39,8 +39,13 @@ void ubus_init_service(struct ubus_context *ctx);
 void ubus_init_system(struct ubus_context *ctx);
 #ifndef DISABLE_INIT
 void hotplug_ubus_event(struct blob_attr *data);
+void ubus_init_hotplug_rules(struct ubus_context *ctx);
 #else
 static inline void hotplug_ubus_event(struct blob_attr *data)
+{
+}
+
+static inline void ubus_init_hotplug_rules(struct ubus_context *ctx)
 {
 }
 #endif
