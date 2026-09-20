@@ -253,7 +253,7 @@ static long jail_clone3(struct clone_args *args)
 static int jail_process_pidfd = -1;
 
 static struct ubus_context *parent_ctx;
-static bool jail_stop_requested;
+static volatile sig_atomic_t jail_stop_requested;
 static bool netifd_restart_pending;
 static char **restart_argv;
 
@@ -3030,6 +3030,9 @@ static void post_jail_fs(void)
 	}
 
 	do {
+		if (jail_stop_requested)
+			free_and_exit(128 + SIGTERM);
+
 		n = read(pipes[2], buf, 1);
 	} while (n < 0 && errno == EINTR);
 	if (n < 1) {
@@ -6991,6 +6994,16 @@ static void post_main(struct uloop_timeout *t)
 		}
 
 		prctl(PR_SET_SECUREBITS, 0);
+
+		if (jail_stop_requested) {
+			INFO("stop requested before the jail was started\n");
+			jail_pidfd_send_signal(SIGKILL);
+			while (waitpid(jail_process.pid, NULL, 0) < 0 &&
+			       errno == EINTR);
+			uloop_process_delete(&jail_process);
+			jail_running = 0;
+			free_and_exit(128 + SIGTERM);
+		}
 
 		if (pidns_fd != -1) {
 			setns(pidns_fd, CLONE_NEWPID);
