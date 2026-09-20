@@ -915,6 +915,9 @@ instance_timeout(struct uloop_timeout *t)
 	if (in->halt) {
 		LOG("Instance %s::%s pid %d not stopped on SIGTERM, sending SIGKILL instead\n",
 				in->srv->name, in->name, in->proc.pid);
+		if (in->has_jail)
+			instance_kill_cgroup(in->srv->name, in->name);
+
 		kill(in->proc.pid, SIGKILL);
 	} else if (in->restart || in->respawn) {
 		instance_start(in);
@@ -1005,6 +1008,15 @@ instance_exit(struct uloop_process *p, int ret)
 	}
 }
 
+static int
+instance_term_timeout(struct service_instance *in)
+{
+	if (in->has_jail)
+		return in->term_timeout * 2;
+
+	return in->term_timeout;
+}
+
 void
 instance_stop(struct service_instance *in, bool halt)
 {
@@ -1016,8 +1028,7 @@ instance_stop(struct service_instance *in, bool halt)
 	in->halt = halt;
 	in->restart = in->respawn = false;
 	kill(in->proc.pid, SIGTERM);
-	if (!in->has_jail)
-		uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
+	uloop_timeout_set(&in->timeout, instance_term_timeout(in) * 1000);
 }
 
 static void
@@ -1034,8 +1045,7 @@ instance_restart(struct service_instance *in)
 	in->halt = true;
 	in->restart = true;
 	kill(in->proc.pid, SIGTERM);
-	if (!in->has_jail)
-		uloop_timeout_set(&in->timeout, in->term_timeout * 1000);
+	uloop_timeout_set(&in->timeout, instance_term_timeout(in) * 1000);
 }
 
 static void
