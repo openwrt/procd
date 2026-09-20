@@ -1277,7 +1277,7 @@ static int build_jail_fs(void)
 	old_umask = umask(0);
 
 	if (opts.console && console_slave_name[0]) {
-		console_slave_fd = open(console_slave_name, O_RDWR);
+		console_slave_fd = open(console_slave_name, O_RDWR | O_NOCTTY);
 		if (console_slave_fd < 0)
 			WARNING("open guest console slave %s: %m\n", console_slave_name);
 	}
