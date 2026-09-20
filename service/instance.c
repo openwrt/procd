@@ -660,10 +660,9 @@ instance_add_cgroup(const char *service, const char *instance)
 }
 
 static void
-instance_remove_cgroup(const char *service, const char *instance)
+instance_kill_cgroup(const char *service, const char *instance)
 {
 	char cgnamebuf[256];
-	char *sep;
 	int fd, ret;
 
 	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s/cgroup.kill",
@@ -672,15 +671,30 @@ instance_remove_cgroup(const char *service, const char *instance)
 		return;
 
 	fd = open(cgnamebuf, O_WRONLY);
-	if (fd >= 0) {
-		if (write(fd, "1", 1) < 0)
-			ret = -1;
-		close(fd);
-	}
+	if (fd < 0)
+		return;
 
-	sep = strrchr(cgnamebuf, '/');
-	if (sep)
-		*sep = '\0';
+	if (write(fd, "1", 1) < 0)
+		ULOG_WARN("failed to kill cgroup of %s::%s: %m\n", service,
+			  instance);
+
+	close(fd);
+}
+
+static void
+instance_remove_cgroup(const char *service, const char *instance)
+{
+	char cgnamebuf[256];
+	char *sep;
+	int ret;
+
+	instance_kill_cgroup(service, instance);
+
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
+		       service, instance);
+	if (ret >= (int)sizeof(cgnamebuf))
+		return;
+
 	(void)rmdir(cgnamebuf);
 
 	sep = strrchr(cgnamebuf, '/');
@@ -952,6 +966,10 @@ instance_exit(struct uloop_process *p, int ret)
 	in->exit_code = instance_exit_code(ret);
 	uloop_timeout_cancel(&in->timeout);
 	uloop_timeout_cancel(&in->watchdog.timeout);
+
+	if (in->has_jail)
+		instance_kill_cgroup(in->srv->name, in->name);
+
 	service_event("instance.stop", in->srv->name, in->name);
 
 	if (in->halt) {
