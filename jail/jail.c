@@ -1223,10 +1223,18 @@ static int mountinfo_detach_children(const char *prefix)
 	return -1;
 }
 
+static unsigned long mountns_propagation(void)
+{
+	if (opts.rootfs_propagation & MS_SLAVE)
+		return MS_REC | MS_SLAVE;
+
+	return MS_REC | MS_PRIVATE;
+}
+
 /* enter_jail_fs() detaches the old root, which propagates to every peer */
 static int isolate_mountns(void)
 {
-	return mount("none", "/", "none", MS_REC|MS_PRIVATE, NULL);
+	return mount("none", "/", "none", mountns_propagation(), NULL);
 }
 
 static int detach_inherited_mounts(void)
@@ -1598,8 +1606,8 @@ static int userns_wait_idmaps(void)
 	}
 
 	if ((opts.namespace & CLONE_NEWNS) &&
-	    mount("none", "/", "none", MS_REC | MS_PRIVATE, NULL)) {
-		ERROR("private mount failed: %m\n");
+	    mount("none", "/", "none", mountns_propagation(), NULL)) {
+		ERROR("mount propagation failed: %m\n");
 		return -1;
 	}
 
@@ -2850,7 +2858,7 @@ static int exec_jail(void *arg)
 	}
 
 	if ((opts.namespace & CLONE_NEWNS) && isolate_mountns()) {
-		ERROR("private mount failed: %m\n");
+		ERROR("mount propagation failed: %m\n");
 		return EXIT_FAILURE;
 	}
 
@@ -2981,7 +2989,8 @@ static void post_jail_fs(void)
 	char buf[1];
 	ssize_t n;
 
-	if (opts.rootfs_propagation && (opts.namespace & CLONE_NEWNS) &&
+	if (opts.rootfs_propagation && !(opts.rootfs_propagation & MS_SLAVE) &&
+	    (opts.namespace & CLONE_NEWNS) &&
 	    mount(NULL, "/", NULL, opts.rootfs_propagation, NULL)) {
 		ERROR("rootfsPropagation: %m\n");
 		free_and_exit(EXIT_FAILURE);
