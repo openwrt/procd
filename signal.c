@@ -104,3 +104,14 @@ void procd_signal(void)
 	reboot(RB_DISABLE_CAD);
 #endif
 }
+
+void procd_signal_reset(void)
+{
+	struct sigaction s = { 0 };
+	int i;
+
+	s.sa_handler = SIG_DFL;
+
+	for (i = 1; i < _NSIG; i++)
+		sigaction(i, &s, NULL);
+}

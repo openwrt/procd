@@ -780,6 +780,7 @@ instance_start(struct service_instance *in)
 		return;
 
 	if (!pid) {
+		procd_signal_reset();
 		uloop_done();
 		closefd(opipe[0]);
 		closefd(epipe[0]);
