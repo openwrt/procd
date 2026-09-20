@@ -803,6 +803,30 @@ struct mount_opt {
 #define MS_LAZYTIME (1 << 25)
 #endif
 
+bool jail_propagation_flags_add(const char *opt, unsigned long *flags)
+{
+	if (!strcmp("private", opt))
+		*flags |= MS_PRIVATE;
+	else if (!strcmp("rprivate", opt))
+		*flags |= MS_PRIVATE | MS_REC;
+	else if (!strcmp("slave", opt))
+		*flags |= MS_SLAVE;
+	else if (!strcmp("rslave", opt))
+		*flags |= MS_SLAVE | MS_REC;
+	else if (!strcmp("shared", opt))
+		*flags |= MS_SHARED;
+	else if (!strcmp("rshared", opt))
+		*flags |= MS_SHARED | MS_REC;
+	else if (!strcmp("unbindable", opt))
+		*flags |= MS_UNBINDABLE;
+	else if (!strcmp("runbindable", opt))
+		*flags |= MS_UNBINDABLE | MS_REC;
+	else
+		return false;
+
+	return true;
+}
+
 static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, unsigned long *propagation_flags, char **mount_data, int *error, bool *idmap, bool *idmap_recursive)
 {
 	struct blob_attr *cur;
@@ -826,7 +850,9 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 			*idmap = true;
 			*idmap_recursive = true;
 			continue;
-		} else if (!strcmp("ro", tmp))
+		} else if (jail_propagation_flags_add(tmp, &pf))
+			continue;
+		else if (!strcmp("ro", tmp))
 			mf |= MS_RDONLY;
 		else if (!strcmp("rw", tmp))
 			mf &= ~MS_RDONLY;
@@ -884,23 +910,6 @@ static int parseOCImountopts(struct blob_attr *msg, unsigned long *mount_flags, 
 			mf |= MS_NOSUID;
 		else if (!strcmp("remount", tmp))
 			mf |= MS_REMOUNT;
-		/* propagation flags */
-		else if (!strcmp("private", tmp))
-			pf |= MS_PRIVATE;
-		else if (!strcmp("rprivate", tmp))
-			pf |= MS_PRIVATE | MS_REC;
-		else if (!strcmp("slave", tmp))
-			pf |= MS_SLAVE;
-		else if (!strcmp("rslave", tmp))
-			pf |= MS_SLAVE | MS_REC;
-		else if (!strcmp("shared", tmp))
-			pf |= MS_SHARED;
-		else if (!strcmp("rshared", tmp))
-			pf |= MS_SHARED | MS_REC;
-		else if (!strcmp("unbindable", tmp))
-			pf |= MS_UNBINDABLE;
-		else if (!strcmp("runbindable", tmp))
-			pf |= MS_UNBINDABLE | MS_REC;
 		/* special case: 'nofail' */
 		else if(!strcmp("nofail", tmp))
 			*error = 0;

@@ -33,6 +33,7 @@ int jail_idmap_assign(bool have_extroot, bool have_overlay, const int *fds, int 
 bool jail_dir_is_fresh(const char *path);
 void jail_chown_fresh_volumes(uid_t uid, gid_t gid);
 void jail_set_idmap_offset(unsigned int offset);
+bool jail_propagation_flags_add(const char *opt, unsigned long *flags);
 
 int add_mount(const char *source, const char *target, const char *filesystemtype,
 	      unsigned long mountflags, unsigned long propflags, const char *optstr, int error);
