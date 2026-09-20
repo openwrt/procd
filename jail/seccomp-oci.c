@@ -231,13 +231,14 @@ const char * const seccomp_linker_base[] = {
 	"fstatfs", "futex", "getrandom", "mmap", "mprotect", "munmap",
 	"newfstatat", "open", "openat", "pread64", "prctl", "prlimit64", "read",
 	"readlinkat", "rseq", "rt_sigaction", "sched_getscheduler",
-	"set_robust_list", "set_tid_address", "sigaltstack", "statfs", NULL,
+	"set_robust_list", "set_tid_address", "set_tls", "sigaltstack", "statfs",
+	NULL,
 };
 
 const char * const seccomp_init_base[] = {
 	"arch_prctl", "brk", "futex", "getrandom", "mmap", "mprotect", "munmap",
 	"prctl", "prlimit64", "rseq", "rt_sigaction", "sched_getscheduler",
-	"set_robust_list", "set_tid_address", "sigaltstack", NULL,
+	"set_robust_list", "set_tid_address", "set_tls", "sigaltstack", NULL,
 };
 
 const char * const seccomp_loader_files[] = {
