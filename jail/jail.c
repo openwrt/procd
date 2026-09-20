@@ -4305,15 +4305,7 @@ static int parseOCIrootfspropagation(const char *mode)
 	if (!*mode)
 		return 0;
 
-	if (!strcmp(mode, "shared"))
-		opts.rootfs_propagation = MS_REC | MS_SHARED;
-	else if (!strcmp(mode, "slave"))
-		opts.rootfs_propagation = MS_REC | MS_SLAVE;
-	else if (!strcmp(mode, "private"))
-		opts.rootfs_propagation = MS_REC | MS_PRIVATE;
-	else if (!strcmp(mode, "unbindable"))
-		opts.rootfs_propagation = MS_REC | MS_UNBINDABLE;
-	else {
+	if (!jail_propagation_flags_add(mode, &opts.rootfs_propagation)) {
 		ERROR("unknown linux.rootfsPropagation %s\n", mode);
 		return EINVAL;
 	}
