@@ -709,12 +709,12 @@ static void hook_process_timeout_cb(struct uloop_timeout *t)
 	kill(hook_process.pid, SIGKILL);
 }
 
-static int hook_state_pipe(void)
+static int hook_state_fd(void)
 {
 	static struct blob_buf sb;
-	int state_pipe[2];
 	char *state;
 	size_t len;
+	int fd;
 
 	blob_buf_init(&sb, 0);
 	oci_state_fill(&sb);
@@ -722,19 +722,24 @@ static int hook_state_pipe(void)
 	if (!state)
 		return -1;
 
-	if (pipe(state_pipe)) {
+	fd = memfd_create("oci-state", MFD_CLOEXEC);
+	if (fd < 0) {
 		free(state);
 		return -1;
 	}
 
 	len = strlen(state);
-	if (write(state_pipe[1], state, len) != (ssize_t)len)
+	if (write(fd, state, len) != (ssize_t)len ||
+	    lseek(fd, 0, SEEK_SET) == (off_t)-1) {
 		WARNING("cannot pass the container state to the hook: %m\n");
+		free(state);
+		close(fd);
+		return -1;
+	}
 
 	free(state);
-	close(state_pipe[1]);
 
-	return state_pipe[0];
+	return fd;
 }
 
 static void run_hooklist(void)
@@ -758,7 +763,7 @@ static void run_hooklist(void)
 		return;
 	}
 
-	state_fd = hook_state_pipe();
+	state_fd = hook_state_fd();
 
 	hook_running = 1;
 	hook_process.pid = fork();
