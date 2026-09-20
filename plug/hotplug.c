@@ -502,6 +502,7 @@ rule_handle_file(struct json_script_ctx *ctx, const char *name)
 
 	blob_buf_init(&script, 0);
 	blobmsg_add_json_element(&script, "", obj);
+	json_object_put(obj);
 
 	return json_script_file_from_blobmsg(name, blob_data(script.head), blob_len(script.head));
 }
