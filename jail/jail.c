@@ -748,11 +748,15 @@ static void run_hooklist(void)
 
 	DEBUG("executing hook %s\n", hook->file);
 
-	if (stat(hook->file, &s))
+	if (stat(hook->file, &s)) {
 		hook_process_handler(&hook_process, ENOENT);
+		return;
+	}
 
-	if (!((unsigned long)s.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+	if (!((unsigned long)s.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
 		hook_process_handler(&hook_process, EPERM);
+		return;
+	}
 
 	state_fd = hook_state_pipe();
 
@@ -774,6 +778,7 @@ static void run_hooklist(void)
 		if (state_fd > -1)
 			close(state_fd);
 		hook_process_handler(&hook_process, errno);
+		return;
 	}
 
 	/* parent */
