@@ -547,8 +547,11 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 		if (devleafweight > CGROUP_IO_WEIGHT_MAX)
 			return ERANGE;
 
-		if (tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_LEAFWEIGHT])
+		if (tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_LEAFWEIGHT]) {
+			ERROR("linux.resources.blockIO.weightDevice.leafWeight "
+			      "is not supported\n");
 			return ENOTSUP;
+		}
 
 		major = blobmsg_cast_u64(tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_MAJOR]);
 		minor = blobmsg_cast_u64(tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_MINOR]);
@@ -754,9 +757,16 @@ static int parseOCIlinuxcgroups_legacy_cpu(struct blob_attr *msg)
 
 	blobmsg_parse(oci_linux_cgroups_cpu_policy, __OCI_LINUX_CGROUPS_CPU_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
-	if (tb[OCI_LINUX_CGROUPS_CPU_REALTIMEPERIOD] ||
-	    tb[OCI_LINUX_CGROUPS_CPU_REALTIMERUNTIME])
-		return ENOTSUP; /* no equivalent in cgroup2 */
+	/* no equivalent in cgroup2 */
+	if (tb[OCI_LINUX_CGROUPS_CPU_REALTIMEPERIOD]) {
+		ERROR("linux.resources.cpu.realtimePeriod is not supported\n");
+		return ENOTSUP;
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_CPU_REALTIMERUNTIME]) {
+		ERROR("linux.resources.cpu.realtimeRuntime is not supported\n");
+		return ENOTSUP;
+	}
 
 	if (tb[OCI_LINUX_CGROUPS_CPU_SHARES]) {
 		shares = blobmsg_cast_u64(tb[OCI_LINUX_CGROUPS_CPU_SHARES]);
@@ -913,10 +923,20 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg, bool is_upd
 	 *
 	 * see also https://github.com/opencontainers/runtime-spec/issues/1005
 	 */
-	if (tb[OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS] ||
-	    tb[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER] ||
-	    tb[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY])
+	if (tb[OCI_LINUX_CGROUPS_MEMORY_SWAPPINESS]) {
+		ERROR("linux.resources.memory.swappiness is not supported\n");
 		return ENOTSUP;
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_MEMORY_DISABLEOOMKILLER]) {
+		ERROR("linux.resources.memory.disableOOMKiller is not supported\n");
+		return ENOTSUP;
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY]) {
+		ERROR("linux.resources.memory.useHierarchy is not supported\n");
+		return ENOTSUP;
+	}
 
 	if (is_update && tb[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE] &&
 	    blobmsg_get_bool(tb[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE])) {
@@ -1075,11 +1095,25 @@ int parseOCIlinuxcgroups(struct blob_attr *msg, bool is_update)
 
 	blobmsg_parse(oci_linux_cgroups_policy, __OCI_LINUX_CGROUPS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
-	if (tb[OCI_LINUX_CGROUPS_HUGEPAGELIMITS] ||
-	    tb[OCI_LINUX_CGROUPS_INTELRDT] ||
-	    tb[OCI_LINUX_CGROUPS_NETWORK] ||
-	    tb[OCI_LINUX_CGROUPS_RDMA])
+	if (tb[OCI_LINUX_CGROUPS_HUGEPAGELIMITS]) {
+		ERROR("linux.resources.hugepageLimits is not supported\n");
 		return ENOTSUP;
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_INTELRDT]) {
+		ERROR("linux.resources.intelRdt is not supported\n");
+		return ENOTSUP;
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_NETWORK]) {
+		ERROR("linux.resources.network is not supported\n");
+		return ENOTSUP;
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_RDMA]) {
+		ERROR("linux.resources.rdma is not supported\n");
+		return ENOTSUP;
+	}
 
 	if (tb[OCI_LINUX_CGROUPS_BLOCKIO]) {
 		ret = parseOCIlinuxcgroups_legacy_blockio(tb[OCI_LINUX_CGROUPS_BLOCKIO]);
