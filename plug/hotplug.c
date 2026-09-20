@@ -28,6 +28,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <libgen.h>
@@ -492,11 +493,11 @@ static const char* rule_handle_var(struct json_script_ctx *ctx, const char *name
 }
 
 static struct json_script_file *
-rule_handle_file(struct json_script_ctx *ctx, const char *name)
+rule_load_file(const char *path, const char *key)
 {
 	json_object *obj;
 
-	obj = json_object_from_file((char*)name);
+	obj = json_object_from_file(path);
 	if (!obj)
 		return NULL;
 
@@ -504,7 +505,38 @@ rule_handle_file(struct json_script_ctx *ctx, const char *name)
 	blobmsg_add_json_element(&script, "", obj);
 	json_object_put(obj);
 
-	return json_script_file_from_blobmsg(name, blob_data(script.head), blob_len(script.head));
+	return json_script_file_from_blobmsg(key, blob_data(script.head), blob_len(script.head));
+}
+
+static struct json_script_file *
+rule_handle_file(struct json_script_ctx *ctx, const char *name)
+{
+	struct json_script_file *head = NULL, *f, **tail;
+	const char *key = name;
+	glob_t gl;
+	size_t i;
+
+	if (!strpbrk(name, "*?["))
+		return rule_load_file(name, name);
+
+	if (glob(name, 0, NULL, &gl)) {
+		globfree(&gl);
+		return NULL;
+	}
+
+	tail = &head;
+	for (i = 0; i < gl.gl_pathc; i++) {
+		f = rule_load_file(gl.gl_pathv[i], key);
+		if (!f)
+			continue;
+
+		key = NULL;
+		*tail = f;
+		tail = &f->next;
+	}
+	globfree(&gl);
+
+	return head;
 }
 
 static void rule_handle_command(struct json_script_ctx *ctx, const char *name,
