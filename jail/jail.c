@@ -7495,6 +7495,8 @@ static void post_poststart(void)
 
 static void post_poststop(void);
 static void poststop(void) {
+	jail_oci_state = OCI_STATE_STOPPED;
+
 	if (opts.jail_network_started) {
 		jail_network_teardown();
 		opts.jail_network_started = false;
