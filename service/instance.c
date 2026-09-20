@@ -795,6 +795,7 @@ instance_start(struct service_instance *in)
 
 	P_DEBUG(2, "Started instance %s::%s[%d]\n", in->srv->name, in->name, pid);
 	in->proc.pid = pid;
+	in->has_cgroup = true;
 	instance_writepid(in);
 	clock_gettime(CLOCK_MONOTONIC, &in->start);
 	uloop_process_add(&in->proc);
@@ -1816,7 +1817,9 @@ instance_free(struct service_instance *in)
 	uloop_timeout_cancel(&in->watchdog.timeout);
 	trigger_del(in);
 	watch_del(in);
-	instance_remove_cgroup(in->srv->name, in->name);
+	if (in->has_cgroup)
+		instance_remove_cgroup(in->srv->name, in->name);
+
 	instance_config_cleanup(in);
 	free(in->config);
 	free(in->data_blob);

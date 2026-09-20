@@ -79,6 +79,7 @@ struct service_instance {
 	char *group;
 	gid_t gr_gid;
 
+	bool has_cgroup;
 	bool halt;
 	bool restart;
 	bool respawn;
