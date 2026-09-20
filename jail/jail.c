@@ -6450,14 +6450,21 @@ int main(int argc, char **argv)
 		char *jsonfile;
 		int ocires;
 
-		/* stdout and stderr belong to the container, not to us */
-		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "jail");
+		ulog_open(ULOG_STDIO, LOG_DAEMON, "jail");
 
 		if (!opts.name) {
 			ERROR("OCI bundle needs a named jail\n");
 			ret=-1;
 			goto errout;
 		}
+
+		parent_ctx = ubus_connect(NULL);
+		if (!parent_ctx) {
+			ERROR("Connection to ubus failed\n");
+			ret = -ECONNREFUSED;
+			goto errout;
+		}
+
 		if (asprintf(&jsonfile, "%s/config.json", opts.ocibundle) < 0) {
 			ret=-ENOMEM;
 			goto errout;
@@ -6469,6 +6476,9 @@ int main(int argc, char **argv)
 			ret=ocires;
 			goto errout;
 		}
+
+		/* stdout and stderr belong to the container, not to us */
+		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "jail");
 	}
 
 	for (credidx = 0; credidx < n_cred_targets; credidx++) {
@@ -6543,7 +6553,9 @@ int main(int argc, char **argv)
 	uloop_init();
 	signals_init();
 
-	parent_ctx = ubus_connect(NULL);
+	if (!parent_ctx)
+		parent_ctx = ubus_connect(NULL);
+
 	if (!parent_ctx) {
 		ERROR("Connection to ubus failed\n");
 		ret = -ECONNREFUSED;
