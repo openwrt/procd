@@ -4780,16 +4780,24 @@ enum {
 };
 
 static int jail_oci_state = OCI_STATE_CREATING;
+static bool jail_create_done;
 static void pipe_send_start_container(struct uloop_timeout *t);
 static struct uloop_timeout start_container_timeout = {
 	.cb = pipe_send_start_container,
 };
 
+static bool jail_oci_live(void)
+{
+	return jail_create_done &&
+	       (jail_oci_state == OCI_STATE_CREATED ||
+		jail_oci_state == OCI_STATE_RUNNING);
+}
+
 static int handle_start(struct ubus_context *ctx, struct ubus_object *obj,
 			struct ubus_request_data *req, const char *method,
 			struct blob_attr *msg)
 {
-	if (jail_oci_state != OCI_STATE_CREATED)
+	if (!jail_create_done || jail_oci_state != OCI_STATE_CREATED)
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
 	if (!opts.jail_argv) {
@@ -5224,7 +5232,7 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	if (sig == SIGTERM || sig == SIGKILL)
 		jail_stop_requested = true;
 
-	if (jail_oci_state == OCI_STATE_CREATING)
+	if (!jail_create_done || jail_oci_state == OCI_STATE_CREATING)
 		return UBUS_STATUS_NOT_FOUND;
 	if (jail_oci_state == OCI_STATE_PAUSED && sig != SIGKILL && sig != 0)
 		return UBUS_STATUS_PERMISSION_DENIED;
@@ -5259,8 +5267,7 @@ container_handle_pause(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	int rc;
 
-	if (jail_oci_state != OCI_STATE_CREATED &&
-	    jail_oci_state != OCI_STATE_RUNNING)
+	if (!jail_oci_live())
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
 	rc = cgroups_set_frozen(true);
@@ -5328,8 +5335,7 @@ container_handle_reclaim(struct ubus_context *ctx, struct ubus_object *obj,
 	int32_t swappiness = -1;
 	int rc;
 
-	if (jail_oci_state != OCI_STATE_CREATED &&
-	    jail_oci_state != OCI_STATE_RUNNING)
+	if (!jail_oci_live())
 		return UBUS_STATUS_INVALID_ARGUMENT;
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -5366,8 +5372,7 @@ container_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 {
 	int rc;
 
-	if (jail_oci_state != OCI_STATE_CREATED &&
-	    jail_oci_state != OCI_STATE_RUNNING)
+	if (!jail_oci_live())
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
 	if (!msg)
@@ -5569,8 +5574,7 @@ container_handle_exec(struct ubus_context *ctx, struct ubus_object *obj,
 	char nspath[64];
 	int i, rc = UBUS_STATUS_UNKNOWN_ERROR;
 
-	if (jail_oci_state != OCI_STATE_CREATED &&
-	    jail_oci_state != OCI_STATE_RUNNING)
+	if (!jail_oci_live())
 		return UBUS_STATUS_INVALID_ARGUMENT;
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
@@ -7072,6 +7076,10 @@ static void post_main(struct uloop_timeout *t)
 		ERROR("failed to clone/fork: %m\n");
 		free_and_exit(EXIT_FAILURE);
 	}
+
+	clock_gettime(CLOCK_REALTIME, &jail_created);
+	jail_oci_state = OCI_STATE_CREATED;
+
 	run_hooks(opts.hooks.prestart, post_prestart);
 }
 
@@ -7215,8 +7223,7 @@ static void post_create_runtime(void)
 		close(userns_pipe[3]);
 	}
 
-	clock_gettime(CLOCK_REALTIME, &jail_created);
-	jail_oci_state = OCI_STATE_CREATED;
+	jail_create_done = true;
 	emit_instance_event("instance.ready");
 
 	if (opts.ocibundle && !opts.immediately)
