@@ -1684,7 +1684,8 @@ static int uxc_start(const char *name, bool console)
 	uxc_wait_run(&wait_state, 30000);
 	uxc_wait_disarm();
 	if (wait_state.result == UXC_WAIT_UNSET) {
-		fprintf(stderr, "uxc: warning: timed out waiting for instance.running\n");
+		fprintf(stderr, "uxc: start %s failed: the container did not "
+				"reach running state\n", name);
 		return -ETIMEDOUT;
 	}
 	return 0;
