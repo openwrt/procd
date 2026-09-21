@@ -261,6 +261,7 @@ static struct ubus_context *parent_ctx;
 static volatile sig_atomic_t jail_stop_requested;
 static bool netifd_restart_pending;
 static bool container_registered;
+static bool stop_announced;
 static char **restart_argv;
 
 static const char *jail_reason;
@@ -1732,7 +1733,7 @@ static void jail_restart_exec(void)
 
 static void free_and_exit(int ret)
 {
-	if (!exit_from_child && !jail_restarting())
+	if (!exit_from_child && !stop_announced && !jail_restarting())
 		notify_signal(opts.notify_fd);
 
 	if (!exit_from_child && opts.jail_network_started) {
@@ -1752,7 +1753,8 @@ static void free_and_exit(int ret)
 		jail_dev_staged = false;
 	}
 
-	if (!exit_from_child && opts.ocibundle && parent_ctx && opts.name) {
+	if (!exit_from_child && !stop_announced && opts.ocibundle && parent_ctx &&
+	    opts.name) {
 		if (jail_restarting())
 			jail_reason_set("jail.restart", 0);
 
@@ -2465,6 +2467,20 @@ static int jail_running = 0;
 static int jail_return_code = 0;
 static bool jail_reaped;
 static bool poststart_pending;
+
+static void post_poststop(void)
+{
+	if (jail_process_pidfd >= 0) {
+		close(jail_process_pidfd);
+		jail_process_pidfd = -1;
+	}
+	free_and_exit(jail_return_code);
+}
+
+static void poststop_hooks(void)
+{
+	run_hooks(opts.hooks.poststop, post_poststop);
+}
 
 static void jail_process_timeout_cb(struct uloop_timeout *t);
 static struct uloop_timeout jail_process_timeout = {
@@ -7876,9 +7892,14 @@ static void post_poststart(void)
 	poststop();
 }
 
-static void post_poststop(void);
-static void poststop(void) {
+static void poststop(void)
+{
 	jail_oci_state = OCI_STATE_STOPPED;
+
+	if (jail_restarting())
+		jail_reason_set("jail.restart", 0);
+	else
+		notify_signal(opts.notify_fd);
 
 	if (opts.jail_network_started) {
 		jail_network_teardown();
@@ -7886,14 +7907,13 @@ static void poststop(void) {
 	}
 	if ((opts.namespace & CLONE_NEWNET) && opts.name && opts.ocibundle)
 		run_uxc_net("down");
-	run_hooks(opts.hooks.poststop, post_poststop);
-}
 
-static void post_poststop(void)
-{
-	if (jail_process_pidfd >= 0) {
-		close(jail_process_pidfd);
-		jail_process_pidfd = -1;
-	}
-	free_and_exit(jail_return_code);
+	if (opts.ocibundle && container_registered)
+		cgroups_destroy();
+
+	stop_announced = true;
+	emit_instance_event(container_registered ? "instance.stopped" :
+						  "instance.create_failed");
+
+	poststop_hooks();
 }
