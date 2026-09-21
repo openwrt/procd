@@ -1746,9 +1746,13 @@ static void free_and_exit(int ret)
 		jail_dev_staged = false;
 	}
 
-	if (!exit_from_child && opts.ocibundle && parent_ctx && opts.name)
+	if (!exit_from_child && opts.ocibundle && parent_ctx && opts.name) {
+		if (jail_restarting())
+			jail_reason_set("jail.restart", 0);
+
 		emit_instance_event(container_registered ? "instance.stopped" :
 							  "instance.create_failed");
+	}
 
 	if (!exit_from_child && parent_ctx)
 		ubus_free(parent_ctx);
