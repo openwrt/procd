@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2015 John Crispin <blogic@openwrt.org>
+ * Copyright (C) 2026 Daniel Golle <daniel@makrotopia.org>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License version 2.1
@@ -23,5 +24,12 @@ extern int debug;
 #define DEBUG(fmt, ...) do { \
 	if (debug) ulog(LOG_DEBUG, fmt, ## __VA_ARGS__); \
 	} while (0)
+
+struct blob_attr;
+
+const struct blob_attr *jail_oci_root_get(void);
+void jail_oci_root_restore(const struct blob_attr *root);
+
+int jail_unsupported(const struct blob_attr *attr);
 
 #endif

@@ -262,6 +262,194 @@ static bool netifd_restart_pending;
 static bool container_registered;
 static char **restart_argv;
 
+static const char *jail_reason;
+static int jail_reason_errno;
+
+/*
+ * The deepest field the runtime spec defines is four levels below the
+ * root, linux.resources.blockIO.weightDevice[0].leafWeight.
+ */
+#define OCI_PATH_MAX_DEPTH	16
+#define OCI_PATH_INDEX_LEN	sizeof("[4294967295]")
+
+struct oci_path {
+	const char *seg[OCI_PATH_MAX_DEPTH];
+	char index[OCI_PATH_MAX_DEPTH][OCI_PATH_INDEX_LEN];
+	int depth;
+};
+
+static const struct blob_attr *jail_oci_root;
+
+const struct blob_attr *jail_oci_root_get(void)
+{
+	return jail_oci_root;
+}
+
+void jail_oci_root_restore(const struct blob_attr *root)
+{
+	jail_oci_root = root;
+}
+
+static bool oci_attr_contains(const struct blob_attr *outer,
+			      const struct blob_attr *inner)
+{
+	const char *p = (const char *)inner;
+	const char *base;
+	size_t len;
+
+	base = blobmsg_data(outer);
+	len = blobmsg_data_len(outer);
+
+	return p >= base && p < base + len;
+}
+
+static bool oci_path_push(struct oci_path *path, const char *name,
+			  unsigned int index)
+{
+	if (path->depth >= OCI_PATH_MAX_DEPTH)
+		return false;
+
+	if (name) {
+		path->seg[path->depth++] = name;
+		return true;
+	}
+
+	snprintf(path->index[path->depth], OCI_PATH_INDEX_LEN, "[%u]", index);
+	path->seg[path->depth] = path->index[path->depth];
+	++path->depth;
+
+	return true;
+}
+
+/* Siblings hold disjoint ranges, so the first match is the only one. */
+static bool oci_path_walk(const struct blob_attr *node,
+			  const struct blob_attr *leaf, struct oci_path *path)
+{
+	struct blob_attr *cur;
+	unsigned int i = 0;
+	size_t rem;
+	bool array;
+
+	if (node == leaf)
+		return true;
+
+	switch (blobmsg_type(node)) {
+	case BLOBMSG_TYPE_TABLE:
+		array = false;
+		break;
+	case BLOBMSG_TYPE_ARRAY:
+		array = true;
+		break;
+	default:
+		return false;
+	}
+
+	blobmsg_for_each_attr(cur, node, rem) {
+		if (cur != leaf && !oci_attr_contains(cur, leaf)) {
+			++i;
+			continue;
+		}
+
+		if (!oci_path_push(path, array ? NULL : blobmsg_name(cur), i))
+			return false;
+
+		return oci_path_walk(cur, leaf, path);
+	}
+
+	return false;
+}
+
+static bool oci_path_walk_root(const struct blob_attr *root,
+			       const struct blob_attr *leaf,
+			       struct oci_path *path)
+{
+	struct blob_attr *cur;
+	size_t rem;
+
+	blob_for_each_attr(cur, root, rem) {
+		if (cur != leaf && !oci_attr_contains(cur, leaf))
+			continue;
+
+		if (!oci_path_push(path, blobmsg_name(cur), 0))
+			return false;
+
+		return oci_path_walk(cur, leaf, path);
+	}
+
+	return false;
+}
+
+static bool oci_path_resolve(const struct blob_attr *leaf, char *buf,
+			     size_t len)
+{
+	struct oci_path path = { .depth = 0 };
+	size_t pos = 0;
+	int i;
+
+	if (!jail_oci_root || !leaf)
+		return false;
+
+	if (blobmsg_type(jail_oci_root) == BLOBMSG_TYPE_TABLE) {
+		if (!oci_path_walk(jail_oci_root, leaf, &path))
+			return false;
+	} else if (!oci_path_walk_root(jail_oci_root, leaf, &path)) {
+		return false;
+	}
+
+	for (i = 0; i < path.depth && pos < len; i++)
+		pos += snprintf(buf + pos, len - pos, "%s%s",
+				(i && path.seg[i][0] != '[') ? "." : "",
+				path.seg[i]);
+
+	return true;
+}
+
+static const char *oci_field_name(const struct blob_attr *attr, char *buf,
+				  size_t len)
+{
+	if (oci_path_resolve(attr, buf, len))
+		return buf;
+
+	return blobmsg_name(attr);
+}
+
+static void jail_reason_restore(const char *reason, int err)
+{
+	jail_reason = reason;
+	jail_reason_errno = err;
+}
+
+static void jail_reason_set(const char *reason, int err)
+{
+	if (jail_reason)
+		return;
+
+	jail_reason = reason;
+	jail_reason_errno = err;
+}
+
+/* The bundle is parsed and freed long before the reason is reported. */
+static void jail_reason_own(const char *reason, int err)
+{
+	if (jail_reason)
+		return;
+
+	snprintf(jail_reason_owned, sizeof(jail_reason_owned), "%s", reason);
+	jail_reason_set(jail_reason_owned, err);
+}
+
+int jail_unsupported(const struct blob_attr *attr)
+{
+	char path[sizeof(jail_reason_owned)];
+	const char *field;
+
+	field = oci_field_name(attr, path, sizeof(path));
+	ERROR("%s is not supported\n", field);
+	jail_reason_own(field, ENOTSUP);
+
+	return ENOTSUP;
+}
+
 int console_fd;
 static int console_slave_fd = -1;
 static char console_slave_name[64];
@@ -2150,6 +2338,7 @@ static int build_oci_seccomp(struct blob_attr *msg)
 
 static int seccomp_compile_file(const char *json_path)
 {
+	const struct blob_attr *prev_root = jail_oci_root_get();
 	struct blob_buf b = { 0 };
 	int rc;
 
@@ -2160,7 +2349,9 @@ static int seccomp_compile_file(const char *json_path)
 		return -1;
 	}
 
+	jail_oci_root_restore(b.head);
 	rc = build_oci_seccomp(b.head);
+	jail_oci_root_restore(prev_root);
 	blob_buf_free(&b);
 	if (rc) {
 		ERROR("seccomp: failed to parse %s\n", json_path);
@@ -3752,15 +3943,11 @@ static int parseOCIprocess(struct blob_attr *msg)
 
 	blobmsg_parse(oci_process_policy, __OCI_PROCESS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
-	if (tb[OCI_PROCESS_APPARMORPROFILE]) {
-		ERROR("process.apparmorProfile is not supported\n");
-		return ENOTSUP;
-	}
+	if (tb[OCI_PROCESS_APPARMORPROFILE])
+		return jail_unsupported(tb[OCI_PROCESS_APPARMORPROFILE]);
 
-	if (tb[OCI_PROCESS_SELINUXLABEL]) {
-		ERROR("process.selinuxLabel is not supported\n");
-		return ENOTSUP;
-	}
+	if (tb[OCI_PROCESS_SELINUXLABEL])
+		return jail_unsupported(tb[OCI_PROCESS_SELINUXLABEL]);
 
 	if (!tb[OCI_PROCESS_ARGS])
 		return ENOENT;
@@ -4334,17 +4521,16 @@ static const struct blobmsg_policy oci_linux_personality_policy[] = {
 static int parseOCIlinuxpersonality(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_PERSONALITY_MAX];
-	const char *domain;
+	char field[sizeof(jail_reason_owned)];
 	unsigned long requested, current;
+	const char *domain;
 
 	blobmsg_parse(oci_linux_personality_policy, __OCI_LINUX_PERSONALITY_MAX, tb,
 		      blobmsg_data(msg), blobmsg_len(msg));
 
 	if (tb[OCI_LINUX_PERSONALITY_FLAGS] &&
-	    blobmsg_len(tb[OCI_LINUX_PERSONALITY_FLAGS])) {
-		ERROR("linux.personality.flags is not supported\n");
-		return ENOTSUP;
-	}
+	    blobmsg_len(tb[OCI_LINUX_PERSONALITY_FLAGS]))
+		return jail_unsupported(tb[OCI_LINUX_PERSONALITY_FLAGS]);
 
 	if (!tb[OCI_LINUX_PERSONALITY_DOMAIN])
 		return ENODATA;
@@ -4361,6 +4547,8 @@ static int parseOCIlinuxpersonality(struct blob_attr *msg)
 	if (requested != current) {
 		ERROR("linux.personality '%s' differs from current; cross-personality execution is not supported\n",
 		      domain);
+		jail_reason_own(oci_field_name(msg, field, sizeof(field)),
+				ENOTSUP);
 		return ENOTSUP;
 	}
 
@@ -4414,15 +4602,11 @@ static int parseOCIlinux(struct blob_attr *msg)
 	if (tb[OCI_LINUX_NETDEVICES])
 		opts.netdevices = blob_memdup(tb[OCI_LINUX_NETDEVICES]);
 
-	if (tb[OCI_LINUX_MEMORYPOLICY]) {
-		ERROR("linux.memoryPolicy is not supported on OpenWrt\n");
-		return ENOTSUP;
-	}
+	if (tb[OCI_LINUX_MEMORYPOLICY])
+		return jail_unsupported(tb[OCI_LINUX_MEMORYPOLICY]);
 
-	if (tb[OCI_LINUX_MOUNTLABEL]) {
-		ERROR("linux.mountLabel is not supported\n");
-		return ENOTSUP;
-	}
+	if (tb[OCI_LINUX_MOUNTLABEL])
+		return jail_unsupported(tb[OCI_LINUX_MOUNTLABEL]);
 
 	if (tb[OCI_LINUX_NAMESPACES]) {
 		blobmsg_for_each_attr(cur, tb[OCI_LINUX_NAMESPACES], rem) {
@@ -4622,6 +4806,7 @@ static int64_t read_memtotal_bytes(void)
 
 static int parseOCI(const char *jsonfile)
 {
+	const struct blob_attr *prev_root = jail_oci_root_get();
 	struct blob_attr *tb[__OCI_MAX];
 	struct blob_attr *cur;
 	int rem;
@@ -4639,6 +4824,8 @@ static int parseOCI(const char *jsonfile)
 		goto errout;
 	}
 
+	jail_oci_root_restore(ocibuf.head);
+
 	blobmsg_parse(oci_policy, __OCI_MAX, tb, blob_data(ocibuf.head), blob_len(ocibuf.head));
 
 	if (!tb[OCI_VERSION]) {
@@ -4649,6 +4836,7 @@ static int parseOCI(const char *jsonfile)
 	const char *ociver = blobmsg_get_string(tb[OCI_VERSION]);
 	if (strncmp("1.", ociver, 2) || ociver[2] < '1' || ociver[2] > '3') {
 		ERROR("unsupported ociVersion %s\n", ociver);
+		jail_reason_set("ociVersion", ENOTSUP);
 		res=ENOTSUP;
 		goto errout;
 	}
@@ -4781,6 +4969,7 @@ static int parseOCI(const char *jsonfile)
 	}
 
 errout:
+	jail_oci_root_restore(prev_root);
 	blob_buf_free(&ocibuf);
 
 	return res;
@@ -5414,6 +5603,9 @@ container_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 			struct ubus_request_data *req, const char *method,
 			struct blob_attr *msg)
 {
+	const struct blob_attr *prev_root = jail_oci_root_get();
+	const char *prev_reason = jail_reason;
+	int prev_errno = jail_reason_errno;
 	int rc;
 
 	if (!jail_oci_live())
@@ -5422,7 +5614,10 @@ container_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
+	jail_oci_root_restore(msg);
 	rc = parseOCIlinuxcgroups(msg, true);
+	jail_oci_root_restore(prev_root);
+	jail_reason_restore(prev_reason, prev_errno);
 	if (rc) {
 		switch (rc) {
 		case ENOTSUP:
@@ -7154,6 +7349,13 @@ static void emit_instance_event(const char *event)
 	blob_buf_init(&notify_buf, 0);
 	blobmsg_add_string(&notify_buf, "service", opts.name);
 	blobmsg_add_string(&notify_buf, "instance", opts.name);
+	if (jail_reason && (!strcmp(event, "instance.stopped") ||
+			    !strcmp(event, "instance.create_failed"))) {
+		blobmsg_add_string(&notify_buf, "reason", jail_reason);
+		if (jail_reason_errno)
+			blobmsg_add_u32(&notify_buf, "errno",
+					jail_reason_errno);
+	}
 	ubus_send_event(parent_ctx, event, notify_buf.head);
 }
 

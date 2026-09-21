@@ -216,6 +216,7 @@ int applyOCIcapabilities(struct jail_capset ocicapset, uint64_t retain)
 
 int parseOCIcapabilities_from_file(struct jail_capset *capset, const char *file)
 {
+	const struct blob_attr *prev_root = jail_oci_root_get();
 	struct blob_buf b = { 0 };
 	int ret;
 
@@ -226,9 +227,11 @@ int parseOCIcapabilities_from_file(struct jail_capset *capset, const char *file)
 		goto err;
 	}
 
+	jail_oci_root_restore(b.head);
 	ret = parseOCIcapabilities(capset, b.head);
 
 err:
+	jail_oci_root_restore(prev_root);
 	blob_buf_free(&b);
 	return ret;
 }
