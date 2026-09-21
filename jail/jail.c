@@ -911,7 +911,8 @@ static int prepare_jail_dev(void)
 	}
 	jail_dev_staged = true;
 
-	if (mount("tmpfs", jail_dev, "tmpfs", MS_NOSUID | MS_NOATIME, "mode=0755")) {
+	if (mount("tmpfs", jail_dev, "tmpfs", MS_NOSUID | MS_NOATIME,
+		  "mode=0755,size=1M")) {
 		ERROR("tmpfs mount for /dev failed: %m\n");
 		return errno;
 	}
