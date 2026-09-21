@@ -3058,6 +3058,12 @@ static struct uloop_timeout pre_exec_timeout = {
 
 int pipes[4];
 static int parent_pidfd = -1;
+
+static bool jail_has_utsns(void)
+{
+	return (opts.namespace & CLONE_NEWUTS) || opts.setns.uts != -1;
+}
+
 static int exec_jail(void *arg)
 {
 	char buf[1];
@@ -3193,14 +3199,14 @@ static int exec_jail(void *arg)
 		free_and_exit(EXIT_FAILURE);
 #endif
 
-	if (((opts.namespace & CLONE_NEWUTS) || opts.setns.uts != -1)
+	if (jail_has_utsns()
 			&& opts.hostname && strlen(opts.hostname) > 0
 			&& sethostname(opts.hostname, strlen(opts.hostname))) {
 		ERROR("sethostname(%s) failed: %m\n", opts.hostname);
 		free_and_exit(EXIT_FAILURE);
 	}
 
-	if (((opts.namespace & CLONE_NEWUTS) || opts.setns.uts != -1)
+	if (jail_has_utsns()
 			&& opts.domainname && strlen(opts.domainname) > 0
 			&& setdomainname(opts.domainname, strlen(opts.domainname))) {
 		ERROR("setdomainname(%s) failed: %m\n", opts.domainname);
@@ -4977,6 +4983,20 @@ static int parseOCI(const char *jsonfile)
 
 	if (opts.private_netifd && mount_is_defined("/etc/resolv.conf")) {
 		ERROR("bundle bind-mounts /etc/resolv.conf but the container has its own netifd\n");
+		res = EINVAL;
+		goto errout;
+	}
+
+	if (opts.hostname && opts.hostname[0] && !jail_has_utsns()) {
+		ERROR("hostname requires a UTS namespace\n");
+		jail_reason_set("hostname", EINVAL);
+		res = EINVAL;
+		goto errout;
+	}
+
+	if (opts.domainname && opts.domainname[0] && !jail_has_utsns()) {
+		ERROR("domainname requires a UTS namespace\n");
+		jail_reason_set("domainname", EINVAL);
 		res = EINVAL;
 		goto errout;
 	}
