@@ -262,6 +262,10 @@ static volatile sig_atomic_t jail_stop_requested;
 static bool netifd_restart_pending;
 static bool container_registered;
 static bool stop_announced;
+static volatile sig_atomic_t delete_requested;
+static bool delete_awaited;
+static bool delete_deferred;
+static struct ubus_request_data delete_request;
 static char **restart_argv;
 
 static const char *jail_reason;
@@ -1762,6 +1766,9 @@ static void free_and_exit(int ret)
 							  "instance.create_failed");
 	}
 
+	if (!exit_from_child && parent_ctx && delete_deferred)
+		ubus_complete_deferred_request(parent_ctx, &delete_request, 0);
+
 	if (!exit_from_child && parent_ctx)
 		ubus_free(parent_ctx);
 
@@ -2524,10 +2531,25 @@ static void jail_process_timeout_cb(struct uloop_timeout *t)
 	jail_pidfd_send_signal(SIGKILL);
 }
 
+static void container_delete_cb(struct uloop_timeout *t)
+{
+	if (!delete_awaited)
+		return;
+
+	delete_awaited = false;
+	poststop_hooks();
+}
+
+static struct uloop_timeout container_delete_timeout = {
+	.cb = container_delete_cb,
+};
+
 static void jail_handle_signal(int signo)
 {
-	if (signo == SIGTERM)
+	if (signo == SIGTERM) {
 		jail_stop_requested = true;
+		delete_requested = true;
+	}
 
 	if (hook_running) {
 		DEBUG("forwarding signal %d to the hook process\n", signo);
@@ -2544,6 +2566,9 @@ static void jail_handle_signal(int signo)
 		if (signo == SIGTERM)
 			uloop_timeout_set(&jail_process_timeout, opts.term_timeout * 1000);
 	}
+
+	if (signo == SIGTERM && delete_awaited)
+		uloop_timeout_add(&container_delete_timeout);
 }
 
 static void signals_init(void)
@@ -6436,10 +6461,29 @@ static void add_volume(const char *source, const char *dest)
 	free(real);
 }
 
+static int
+container_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	if (delete_deferred || (!delete_awaited && !jail_stop_requested))
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	ubus_defer_request(ctx, req, &delete_request);
+	delete_deferred = true;
+	delete_requested = true;
+
+	if (delete_awaited)
+		uloop_timeout_add(&container_delete_timeout);
+
+	return UBUS_STATUS_OK;
+}
+
 static struct ubus_method container_methods[] = {
 	UBUS_METHOD_NOARG("start", handle_start),
 	UBUS_METHOD_NOARG("state", handle_state),
 	UBUS_METHOD("kill", container_handle_kill, container_kill_attrs),
+	UBUS_METHOD_NOARG("delete", container_handle_delete),
 	UBUS_METHOD_NOARG("pause", container_handle_pause),
 	UBUS_METHOD_NOARG("resume", container_handle_resume),
 	UBUS_METHOD("reclaim", container_handle_reclaim, container_reclaim_attrs),
@@ -7866,8 +7910,12 @@ static void pipe_send_start_container(struct uloop_timeout *t)
 	}
 	close(pipes[3]);
 
-	if (jail_seccomp_handshake())
-		free_and_exit(-1);
+	if (jail_seccomp_handshake()) {
+		if (!jail_reaped)
+			free_and_exit(-1);
+
+		return;
+	}
 
 	poststart_pending = true;
 }
@@ -7914,6 +7962,13 @@ static void poststop(void)
 	stop_announced = true;
 	emit_instance_event(container_registered ? "instance.stopped" :
 						  "instance.create_failed");
+
+	/* a restart re-execs in place, so no delete will ever follow it */
+	if (opts.ocibundle && container_registered && !jail_restarting() &&
+	    !delete_requested) {
+		delete_awaited = true;
+		return;
+	}
 
 	poststop_hooks();
 }

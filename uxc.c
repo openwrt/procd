@@ -380,13 +380,20 @@ static struct ubus_event_handler uxc_wait_ev;
 static bool uxc_wait_armed;
 static bool uxc_uloop_ready;
 
+static void uxc_uloop_init(void)
+{
+	if (uxc_uloop_ready)
+		return;
+
+	uloop_init();
+	ubus_add_uloop(ctx);
+	uxc_uloop_ready = true;
+}
+
 static int uxc_wait_arm(struct uxc_wait_state *w)
 {
-	if (!uxc_uloop_ready) {
-		uloop_init();
-		ubus_add_uloop(ctx);
-		uxc_uloop_ready = true;
-	}
+	uxc_uloop_init();
+
 	if (!uxc_wait_armed) {
 		uxc_wait_ev.cb = uxc_wait_event_cb;
 		if (ubus_register_event_handler(ctx, &uxc_wait_ev, "instance.*"))
@@ -1525,10 +1532,85 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 	}
 }
 
+static const char *uxc_delete_path;
+static bool uxc_delete_replied;
+
+static void uxc_delete_done_cb(struct ubus_request *req, int ret)
+{
+	uxc_delete_replied = true;
+	uloop_end();
+}
+
+static void uxc_object_remove_cb(struct ubus_context *uctx,
+				 struct ubus_event_handler *ev,
+				 const char *type, struct blob_attr *msg)
+{
+	static const struct blobmsg_policy pol = {
+		.name = "path", .type = BLOBMSG_TYPE_STRING
+	};
+	struct blob_attr *tb;
+
+	if (!msg || !uxc_delete_path)
+		return;
+
+	blobmsg_parse(&pol, 1, &tb, blob_data(msg), blob_len(msg));
+	if (!tb || strcmp(blobmsg_get_string(tb), uxc_delete_path))
+		return;
+
+	uloop_end();
+}
+
+static struct ubus_event_handler uxc_object_remove_ev = {
+	.cb = uxc_object_remove_cb,
+};
+
+static void uxc_runtime_delete(const char *name)
+{
+	struct ubus_request req;
+	char *objname;
+	uint32_t id;
+
+	if (asprintf(&objname, "container.%s", name) == -1)
+		return;
+
+	if (ubus_lookup_id(ctx, objname, &id))
+		goto out;
+
+	uxc_uloop_init();
+
+	if (ubus_register_event_handler(ctx, &uxc_object_remove_ev,
+					"ubus.object.remove")) {
+		fprintf(stderr, "uxc: cannot watch for %s to be removed\n",
+			objname);
+		goto out;
+	}
+
+	if (ubus_invoke_async(ctx, id, "delete", NULL, &req))
+		goto unregister;
+
+	uxc_delete_path = objname;
+	uxc_delete_replied = false;
+	req.complete_cb = uxc_delete_done_cb;
+	ubus_complete_request_async(ctx, &req);
+
+	uloop_run();
+
+	uxc_delete_path = NULL;
+	if (!uxc_delete_replied)
+		ubus_abort_request(ctx, &req);
+
+unregister:
+	ubus_unregister_event_handler(ctx, &uxc_object_remove_ev);
+out:
+	free(objname);
+}
+
 static void uxc_instance_drop(const char *name)
 {
 	static struct blob_buf req;
 	uint32_t id;
+
+	uxc_runtime_delete(name);
 
 	if (ubus_lookup_id(ctx, "container", &id))
 		return;
@@ -1595,6 +1677,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	char hostsbind[PATH_MAX];
 	char provbind[2 * PATH_MAX];
 	struct blob_attr *ptb[__PROV_MAX];
+	struct runtime_state *rsstate = NULL;
 	struct uxc_wait_state wait_state;
 
 	void *in, *ins, *j, *m;
@@ -1614,6 +1697,10 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 
 	if (!found)
 		return -ENOENT;
+
+	rsstate = avl_find_element(&runtime, name, rsstate, avl);
+	if (rsstate && !runtime_live(rsstate))
+		uxc_instance_drop(name);
 
 	path = blobmsg_get_string(tb[CONF_PATH]);
 
@@ -2932,8 +3019,6 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	const char *sfname = NULL;
 	struct stat sb;
 	const char *statevol = NULL;
-	struct uxc_wait_state wait_state;
-	char *objname = NULL;
 	bool live;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
@@ -2972,52 +3057,23 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	}
 
 	if (rsstate) {
-		uint32_t cont_id;
-		bool have_cont_obj;
-
 		ret = ubus_lookup_id(ctx, "container", &id);
 		if (ret)
 			goto errout;
+
+		uxc_runtime_delete(rsstate->container_name);
 
 		blob_buf_init(&req, 0);
 		blobmsg_add_string(&req, "name", rsstate->container_name);
 		blobmsg_add_string(&req, "instance", rsstate->instance_name);
 
-		if (asprintf(&objname, "container.%s", rsstate->container_name) == -1) {
-			blob_buf_free(&req);
-			ret = -ENOMEM;
-			goto errout;
-		}
-
-		have_cont_obj = (ubus_lookup_id(ctx, objname, &cont_id) == 0);
-		free(objname);
-		objname = NULL;
-
-		if (have_cont_obj) {
-			memset(&wait_state, 0, sizeof(wait_state));
-			wait_state.service = rsstate->container_name;
-			wait_state.instance = rsstate->instance_name;
-			if (rsstate->runtime_pid > 0)
-				wait_state.pid = rsstate->runtime_pid;
-			if (uxc_wait_arm(&wait_state))
-				fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
-		}
-
 		ret = ubus_invoke(ctx, id, "delete", req.head, NULL, NULL, 3000);
 		if (ret && ret != UBUS_STATUS_NOT_FOUND) {
 			blob_buf_free(&req);
-			if (have_cont_obj)
-				uxc_wait_disarm();
 			ret = -EIO;
 			goto errout;
 		}
 
-		if (have_cont_obj && !ret &&
-		    uxc_wait_run(&wait_state, 30000) == -ETIMEDOUT)
-			fprintf(stderr, "uxc: warning: timed out waiting for container.%s removal\n",
-				rsstate->container_name);
-		if (have_cont_obj)
-			uxc_wait_disarm();
 		ret = 0;
 	}
 
