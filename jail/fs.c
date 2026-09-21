@@ -1293,7 +1293,9 @@ static int idmap_mount_target(const char *root, struct mount *m, char *target, s
 	return 0;
 }
 
-static int idmap_tree_fd(const char *source, int source_fd, int userns_fd, unsigned long mountflags, bool recursive)
+static int idmap_tree_fd(const char *source, int source_fd, int userns_fd,
+			 unsigned long mountflags, unsigned long propagation,
+			 bool recursive)
 {
 	struct ujail_mount_attr attr = { 0 };
 	unsigned int open_flags = OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC;
@@ -1334,6 +1336,7 @@ static int idmap_tree_fd(const char *source, int source_fd, int userns_fd, unsig
 		else
 			attr.attr_set |= MOUNT_ATTR_RELATIME;
 	}
+	attr.propagation = propagation;
 	attr.userns_fd = userns_fd;
 
 	if (sys_mount_setattr(treefd, "", setattr_flags, &attr, sizeof(attr)) < 0) {
@@ -1364,7 +1367,8 @@ static int do_idmap_mount(const char *root, struct mount *m)
 	if (idmap_mount_target(root, m, target, sizeof(target)))
 		goto out_close;
 
-	treefd = idmap_tree_fd(m->source, m->source_fd, userns_fd, m->mountflags, m->idmap_recursive);
+	treefd = idmap_tree_fd(m->source, m->source_fd, userns_fd, m->mountflags, 0,
+			       m->idmap_recursive);
 	if (treefd < 0)
 		goto out_close;
 
@@ -1437,7 +1441,7 @@ int jail_idmap_build(const char *extroot,
 
 	if (n >= maxfds)
 		goto err;
-	fd = idmap_tree_fd(extroot, -1, userns_fd, 0, false);
+	fd = idmap_tree_fd(extroot, -1, userns_fd, 0, MS_PRIVATE, false);
 	if (fd < 0)
 		goto err;
 	fds[n++] = fd;
