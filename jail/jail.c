@@ -2483,6 +2483,10 @@ static void jail_process_handler(struct uloop_process *c, int ret)
 	}
 	jail_write_exit_status(opts.pidfile, jail_return_code);
 	jail_running = 0;
+
+	if (hook_running)
+		return;
+
 	poststop();
 }
 
@@ -6950,6 +6954,12 @@ static void post_prestart(void)
 		jail_reason_set("hooks.prestart", ECANCELED);
 		free_and_exit(EXIT_FAILURE);
 	}
+
+	if (jail_reaped) {
+		poststop();
+		return;
+	}
+
 	run_hooks(opts.hooks.createRuntime, post_create_runtime);
 }
 
@@ -7474,6 +7484,11 @@ static void post_create_runtime(void)
 		free_and_exit(EXIT_FAILURE);
 	}
 
+	if (jail_reaped) {
+		poststop();
+		return;
+	}
+
 	if (sock_send_fds(pipes[3], 'O', idmap_fds, num_idmap_fds) < 0) {
 		ERROR("can't write to child\n");
 		free_and_exit(-1);
@@ -7825,7 +7840,7 @@ static void post_poststart(void)
 	if (hook_chain_failed) {
 		ERROR("poststart hook failed; stopping container\n");
 		jail_reason_set("hooks.poststart", ECANCELED);
-	} else {
+	} else if (!jail_reaped) {
 		netifd_restart_watch();
 		uloop_run(); /* idle here while jail is running */
 	}
@@ -7836,7 +7851,7 @@ static void post_poststart(void)
 		uloop_timeout_set(&jail_process_timeout, 1000);
 		uloop_run();
 	}
-	uloop_done();
+
 	poststop();
 }
 
