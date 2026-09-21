@@ -2464,6 +2464,7 @@ static int setns_open(unsigned long nstype)
 static int jail_running = 0;
 static int jail_return_code = 0;
 static bool jail_reaped;
+static bool poststart_pending;
 
 static void jail_process_timeout_cb(struct uloop_timeout *t);
 static struct uloop_timeout jail_process_timeout = {
@@ -2484,7 +2485,7 @@ static void jail_process_handler(struct uloop_process *c, int ret)
 	jail_write_exit_status(opts.pidfile, jail_return_code);
 	jail_running = 0;
 
-	if (hook_running)
+	if (hook_running || poststart_pending)
 		return;
 
 	poststop();
@@ -7427,6 +7428,23 @@ static void emit_instance_event(const char *event)
 	ubus_send_event(parent_ctx, event, notify_buf.head);
 }
 
+static void post_poststart(void);
+static void poststart_dispatch(bool executed)
+{
+	if (!poststart_pending)
+		return;
+
+	poststart_pending = false;
+
+	if (executed) {
+		run_hooks(opts.hooks.poststart, post_poststart);
+		return;
+	}
+
+	if (jail_reaped)
+		poststop();
+}
+
 static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 {
 	int exec_errno = 0;
@@ -7454,16 +7472,19 @@ static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 
 	if (!exec_ack_len) {
 		INFO("the jail exited before its entrypoint was executed\n");
+		poststart_dispatch(false);
 		return;
 	}
 
 	if (exec_ack_buf[0] != EXEC_ACK_EXEC) {
 		ERROR("container.start: unexpected exec acknowledgement\n");
+		poststart_dispatch(false);
 		return;
 	}
 
 	if (exec_ack_len == 1) {
 		emit_instance_event("instance.running");
+		poststart_dispatch(true);
 		return;
 	}
 
@@ -7473,9 +7494,9 @@ static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 	ERROR("container.start: cannot execute the entrypoint: %s\n",
 	      exec_errno ? strerror(exec_errno) : "reason not reported");
 	jail_reason_set("process.args", exec_errno ?: ENOEXEC);
+	poststart_dispatch(false);
 }
 
-static void post_poststart(void);
 static void post_create_runtime(void)
 {
 	if (hook_chain_failed) {
@@ -7832,7 +7853,7 @@ static void pipe_send_start_container(struct uloop_timeout *t)
 	if (jail_seccomp_handshake())
 		free_and_exit(-1);
 
-	run_hooks(opts.hooks.poststart, post_poststart);
+	poststart_pending = true;
 }
 
 static void post_poststart(void)
