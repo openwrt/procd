@@ -6841,7 +6841,8 @@ static void post_main(struct uloop_timeout *t)
 			}
 			/* default mounts */
 			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "size=1M", -1);
-			add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, "mode=1777", -1);
+			add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0,
+				  "mode=1777,size=10%", -1);
 			{
 				const char *ptsopts = (opts.namespace & CLONE_NEWUSER) ?
 					"newinstance,ptmxmode=0666,mode=0620,gid=0" :
