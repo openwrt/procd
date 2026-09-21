@@ -1546,10 +1546,11 @@ static void free_and_exit(int ret)
 		opts.jail_network_started = false;
 	}
 
-	if (!exit_from_child && opts.ocibundle) {
+	if (!exit_from_child && opts.ocibundle && container_registered)
 		cgroups_destroy();
+
+	if (!exit_from_child && opts.ocibundle)
 		cgroups_free();
-	}
 
 	if (!exit_from_child && jail_dev_staged) {
 		umount2(jail_dev, MNT_DETACH);
