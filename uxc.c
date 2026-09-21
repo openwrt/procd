@@ -286,7 +286,9 @@ struct uxc_wait_state {
 	const char *instance;
 	const char *success_event;
 	const char *fail_event;
+	char reason[96];
 	int result;
+	int err;
 };
 
 static struct uxc_wait_state *active_wait;
@@ -294,12 +296,16 @@ static struct uxc_wait_state *active_wait;
 enum {
 	UXC_WAIT_SERVICE,
 	UXC_WAIT_INSTANCE,
+	UXC_WAIT_REASON,
+	UXC_WAIT_ERRNO,
 	__UXC_WAIT_INST_MAX,
 };
 
 static const struct blobmsg_policy uxc_wait_inst_policy[__UXC_WAIT_INST_MAX] = {
 	[UXC_WAIT_SERVICE]  = { "service",  BLOBMSG_TYPE_STRING },
 	[UXC_WAIT_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+	[UXC_WAIT_REASON]   = { "reason",   BLOBMSG_TYPE_STRING },
+	[UXC_WAIT_ERRNO]    = { "errno",    BLOBMSG_TYPE_INT32 },
 };
 
 static void uxc_wait_timeout_cb(struct uloop_timeout *t)
@@ -335,8 +341,31 @@ static void uxc_wait_event_cb(struct ubus_context *uctx,
 	else
 		return;
 
+	if (tb[UXC_WAIT_REASON])
+		snprintf(w->reason, sizeof(w->reason), "%s",
+			 blobmsg_get_string(tb[UXC_WAIT_REASON]));
+
+	if (tb[UXC_WAIT_ERRNO])
+		w->err = blobmsg_get_u32(tb[UXC_WAIT_ERRNO]);
+
 	w->result = result;
 	uloop_end();
+}
+
+static const char *uxc_wait_why(struct uxc_wait_state *w)
+{
+	static char buf[160];
+
+	if (!w->reason[0])
+		return NULL;
+
+	if (w->err)
+		snprintf(buf, sizeof(buf), "%s: %s", w->reason,
+			 strerror(w->err));
+	else
+		snprintf(buf, sizeof(buf), "%s", w->reason);
+
+	return buf;
 }
 
 static struct ubus_event_handler uxc_wait_ev;
@@ -1652,12 +1681,16 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	uxc_wait_run(&wait_state, 30000);
 	uxc_wait_disarm();
 	if (wait_state.result == UXC_WAIT_FAILED) {
-		fprintf(stderr, "uxc: create %s failed: the container was not created\n", name);
+		fprintf(stderr, "uxc: create %s failed: %s\n", name,
+			uxc_wait_why(&wait_state) ?:
+				"the container was not created");
 		uxc_instance_drop(name);
 		return -EIO;
 	}
 	if (wait_state.result == UXC_WAIT_STOPPED) {
-		fprintf(stderr, "uxc: create %s failed: container exited before ready\n", name);
+		fprintf(stderr, "uxc: create %s failed: %s\n", name,
+			uxc_wait_why(&wait_state) ?:
+				"container exited before ready");
 		uxc_instance_drop(name);
 		return -EIO;
 	}
@@ -1716,6 +1749,10 @@ static int uxc_start(const char *name, bool console)
 				"reach running state\n", name);
 		return -ETIMEDOUT;
 	}
+	if (wait_state.result == UXC_WAIT_STOPPED && wait_state.reason[0])
+		fprintf(stderr, "uxc: %s stopped before running: %s\n", name,
+			uxc_wait_why(&wait_state));
+
 	return 0;
 }
 
