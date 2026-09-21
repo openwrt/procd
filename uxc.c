@@ -279,11 +279,13 @@ static struct ubus_context *ctx;
 #define UXC_WAIT_UNSET		0
 #define UXC_WAIT_OK		1
 #define UXC_WAIT_STOPPED	2
+#define UXC_WAIT_FAILED		3
 
 struct uxc_wait_state {
 	const char *service;
 	const char *instance;
 	const char *success_event;
+	const char *fail_event;
 	int result;
 };
 
@@ -326,6 +328,8 @@ static void uxc_wait_event_cb(struct ubus_context *uctx,
 
 	if (w->success_event && !strcmp(type, w->success_event))
 		result = UXC_WAIT_OK;
+	else if (w->fail_event && !strcmp(type, w->fail_event))
+		result = UXC_WAIT_FAILED;
 	else if (!strcmp(type, "instance.stopped"))
 		result = UXC_WAIT_STOPPED;
 	else
@@ -1628,6 +1632,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	wait_state.service = name;
 	wait_state.instance = name;
 	wait_state.success_event = "instance.ready";
+	wait_state.fail_event = "instance.create_failed";
 
 	if (uxc_wait_arm(&wait_state))
 		fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
@@ -1646,6 +1651,11 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 
 	uxc_wait_run(&wait_state, 30000);
 	uxc_wait_disarm();
+	if (wait_state.result == UXC_WAIT_FAILED) {
+		fprintf(stderr, "uxc: create %s failed: the container was not created\n", name);
+		uxc_instance_drop(name);
+		return -EIO;
+	}
 	if (wait_state.result == UXC_WAIT_STOPPED) {
 		fprintf(stderr, "uxc: create %s failed: container exited before ready\n", name);
 		uxc_instance_drop(name);
