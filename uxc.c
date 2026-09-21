@@ -878,6 +878,25 @@ static int runtime_load(void)
 	return 0;
 }
 
+static bool runtime_live(struct runtime_state *rs)
+{
+	struct blob_attr *tb[__STATE_MAX];
+
+	if (!rs)
+		return false;
+
+	if (!rs->ocistate)
+		return rs->running;
+
+	blobmsg_parse(state_policy, __STATE_MAX, tb, blobmsg_data(rs->ocistate),
+		      blobmsg_len(rs->ocistate));
+
+	if (!tb[STATE_STATUS])
+		return rs->running;
+
+	return strcmp(blobmsg_get_string(tb[STATE_STATUS]), "stopped") != 0;
+}
+
 static void runtime_free(void)
 {
 	struct runtime_state *item, *tmp;
@@ -1320,7 +1339,7 @@ static int uxc_exists(char *name)
 	struct runtime_state *rsstate = NULL;
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
 
-	if (rsstate && (rsstate->running))
+	if (runtime_live(rsstate))
 		return -EEXIST;
 
 	return 0;
@@ -1994,7 +2013,7 @@ static int uxc_kill(char *name, int signal, bool all)
 		return -ENOENT;
 	}
 
-	if (!rsstate->running) {
+	if (!runtime_live(rsstate)) {
 		fprintf(stderr, "uxc: %s is not running\n", name);
 		return -ENOENT;
 	}
@@ -2915,6 +2934,7 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	const char *statevol = NULL;
 	struct uxc_wait_state wait_state;
 	char *objname = NULL;
+	bool live;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
@@ -2937,13 +2957,14 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	}
 
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
+	live = runtime_live(rsstate);
 
-	if (rsstate && rsstate->running && !force) {
+	if (live && !force) {
 		ret = -EWOULDBLOCK;
 		goto errout;
 	}
 
-	if (rsstate && rsstate->running) {
+	if (live) {
 		ret = uxc_kill(name, SIGKILL, true);
 		if (ret && ret != -ENOENT)
 			goto errout;
