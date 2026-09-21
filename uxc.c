@@ -23,6 +23,7 @@
 #include <sys/file.h>
 #include <glob.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -71,6 +72,7 @@ struct runtime_state {
 	bool running;
 	int runtime_pid;
 	int exitcode;
+	uint64_t incarnation;
 	struct blob_attr *ocistate;
 };
 
@@ -287,6 +289,7 @@ struct uxc_wait_state {
 	const char *success_event;
 	const char *fail_event;
 	char reason[96];
+	uint64_t since_incarnation;
 	int result;
 	int err;
 };
@@ -298,14 +301,16 @@ enum {
 	UXC_WAIT_INSTANCE,
 	UXC_WAIT_REASON,
 	UXC_WAIT_ERRNO,
+	UXC_WAIT_INCARNATION,
 	__UXC_WAIT_INST_MAX,
 };
 
 static const struct blobmsg_policy uxc_wait_inst_policy[__UXC_WAIT_INST_MAX] = {
-	[UXC_WAIT_SERVICE]  = { "service",  BLOBMSG_TYPE_STRING },
-	[UXC_WAIT_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
-	[UXC_WAIT_REASON]   = { "reason",   BLOBMSG_TYPE_STRING },
-	[UXC_WAIT_ERRNO]    = { "errno",    BLOBMSG_TYPE_INT32 },
+	[UXC_WAIT_SERVICE]     = { "service",     BLOBMSG_TYPE_STRING },
+	[UXC_WAIT_INSTANCE]    = { "instance",    BLOBMSG_TYPE_STRING },
+	[UXC_WAIT_REASON]      = { "reason",      BLOBMSG_TYPE_STRING },
+	[UXC_WAIT_ERRNO]       = { "errno",       BLOBMSG_TYPE_INT32 },
+	[UXC_WAIT_INCARNATION] = { "incarnation", BLOBMSG_TYPE_INT64 },
 };
 
 static void uxc_wait_timeout_cb(struct uloop_timeout *t)
@@ -330,6 +335,9 @@ static void uxc_wait_event_cb(struct ubus_context *uctx,
 	if (w->service && strcmp(blobmsg_get_string(tb[UXC_WAIT_SERVICE]), w->service))
 		return;
 	if (w->instance && strcmp(blobmsg_get_string(tb[UXC_WAIT_INSTANCE]), w->instance))
+		return;
+	if (w->since_incarnation && tb[UXC_WAIT_INCARNATION] &&
+	    blobmsg_get_u64(tb[UXC_WAIT_INCARNATION]) < w->since_incarnation)
 		return;
 
 	if (w->success_event && !strcmp(type, w->success_event))
@@ -623,6 +631,7 @@ static const struct blobmsg_policy list_policy[__LIST_MAX] = {
 enum {
 	INSTANCE_RUNNING,
 	INSTANCE_PID,
+	INSTANCE_INCARNATION,
 	INSTANCE_EXITCODE,
 	INSTANCE_JAIL,
 	__INSTANCE_MAX,
@@ -631,6 +640,7 @@ enum {
 static const struct blobmsg_policy instance_policy[__INSTANCE_MAX] = {
 	[INSTANCE_RUNNING] = { .name = "running", .type = BLOBMSG_TYPE_BOOL },
 	[INSTANCE_PID] = { .name = "pid", .type = BLOBMSG_TYPE_INT32 },
+	[INSTANCE_INCARNATION] = { .name = "incarnation", .type = BLOBMSG_TYPE_INT64 },
 	[INSTANCE_EXITCODE] = { .name = "exit_code", .type = BLOBMSG_TYPE_INT32 },
 	[INSTANCE_JAIL] = { .name = "jail", .type = BLOBMSG_TYPE_TABLE },
 };
@@ -744,6 +754,7 @@ static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 	int rem, remi;
 	const char *container_name, *instance_name, *jail_name;
 	bool running;
+	uint64_t incarnation;
 	int pid, exitcode;
 	struct runtime_state *rs;
 
@@ -778,17 +789,77 @@ static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 			else
 				exitcode = -1;
 
+			if (ti[INSTANCE_INCARNATION])
+				incarnation = blobmsg_get_u64(ti[INSTANCE_INCARNATION]);
+			else
+				incarnation = 0;
+
 			rs = runtime_alloc(container_name);
 			rs->instance_name = strdup(instance_name);
 			rs->jail_name = strdup(jail_name);
 			rs->runtime_pid = pid;
 			rs->exitcode = exitcode;
+			rs->incarnation = incarnation;
 			rs->running = running;
 			avl_insert(&runtime, &rs->avl);
 		}
 	}
 
 	return;
+}
+
+struct uxc_incarnation_lookup {
+	const char *service;
+	const char *instance;
+	uint64_t incarnation;
+};
+
+static void uxc_instance_incarnation_cb(struct ubus_request *req, int type,
+					struct blob_attr *msg)
+{
+	struct blob_attr *cur, *curi, *tl[__LIST_MAX], *ti[__INSTANCE_MAX];
+	struct uxc_incarnation_lookup *l = req->priv;
+	int rem, remi;
+
+	blobmsg_for_each_attr(cur, msg, rem) {
+		if (strcmp(blobmsg_name(cur), l->service))
+			continue;
+
+		blobmsg_parse(list_policy, __LIST_MAX, tl, blobmsg_data(cur),
+			      blobmsg_len(cur));
+		if (!tl[LIST_INSTANCES])
+			continue;
+
+		blobmsg_for_each_attr(curi, tl[LIST_INSTANCES], remi) {
+			if (strcmp(blobmsg_name(curi), l->instance))
+				continue;
+
+			blobmsg_parse(instance_policy, __INSTANCE_MAX, ti,
+				      blobmsg_data(curi), blobmsg_len(curi));
+			if (ti[INSTANCE_INCARNATION])
+				l->incarnation =
+					blobmsg_get_u64(ti[INSTANCE_INCARNATION]);
+		}
+	}
+}
+
+static uint64_t uxc_instance_incarnation(const char *service,
+					 const char *instance)
+{
+	struct uxc_incarnation_lookup l = { 0 };
+	uint32_t id;
+
+	l.service = service;
+	l.instance = instance;
+
+	if (ubus_lookup_id(ctx, "container", &id))
+		return 0;
+
+	if (ubus_invoke(ctx, id, "list", NULL, uxc_instance_incarnation_cb, &l,
+			3000))
+		return 0;
+
+	return l.incarnation;
 }
 
 static int runtime_load(void)
@@ -1662,6 +1733,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	wait_state.instance = name;
 	wait_state.success_event = "instance.ready";
 	wait_state.fail_event = "instance.create_failed";
+	wait_state.since_incarnation = uxc_instance_incarnation(name, name) + 1;
 
 	if (uxc_wait_arm(&wait_state))
 		fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
@@ -1948,6 +2020,7 @@ static int uxc_kill(char *name, int signal, bool all)
 		wait_state.service = name;
 		wait_state.instance = name;
 		wait_state.success_event = "instance.stopped";
+		wait_state.since_incarnation = rsstate->incarnation;
 		if (uxc_wait_arm(&wait_state))
 			fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
 	}
@@ -2902,6 +2975,8 @@ static int uxc_delete(char *name, bool force, bool volumes)
 			memset(&wait_state, 0, sizeof(wait_state));
 			wait_state.service = rsstate->container_name;
 			wait_state.instance = rsstate->instance_name;
+			if (rsstate->runtime_pid > 0)
+				wait_state.pid = rsstate->runtime_pid;
 			if (uxc_wait_arm(&wait_state))
 				fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
 		}
