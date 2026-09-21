@@ -320,15 +320,25 @@ void cgroups_create(void)
 	free(ent);
 }
 
-void cgroups_configure(void)
+/* a swap limit narrows nothing on a kernel built without swap */
+static bool cgroups_attr_vacuous(const char *key)
+{
+	if (strcmp(key, "memory.swap.max"))
+		return false;
+
+	return access("/proc/swaps", F_OK) != 0;
+}
+
+int cgroups_configure(void)
 {
 	struct cgval *valp;
-	char *ent;
 	size_t maxlen = 0;
 	int fd, dirfd;
+	int ret = 0;
+	char *ent;
 
 	if (!cgroup_path)
-		return;
+		return 0;
 
 	avl_for_each_element(&cgvals, valp, avl) {
 		size_t klen = strlen((char *)valp->avl.key);
@@ -347,14 +357,30 @@ void cgroups_configure(void)
 		snprintf(ent, maxlen, "%s/%s", cgroup_path, (char *)valp->avl.key);
 		fd = open(ent, O_WRONLY);
 		if (fd < 0) {
+			if (cgroups_attr_vacuous((char *)valp->avl.key)) {
+				INFO("%s is unavailable here, \"%s\" narrows nothing\n",
+				     ent, valp->val);
+				continue;
+			}
 			ERROR("can't open %s: %m\n", ent);
-			continue;
+			ret = ENOTSUP;
+			break;
 		}
-		if (dprintf(fd, "%s", valp->val) < 0)
+		if (dprintf(fd, "%s", valp->val) < 0) {
 			ERROR("can't write to %s: %m\n", ent);
+			close(fd);
+			if (cgroups_attr_vacuous((char *)valp->avl.key))
+				continue;
+
+			ret = ENOTSUP;
+			break;
+		}
 		close(fd);
 	}
 	free(ent);
+
+	if (ret)
+		return ret;
 
 	dirfd = open(cgroup_path, O_DIRECTORY);
 	if (dirfd < 0) {
@@ -363,13 +389,23 @@ void cgroups_configure(void)
 		attach_cgroups_ebpf(dirfd);
 		close(dirfd);
 	}
+
+	return 0;
 }
 
-void cgroups_apply(pid_t pid)
+int cgroups_apply(pid_t pid)
 {
+	int ret;
+
 	cgroups_create();
-	cgroups_configure();
+
+	ret = cgroups_configure();
+	if (ret)
+		return ret;
+
 	cgroups_attach_pid(pid);
+
+	return 0;
 }
 
 enum {

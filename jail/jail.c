@@ -5422,7 +5422,9 @@ container_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 		}
 	}
 
-	cgroups_apply(jail_process.pid);
+	if (cgroups_apply(jail_process.pid))
+		return UBUS_STATUS_NOT_SUPPORTED;
+
 	return UBUS_STATUS_OK;
 }
 
@@ -7066,7 +7068,9 @@ static void post_main(struct uloop_timeout *t)
 		set_oom_score_adj();
 
 		if (opts.ocibundle) {
-			cgroups_configure();
+			if (cgroups_configure())
+				free_and_exit(ENOTSUP);
+
 			cgroups_attach_pid(jail_process.pid);
 		}
 
