@@ -86,6 +86,7 @@ struct service_instance {
 	int respawn_count;
 	int reload_signal;
 	struct timespec start;
+	struct timespec stop;
 
 	bool trace;
 	bool has_jail;
@@ -113,6 +114,8 @@ struct service_instance {
 	struct blob_attr *config;
 	struct uloop_process proc;
 	struct uloop_timeout timeout;
+	struct uloop_timeout cgroup_timeout;
+	struct uloop_fd cgroup_events;
 	int stdio_fd[3];
 	int notify_fd;
 	struct ustream_fd _stdout;

@@ -40,6 +40,7 @@
 
 #define UJAIL_BIN_PATH "/sbin/ujail"
 #define CGROUP_BASEDIR "/sys/fs/cgroup/services"
+#define CGROUP_DRAIN_TIMEOUT_MSEC 1000
 
 enum {
 	INSTANCE_ATTR_COMMAND,
@@ -955,32 +956,85 @@ instance_exit_code(int ret)
 	return 1;
 }
 
-static void
-instance_exit(struct uloop_process *p, int ret)
+static bool
+cgroups_populated(int fd)
 {
-	struct service_instance *in;
+	char buf[128];
+	ssize_t len;
+	char *val;
+
+	if (lseek(fd, 0, SEEK_SET) < 0)
+		return false;
+
+	len = read(fd, buf, sizeof(buf) - 1);
+	if (len <= 0)
+		return false;
+
+	buf[len] = '\0';
+	val = strstr(buf, "populated ");
+	if (!val)
+		return false;
+
+	return val[strlen("populated ")] == '1';
+}
+
+static void
+instance_cgroup_survivors(const char *service, const char *instance)
+{
+	char cgnamebuf[256];
+	char buf[128];
+	ssize_t len;
+	int fd, ret;
+	char *c;
+
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s/cgroup.procs",
+		       CGROUP_BASEDIR, service, instance);
+	if (ret >= (int)sizeof(cgnamebuf))
+		return;
+
+	fd = open(cgnamebuf, O_RDONLY);
+	if (fd < 0)
+		return;
+
+	len = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (len <= 0)
+		return;
+
+	buf[len] = '\0';
+	for (c = buf; *c; c++)
+		if (*c == '\n')
+			*c = ' ';
+
+	ULOG_WARN("cgroup of %s::%s still holds pid(s): %s\n", service,
+		  instance, buf);
+}
+
+static void
+instance_cgroup_wait_stop(struct service_instance *in)
+{
+	uloop_timeout_cancel(&in->cgroup_timeout);
+
+	if (in->cgroup_events.fd < 0)
+		return;
+
+	uloop_fd_delete(&in->cgroup_events);
+	close(in->cgroup_events.fd);
+	in->cgroup_events.fd = -1;
+}
+
+static void
+instance_exit_done(struct service_instance *in)
+{
 	bool restart = false;
-	struct timespec tp;
 	long runtime;
 
-	in = container_of(p, struct service_instance, proc);
+	if (in->proc.pending)
+		return;
 
-	clock_gettime(CLOCK_MONOTONIC, &tp);
-	runtime = tp.tv_sec - in->start.tv_sec;
-
-	P_DEBUG(2, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
-
-	in->exit_code = instance_exit_code(ret);
-	uloop_timeout_cancel(&in->timeout);
-	uloop_timeout_cancel(&in->watchdog.timeout);
-
-	if (in->has_jail)
-		instance_kill_cgroup(in->srv->name, in->name);
-
-	service_event("instance.stop", in->srv->name, in->name);
+	runtime = in->stop.tv_sec - in->start.tv_sec;
 
 	if (in->halt) {
-		instance_removepid(in);
 		if (in->restart)
 			restart = true;
 		else
@@ -1008,6 +1062,97 @@ instance_exit(struct uloop_process *p, int ret)
 		instance_start(in);
 		rc(in->srv->name, "running");
 	}
+}
+
+static void
+instance_cgroup_timeout_cb(struct uloop_timeout *t)
+{
+	struct service_instance *in;
+	bool populated;
+
+	in = container_of(t, struct service_instance, cgroup_timeout);
+	populated = in->cgroup_events.fd > -1 &&
+		    cgroups_populated(in->cgroup_events.fd);
+
+	instance_cgroup_wait_stop(in);
+
+	if (populated && !in->proc.pending)
+		instance_cgroup_survivors(in->srv->name, in->name);
+
+	instance_exit_done(in);
+}
+
+static void
+instance_cgroup_events_cb(struct uloop_fd *fd, unsigned int events)
+{
+	struct service_instance *in;
+
+	in = container_of(fd, struct service_instance, cgroup_events);
+
+	if (cgroups_populated(fd->fd))
+		return;
+
+	uloop_timeout_set(&in->cgroup_timeout, 0);
+}
+
+static void
+instance_cgroup_wait(struct service_instance *in)
+{
+	char cgnamebuf[256];
+	int fd, ret;
+
+	instance_cgroup_wait_stop(in);
+
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s/cgroup.events",
+		       CGROUP_BASEDIR, in->srv->name, in->name);
+	if (ret >= (int)sizeof(cgnamebuf)) {
+		instance_exit_done(in);
+		return;
+	}
+
+	fd = open(cgnamebuf, O_RDONLY);
+	if (fd < 0) {
+		instance_exit_done(in);
+		return;
+	}
+
+	in->cgroup_events.fd = fd;
+	uloop_timeout_set(&in->cgroup_timeout, CGROUP_DRAIN_TIMEOUT_MSEC);
+	uloop_fd_add(&in->cgroup_events, ULOOP_PRIORITY);
+
+	if (!cgroups_populated(fd))
+		uloop_timeout_set(&in->cgroup_timeout, 0);
+}
+
+static void
+instance_exit(struct uloop_process *p, int ret)
+{
+	struct service_instance *in;
+	long runtime;
+
+	in = container_of(p, struct service_instance, proc);
+
+	clock_gettime(CLOCK_MONOTONIC, &in->stop);
+	runtime = in->stop.tv_sec - in->start.tv_sec;
+
+	P_DEBUG(2, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
+
+	in->exit_code = instance_exit_code(ret);
+	uloop_timeout_cancel(&in->timeout);
+	uloop_timeout_cancel(&in->watchdog.timeout);
+
+	if (in->halt)
+		instance_removepid(in);
+
+	service_event("instance.stop", in->srv->name, in->name);
+
+	if (!in->has_jail) {
+		instance_exit_done(in);
+		return;
+	}
+
+	instance_kill_cgroup(in->srv->name, in->name);
+	instance_cgroup_wait(in);
 }
 
 static int
@@ -1827,6 +1972,7 @@ instance_free(struct service_instance *in)
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	uloop_timeout_cancel(&in->watchdog.timeout);
+	instance_cgroup_wait_stop(in);
 	trigger_del(in);
 	watch_del(in);
 	if (in->has_cgroup)
@@ -1863,6 +2009,9 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->config = config;
 	in->timeout.cb = instance_timeout;
 	in->proc.cb = instance_exit;
+	in->cgroup_events.fd = -1;
+	in->cgroup_events.cb = instance_cgroup_events_cb;
+	in->cgroup_timeout.cb = instance_cgroup_timeout_cb;
 	in->term_timeout = 5;
 	in->syslog_facility = LOG_DAEMON;
 	in->exit_code = 0;
