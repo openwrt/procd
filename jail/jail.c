@@ -7369,6 +7369,13 @@ static void emit_instance_event(const char *event)
 {
 	if (!opts.ocibundle || !opts.name || !parent_ctx)
 		return;
+
+	if (!strcmp(event, "instance.stopped") && !exit_from_child &&
+	    !cgroups_destroyed()) {
+		ERROR("instance.stopped emitted before the cgroup was destroyed\n");
+		cgroups_destroy();
+	}
+
 	blob_buf_init(&notify_buf, 0);
 	blobmsg_add_string(&notify_buf, "service", opts.name);
 	blobmsg_add_string(&notify_buf, "instance", opts.name);

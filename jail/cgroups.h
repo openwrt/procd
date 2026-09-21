@@ -21,6 +21,7 @@ void cgroups_init(const char *p);
 int parseOCIlinuxcgroups(struct blob_attr *msg, bool is_update);
 void cgroups_create(void);
 void cgroups_destroy(void);
+bool cgroups_destroyed(void);
 int cgroups_configure(void);
 int cgroups_apply(pid_t pid);
 int cgroups_attach_pid(pid_t pid);

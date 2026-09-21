@@ -58,9 +58,11 @@ struct cgval {
 struct avl_tree cgvals;
 static char *cgroup_path;
 static bool initialized;
+static bool destroyed;
 
 void cgroups_prepare(void) {
 	initialized = false;
+	destroyed = false;
 }
 
 void cgroups_init(const char *p) {
@@ -326,6 +328,8 @@ void cgroups_destroy(void)
 {
 	char *sep;
 
+	destroyed = true;
+
 	if (!cgroup_path)
 		return;
 
@@ -341,6 +345,11 @@ void cgroups_destroy(void)
 		(void)rmdir(cgroup_path);
 		*sep = '/';
 	}
+}
+
+bool cgroups_destroyed(void)
+{
+	return destroyed;
 }
 
 void cgroups_create(void)
