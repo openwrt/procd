@@ -3052,6 +3052,18 @@ static void post_jail_fs(void)
 	run_hooks(opts.hooks.startContainer, post_start_hook);
 }
 
+static void parent_pidfd_check(void)
+{
+	struct pollfd pfd = { .fd = parent_pidfd, .events = POLLIN };
+
+	if (poll(&pfd, 1, 0) > 0) {
+		ERROR("parent died before PR_SET_PDEATHSIG\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	close(parent_pidfd);
+}
+
 static void post_start_hook(void)
 {
 	struct sock_fprog *seccomp_prog = opts.ociseccomp_linker ?: opts.ociseccomp;
@@ -3172,15 +3184,7 @@ static void post_start_hook(void)
 	 * delivered, so detect the exit on the inherited pidfd and die ourselves.
 	 * getppid() == 1 cannot serve here: in a new PID namespace the parent is
 	 * not visible and getppid() reads 0 either way. */
-	if (parent_pidfd >= 0) {
-		struct pollfd pfd = { .fd = parent_pidfd, .events = POLLIN };
-
-		if (poll(&pfd, 1, 0) > 0) {
-			ERROR("parent died before PR_SET_PDEATHSIG\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-		close(parent_pidfd);
-	}
+	parent_pidfd_check();
 
 	if (opts.mdwe_flags && prctl(PR_SET_MDWE, opts.mdwe_flags, 0, 0, 0)) {
 		ERROR("prctl(PR_SET_MDWE, 0x%lx) failed: %m\n", opts.mdwe_flags);
@@ -6779,6 +6783,10 @@ static void post_main(struct uloop_timeout *t)
 		free_and_exit(-1);
 
 	parent_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+	if (parent_pidfd < 0) {
+		ERROR("pidfd_open() failed: %m\n");
+		free_and_exit(EXIT_FAILURE);
+	}
 
 	if (pipe2(exec_ack, O_CLOEXEC) < 0)
 		free_and_exit(-1);
