@@ -235,7 +235,11 @@ static struct blob_buf notify_buf;
 
 static char **volume_sources;
 static int num_volume_sources;
+
+#define EXEC_ACK_EXEC	'X'
 static int exec_ack[2] = { -1, -1 };
+static char exec_ack_buf[1 + sizeof(int)];
+static size_t exec_ack_len;
 static void exec_ack_cb(struct uloop_fd *fd, unsigned int events);
 static struct uloop_fd exec_ack_uloop = {
 	.cb = exec_ack_cb,
@@ -3050,8 +3054,9 @@ static void post_jail_fs(void)
 
 static void post_start_hook(void)
 {
-	int pw_uid, pw_gid, gr_gid;
 	struct sock_fprog *seccomp_prog = opts.ociseccomp_linker ?: opts.ociseccomp;
+	int pw_uid, pw_gid, gr_gid;
+	int exec_errno;
 
 	if (opts.scheduler.set && applyOCIprocessscheduler())
 		free_and_exit(EXIT_FAILURE);
@@ -3207,6 +3212,11 @@ static void post_start_hook(void)
 		exit(EXIT_FAILURE);
 	}
 	DEBUG("exec-ing %s\n", *opts.jail_argv);
+	if (xwrite_byte(exec_ack[1], EXEC_ACK_EXEC) < 1) {
+		ERROR("cannot announce the exec to the parent: %m\n");
+		exit(EXIT_FAILURE);
+	}
+
 	if (opts.envp) { /* respect PATH if potentially set in ENV */
 		environ = envp;
 		execvpe(*opts.jail_argv, opts.jail_argv, envp);
@@ -3215,7 +3225,11 @@ static void post_start_hook(void)
 	}
 
 	/* we get there only if execve fails */
+	exec_errno = errno;
 	ERROR("failed to execve %s: %m\n", *opts.jail_argv);
+	if (write(exec_ack[1], &exec_errno, sizeof(exec_errno)) !=
+	    sizeof(exec_errno))
+		ERROR("cannot report the exec failure to the parent: %m\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -7118,21 +7132,22 @@ static void emit_instance_event(const char *event)
 
 static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 {
-	char buf[8];
+	int exec_errno = 0;
 	ssize_t n;
 
-	n = read(fd->fd, buf, sizeof(buf));
-	if (n < 0 && errno == EINTR)
+	do {
+		n = read(fd->fd, exec_ack_buf + exec_ack_len,
+			 sizeof(exec_ack_buf) - exec_ack_len);
+		if (n > 0)
+			exec_ack_len += n;
+	} while (n > 0 && exec_ack_len < sizeof(exec_ack_buf));
+
+	if (n < 0 && fd->registered)
 		return;
 
 	uloop_fd_delete(fd);
 	close(fd->fd);
 	exec_ack[0] = -1;
-
-	if (n != 0) {
-		ERROR("container.start: exec_ack read=%zd errno=%m\n", n);
-		return;
-	}
 
 	if (jail_dev_staged) {
 		umount2(jail_dev, MNT_DETACH);
@@ -7140,7 +7155,26 @@ static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 		jail_dev_staged = false;
 	}
 
-	emit_instance_event("instance.running");
+	if (!exec_ack_len) {
+		INFO("the jail exited before its entrypoint was executed\n");
+		return;
+	}
+
+	if (exec_ack_buf[0] != EXEC_ACK_EXEC) {
+		ERROR("container.start: unexpected exec acknowledgement\n");
+		return;
+	}
+
+	if (exec_ack_len == 1) {
+		emit_instance_event("instance.running");
+		return;
+	}
+
+	if (exec_ack_len == sizeof(exec_ack_buf))
+		memcpy(&exec_errno, exec_ack_buf + 1, sizeof(exec_errno));
+
+	ERROR("container.start: cannot execute the entrypoint: %s\n",
+	      exec_errno ? strerror(exec_errno) : "reason not reported");
 }
 
 static void post_poststart(void);
