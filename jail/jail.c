@@ -5242,9 +5242,11 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 		    struct blob_attr *msg)
 {
 	struct blob_attr *tb[__CONTAINER_KILL_ATTR_MAX], *cur;
+	bool escalate = false;
 	int sig = SIGTERM;
 	bool all = false;
-	bool escalate = false;
+	bool creating;
+	bool stop;
 
 	blobmsg_parse(container_kill_attrs, __CONTAINER_KILL_ATTR_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
 
@@ -5261,13 +5263,20 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 	if (cur)
 		all = blobmsg_get_bool(cur);
 
-	if (sig == SIGTERM || sig == SIGKILL)
-		jail_stop_requested = true;
+	creating = !jail_create_done || jail_oci_state == OCI_STATE_CREATING;
+	stop = (sig == SIGTERM || sig == SIGKILL);
 
-	if (!jail_create_done || jail_oci_state == OCI_STATE_CREATING)
-		return UBUS_STATUS_NOT_FOUND;
 	if (jail_oci_state == OCI_STATE_PAUSED && sig != SIGKILL && sig != 0)
 		return UBUS_STATUS_PERMISSION_DENIED;
+
+	if (creating && !stop)
+		return UBUS_STATUS_NOT_FOUND;
+
+	if (stop)
+		jail_stop_requested = true;
+
+	if (creating)
+		return 0;
 
 	if (all && sig == SIGKILL) {
 		int rc = cgroups_kill_all();
