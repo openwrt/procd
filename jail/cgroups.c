@@ -503,11 +503,10 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 	if (weight > CGROUP_IO_WEIGHT_MAX)
 		return ERANGE;
 
-	if (tb[OCI_LINUX_CGROUPS_BLOCKIO_LEAFWEIGHT])
-		leafweight = blobmsg_get_u32(tb[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHT]);
-
-	if (leafweight > CGROUP_IO_WEIGHT_MAX)
-		return ERANGE;
+	if (tb[OCI_LINUX_CGROUPS_BLOCKIO_LEAFWEIGHT]) {
+		ERROR("linux.resources.blockIO.leafWeight is not supported\n");
+		return ENOTSUP;
+	}
 
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE], rem)
 		++numweightstrs;
