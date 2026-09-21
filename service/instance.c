@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <grp.h>
 #include <net/if.h>
 #include <unistd.h>
@@ -748,6 +749,30 @@ instance_free_stdio(struct service_instance *in)
 	}
 }
 
+static void
+instance_free_pidfd(struct service_instance *in)
+{
+	if (in->proc_pidfd < 0)
+		return;
+
+	close(in->proc_pidfd);
+	in->proc_pidfd = -1;
+}
+
+int
+instance_signal(struct service_instance *in, int sig)
+{
+	if (in->proc_pidfd >= 0)
+		return syscall(SYS_pidfd_send_signal, in->proc_pidfd, sig, NULL, 0);
+
+	if (!in->proc.pending) {
+		errno = ESRCH;
+		return -1;
+	}
+
+	return kill(in->proc.pid, sig);
+}
+
 void
 instance_start(struct service_instance *in)
 {
@@ -822,6 +847,10 @@ instance_start(struct service_instance *in)
 
 	P_DEBUG(2, "Started instance %s::%s[%d]\n", in->srv->name, in->name, pid);
 	in->proc.pid = pid;
+	in->proc_pidfd = syscall(SYS_pidfd_open, pid, 0);
+	if (in->proc_pidfd < 0)
+		ULOG_WARN("pidfd_open() failed: %m\n");
+
 	in->has_cgroup = true;
 	instance_writepid(in);
 	clock_gettime(CLOCK_MONOTONIC, &in->start);
@@ -945,7 +974,7 @@ instance_timeout(struct uloop_timeout *t)
 		if (in->has_jail)
 			instance_kill_cgroup(in->srv->name, in->name);
 
-		kill(in->proc.pid, SIGKILL);
+		instance_signal(in, SIGKILL);
 	} else if (in->restart || in->respawn) {
 		instance_start(in);
 		rc(in->srv->name, "running");
@@ -1159,6 +1188,7 @@ instance_exit(struct uloop_process *p, int ret)
 
 	in = container_of(p, struct service_instance, proc);
 
+	instance_free_pidfd(in);
 	clock_gettime(CLOCK_MONOTONIC, &in->stop);
 	runtime = in->stop.tv_sec - in->start.tv_sec;
 
@@ -1201,7 +1231,7 @@ instance_stop(struct service_instance *in, bool halt)
 	}
 	in->halt = halt;
 	in->restart = in->respawn = false;
-	kill(in->proc.pid, SIGTERM);
+	instance_signal(in, SIGTERM);
 	uloop_timeout_set(&in->timeout, instance_term_timeout(in) * 1000);
 }
 
@@ -1212,13 +1242,13 @@ instance_restart(struct service_instance *in)
 		return;
 
 	if (in->reload_signal) {
-		kill(in->proc.pid, in->reload_signal);
+		instance_signal(in, in->reload_signal);
 		return;
 	}
 
 	in->halt = true;
 	in->restart = true;
-	kill(in->proc.pid, SIGTERM);
+	instance_signal(in, SIGTERM);
 	uloop_timeout_set(&in->timeout, instance_term_timeout(in) * 1000);
 }
 
@@ -1996,6 +2026,7 @@ instance_free(struct service_instance *in)
 	instance_free_stdio(in);
 	instance_free_stdio_fds(in);
 	instance_free_notify_fd(in);
+	instance_free_pidfd(in);
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
 	uloop_timeout_cancel(&in->watchdog.timeout);
@@ -2047,6 +2078,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 
 	in->stdio_fd[0] = in->stdio_fd[1] = in->stdio_fd[2] = -1;
 	in->notify_fd = -1;
+	in->proc_pidfd = -1;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;

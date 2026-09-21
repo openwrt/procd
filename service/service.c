@@ -612,7 +612,7 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 static int
 service_handle_kill(struct service_instance *in, int sig)
 {
-	if (kill(in->proc.pid, sig) == 0)
+	if (instance_signal(in, sig) == 0)
 		return 0;
 
 	switch (errno) {

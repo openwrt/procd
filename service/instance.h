@@ -114,6 +114,7 @@ struct service_instance {
 
 	struct blob_attr *config;
 	struct uloop_process proc;
+	int proc_pidfd;
 	struct uloop_timeout timeout;
 	struct uloop_timeout cgroup_timeout;
 	struct uloop_fd cgroup_events;
@@ -138,6 +139,7 @@ struct service_instance {
 };
 
 void instance_start(struct service_instance *in);
+int instance_signal(struct service_instance *in, int sig);
 void instance_stop(struct service_instance *in, bool halt);
 void instance_update(struct service_instance *in, struct service_instance *in_new);
 void instance_init(struct service_instance *in, struct service *s, struct blob_attr *config);
