@@ -6734,6 +6734,7 @@ int main(int argc, char **argv)
 		}
 
 		if (asprintf(&jsonfile, "%s/config.json", opts.ocibundle) < 0) {
+			jail_reason_set("jail.internal", ENOMEM);
 			ret=-ENOMEM;
 			goto errout;
 		}
@@ -6741,6 +6742,7 @@ int main(int argc, char **argv)
 		free(jsonfile);
 		if (ocires) {
 			ERROR("parsing of OCI JSON spec has failed: %s (%d)\n", strerror(ocires), ocires);
+			jail_reason_set("jail.bundle", ocires);
 			ret=ocires;
 			goto errout;
 		}
@@ -6835,6 +6837,7 @@ int main(int argc, char **argv)
 	if (opts.ocibundle) {
 		char *objname;
 		if (asprintf(&objname, "container.%s", opts.name) < 0) {
+			jail_reason_set("jail.internal", ENOMEM);
 			ret=-ENOMEM;
 			goto errout;
 		}
@@ -6843,6 +6846,7 @@ int main(int argc, char **argv)
 		ret = ubus_add_object(parent_ctx, &container_object);
 		if (ret) {
 			ERROR("Failed to add object: %s\n", ubus_strerror(ret));
+			jail_reason_set("jail.name", EEXIST);
 			ret=-1;
 			goto errout;
 		}
