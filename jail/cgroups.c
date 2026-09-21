@@ -25,11 +25,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #include <libgen.h>
 #include <inttypes.h>
@@ -46,6 +48,7 @@
 
 #define CGROUP_ROOT "/sys/fs/cgroup/"
 #define CGROUP_IO_WEIGHT_MAX 10000
+#define CGROUP_DRAIN_TIMEOUT_MSEC 1000
 
 struct cgval {
 	struct avl_node avl;
@@ -258,6 +261,67 @@ static void cgroups_compute_subtree_control(char *out, size_t outlen)
 		p[-1] = '\0';
 }
 
+static bool cgroups_populated(int fd)
+{
+	char buf[128];
+	ssize_t len;
+	char *val;
+
+	if (lseek(fd, 0, SEEK_SET) < 0)
+		return false;
+
+	len = read(fd, buf, sizeof(buf) - 1);
+	if (len <= 0)
+		return false;
+
+	buf[len] = '\0';
+	val = strstr(buf, "populated ");
+	if (!val)
+		return false;
+
+	return val[strlen("populated ")] == '1';
+}
+
+static void cgroups_wait_empty(void)
+{
+	struct timespec deadline, now;
+	struct pollfd pfd;
+	int remaining;
+	size_t len;
+	char *ent;
+	int fd;
+
+	len = strlen(cgroup_path) + strlen("/cgroup.events") + 1;
+	ent = malloc(len);
+	if (!ent)
+		return;
+
+	snprintf(ent, len, "%s/cgroup.events", cgroup_path);
+	fd = open(ent, O_RDONLY);
+	free(ent);
+	if (fd < 0)
+		return;
+
+	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	deadline.tv_sec += CGROUP_DRAIN_TIMEOUT_MSEC / 1000;
+
+	pfd.fd = fd;
+	pfd.events = POLLPRI;
+
+	while (cgroups_populated(fd)) {
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		remaining = (deadline.tv_sec - now.tv_sec) * 1000 +
+			    (deadline.tv_nsec - now.tv_nsec) / 1000000;
+		if (remaining <= 0)
+			break;
+
+		if (poll(&pfd, 1, remaining) < 0 && errno != EINTR)
+			break;
+	}
+
+	close(fd);
+}
+
 void cgroups_destroy(void)
 {
 	char *sep;
@@ -266,8 +330,10 @@ void cgroups_destroy(void)
 		return;
 
 	cgroups_kill_all();
+	cgroups_wait_empty();
 
-	(void)rmdir(cgroup_path);
+	if (rmdir(cgroup_path) && errno == EBUSY)
+		ERROR("failed to remove busy cgroup %s\n", cgroup_path);
 
 	sep = strrchr(cgroup_path, '/');
 	if (sep && sep != cgroup_path) {
