@@ -31,5 +31,6 @@ const struct blob_attr *jail_oci_root_get(void);
 void jail_oci_root_restore(const struct blob_attr *root);
 
 int jail_unsupported(const struct blob_attr *attr);
+void jail_cgroup_refused(const char *attr);
 
 #endif

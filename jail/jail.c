@@ -263,6 +263,7 @@ static bool container_registered;
 static char **restart_argv;
 
 static const char *jail_reason;
+static char jail_reason_owned[64];
 static int jail_reason_errno;
 
 /*
@@ -424,8 +425,7 @@ static void jail_reason_set(const char *reason, int err)
 	if (jail_reason)
 		return;
 
-	jail_reason = reason;
-	jail_reason_errno = err;
+	jail_reason_restore(reason, err);
 }
 
 /* The bundle is parsed and freed long before the reason is reported. */
@@ -448,6 +448,11 @@ int jail_unsupported(const struct blob_attr *attr)
 	jail_reason_own(field, ENOTSUP);
 
 	return ENOTSUP;
+}
+
+void jail_cgroup_refused(const char *attr)
+{
+	jail_reason_own(attr, ENOTSUP);
 }
 
 int console_fd;
@@ -5640,7 +5645,9 @@ container_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 		}
 	}
 
-	if (cgroups_apply(jail_process.pid))
+	rc = cgroups_apply(jail_process.pid);
+	jail_reason_restore(prev_reason, prev_errno);
+	if (rc)
 		return UBUS_STATUS_NOT_SUPPORTED;
 
 	return UBUS_STATUS_OK;

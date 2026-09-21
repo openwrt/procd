@@ -429,6 +429,7 @@ int cgroups_configure(void)
 				continue;
 			}
 			ERROR("can't open %s: %m\n", ent);
+			jail_cgroup_refused((char *)valp->avl.key);
 			ret = ENOTSUP;
 			break;
 		}
@@ -438,6 +439,7 @@ int cgroups_configure(void)
 			if (cgroups_attr_vacuous((char *)valp->avl.key))
 				continue;
 
+			jail_cgroup_refused((char *)valp->avl.key);
 			ret = ENOTSUP;
 			break;
 		}
