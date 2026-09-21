@@ -7408,6 +7408,7 @@ static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 
 	ERROR("container.start: cannot execute the entrypoint: %s\n",
 	      exec_errno ? strerror(exec_errno) : "reason not reported");
+	jail_reason_set("process.args", exec_errno ?: ENOEXEC);
 }
 
 static void post_poststart(void);
