@@ -171,6 +171,76 @@ static bool resolve_op_inv(const char *op)
 	return false;
 }
 
+static int resolve_op_insns(const char *op)
+{
+	if (resolve_op_is_masked(op))
+		return 6;
+
+	if (resolve_op_ins(op) == BPF_JEQ)
+		return 4;
+
+	return 5;
+}
+
+static int emit_arg_filter(struct sock_filter *filter, int idx, uint32_t arg,
+			   const char *op, uint64_t val, uint64_t val2,
+			   int nomatch)
+{
+	uint32_t val_hi, val_lo, mask_hi, mask_lo;
+	int match, yes, no;
+	uint8_t ins;
+
+	match = idx + resolve_op_insns(op);
+	ins = resolve_op_ins(op);
+	yes = resolve_op_inv(op) ? nomatch : match;
+	no = resolve_op_inv(op) ? match : nomatch;
+
+	if (resolve_op_is_masked(op)) {
+		mask_hi = (uint32_t)(val >> 32);
+		mask_lo = (uint32_t)val;
+		val_hi = (uint32_t)(val2 >> 32);
+		val_lo = (uint32_t)val2;
+
+		set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0,
+			   syscall_arg_hi(arg));
+		set_filter(&filter[idx++], BPF_ALU + BPF_AND + BPF_K, 0, 0,
+			   mask_hi);
+		set_filter(&filter[idx], BPF_JMP + BPF_JEQ + BPF_K, 0,
+			   no - (idx + 1), val_hi);
+		++idx;
+		set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0,
+			   syscall_arg_lo(arg));
+		set_filter(&filter[idx++], BPF_ALU + BPF_AND + BPF_K, 0, 0,
+			   mask_lo);
+		set_filter(&filter[idx], BPF_JMP + BPF_JEQ + BPF_K,
+			   yes - (idx + 1), no - (idx + 1), val_lo);
+
+		return match;
+	}
+
+	val_hi = (uint32_t)(val >> 32);
+	val_lo = (uint32_t)val;
+
+	set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0,
+		   syscall_arg_hi(arg));
+
+	if (ins != BPF_JEQ) {
+		set_filter(&filter[idx], BPF_JMP + BPF_JGT + BPF_K,
+			   yes - (idx + 1), 0, val_hi);
+		++idx;
+	}
+
+	set_filter(&filter[idx], BPF_JMP + BPF_JEQ + BPF_K, 0, no - (idx + 1),
+		   val_hi);
+	++idx;
+	set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0,
+		   syscall_arg_lo(arg));
+	set_filter(&filter[idx], BPF_JMP + ins + BPF_K, yes - (idx + 1),
+		   no - (idx + 1), val_lo);
+
+	return match;
+}
+
 static uint32_t resolve_architecture(char *archname)
 {
 	if (!archname)
@@ -298,6 +368,7 @@ static const struct blobmsg_policy oci_linux_seccomp_syscalls_args_policy[] = {
 };
 
 #define SECCOMP_CHUNK_NAMES	240
+#define SECCOMP_MAX_JUMP	255
 
 #ifndef SECCOMP_RET_ACTION_FULL
 #define SECCOMP_RET_ACTION_FULL 0xffff0000U
@@ -542,8 +613,6 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 
 		if (tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS]) {
 			blobmsg_for_each_attr(curarg, tbn[OCI_LINUX_SECCOMP_SYSCALLS_ARGS], remargs) {
-				arg_instrs += 2; /* load and compare */
-
 				blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
 					      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
 					      tba, blobmsg_data(curarg), blobmsg_len(curarg));
@@ -567,8 +636,13 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 				if (!resolve_op_ins(op_str))
 					return NULL;
 
-				if (resolve_op_is_masked(op_str))
-					++arg_instrs; /* SCMP_CMP_MASKED_EQ needs an extra BPF_AND op */
+				arg_instrs += resolve_op_insns(op_str);
+			}
+
+			if (arg_instrs + 1 > SECCOMP_MAX_JUMP) {
+				ERROR("seccomp: syscall rule needs %d instructions, cannot jump further than %d\n",
+				      arg_instrs + 1, SECCOMP_MAX_JUMP);
+				return NULL;
 			}
 		}
 
@@ -611,8 +685,6 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_SECCOMP_SYSCALLS], rem) {
 		uint32_t action;
 		uint32_t op_idx;
-		uint8_t op_ins;
-		bool op_inv, op_masked;
 		uint64_t op_val, op_val2;
 		int start_rule_idx;
 		int next_rule_idx;
@@ -671,10 +743,8 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 				blobmsg_parse(oci_linux_seccomp_syscalls_args_policy,
 					      __OCI_LINUX_SECCOMP_SYSCALLS_ARGS_MAX,
 					      tba, blobmsg_data(curn), blobmsg_len(curn));
-				next_rule_idx += 2;
 				op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
-				if (resolve_op_is_masked(op_str))
-					++next_rule_idx;
+				next_rule_idx += resolve_op_insns(op_str);
 			}
 
 			++next_rule_idx;
@@ -706,9 +776,6 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 					      tba, blobmsg_data(curn), blobmsg_len(curn));
 
 				op_str = blobmsg_get_string(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_OP]);
-				op_ins = resolve_op_ins(op_str);
-				op_inv = resolve_op_inv(op_str);
-				op_masked = resolve_op_is_masked(op_str);
 				op_idx = blobmsg_get_u32(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_INDEX]);
 				op_val = blobmsg_cast_u64(tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUE]);
 				if (tba[OCI_LINUX_SECCOMP_SYSCALLS_ARGS_VALUETWO])
@@ -716,18 +783,8 @@ struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 				else
 					op_val2 = 0;
 
-				/* load argument */
-				set_filter(&filter[idx++], BPF_LD + BPF_W + BPF_ABS, 0, 0, syscall_arg(op_idx));
-
-				/* apply mask */
-				if (op_masked)
-					set_filter(&filter[idx++], BPF_ALU + BPF_K + BPF_AND, 0, 0, op_val);
-
-				set_filter(&filter[idx], BPF_JMP + op_ins + BPF_K,
-					   op_inv?(next_rule_idx - (idx + 1)):0,
-					   op_inv?0:(next_rule_idx - (idx + 1)),
-					   op_masked?op_val2:op_val);
-				++idx;
+				idx = emit_arg_filter(filter, idx, op_idx, op_str,
+						      op_val, op_val2, next_rule_idx);
 			}
 
 			set_filter(&filter[idx++], BPF_RET + BPF_K, 0, 0, action);

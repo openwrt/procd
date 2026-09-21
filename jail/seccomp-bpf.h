@@ -64,9 +64,11 @@ struct seccomp_data {
 #define arch_nr (offsetof(struct seccomp_data, arch))
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-# define syscall_arg(x) (offsetof(struct seccomp_data, args[x]))
+# define syscall_arg_lo(x) (offsetof(struct seccomp_data, args[x]))
+# define syscall_arg_hi(x) (offsetof(struct seccomp_data, args[x]) + sizeof(__u32))
 #elif __BYTE_ORDER == __BIG_ENDIAN
-# define syscall_arg(x) (offsetof(struct seccomp_data, args[x]) + sizeof(__u32))
+# define syscall_arg_lo(x) (offsetof(struct seccomp_data, args[x]) + sizeof(__u32))
+# define syscall_arg_hi(x) (offsetof(struct seccomp_data, args[x]))
 #else
 # error "unsupported byte order"
 #endif
