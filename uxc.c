@@ -1417,6 +1417,23 @@ static void uxc_instance_drop(const char *name)
 	blob_buf_free(&req);
 }
 
+static void uxc_runtime_diagnose(const char *name)
+{
+	struct runtime_state *rsstate = NULL;
+
+	rsstate = avl_find_element(&runtime, name, rsstate, avl);
+	if (!rsstate) {
+		fprintf(stderr, "uxc: %s has not been created\n", name);
+		return;
+	}
+
+	if (rsstate->exitcode >= 0)
+		fprintf(stderr, "uxc: the runtime of %s is gone, it exited "
+				"with %d\n", name, rsstate->exitcode);
+	else
+		fprintf(stderr, "uxc: the runtime of %s is gone\n", name);
+}
+
 static int uxc_invoker_pidfd(void)
 {
 	pid_t ppid;
@@ -1662,6 +1679,7 @@ static int uxc_start(const char *name, bool console)
 
 	if (ubus_lookup_id(ctx, objname, &id)) {
 		free(objname);
+		uxc_runtime_diagnose(name);
 		return -ENOENT;
 	}
 	free(objname);
@@ -1768,6 +1786,7 @@ static int uxc_exec(const char *name, const char *process_file,
 	free(objname);
 	if (ret) {
 		blob_buf_free(&req);
+		uxc_runtime_diagnose(name);
 		return -ENOENT;
 	}
 
@@ -1813,6 +1832,7 @@ static int uxc_update(const char *name, const char *resources_file)
 	free(objname);
 	if (ret) {
 		blob_buf_free(&req);
+		uxc_runtime_diagnose(name);
 		return -ENOENT;
 	}
 
@@ -1850,8 +1870,15 @@ static int uxc_kill(char *name, int signal, bool all)
 
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
 
-	if (!rsstate || !(rsstate->running))
+	if (!rsstate) {
+		uxc_runtime_diagnose(name);
 		return -ENOENT;
+	}
+
+	if (!rsstate->running) {
+		fprintf(stderr, "uxc: %s is not running\n", name);
+		return -ENOENT;
+	}
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_u32(&req, "signal", signal);
@@ -1864,8 +1891,10 @@ static int uxc_kill(char *name, int signal, bool all)
 
 	ret = ubus_lookup_id(ctx, objname, &id);
 	free(objname);
-	if (ret)
+	if (ret) {
+		uxc_runtime_diagnose(name);
 		return -ENOENT;
+	}
 
 	if (wait_stop) {
 		memset(&wait_state, 0, sizeof(wait_state));
