@@ -742,9 +742,10 @@ instance_free_stdio(struct service_instance *in)
 void
 instance_start(struct service_instance *in)
 {
-	int pid, ret;
 	int opipe[2] = { -1, -1 };
 	int epipe[2] = { -1, -1 };
+	sigset_t oldset;
+	int pid, ret;
 
 	if (!avl_is_empty(&in->errors.avl)) {
 		LOG("Not starting instance %s::%s, an error was indicated\n", in->srv->name, in->name);
@@ -783,12 +784,17 @@ instance_start(struct service_instance *in)
 	if (!in->valid)
 		return;
 
+	procd_signal_block(&oldset);
+
 	pid = fork();
-	if (pid < 0)
+	if (pid < 0) {
+		procd_signal_restore(&oldset);
 		return;
+	}
 
 	if (!pid) {
 		procd_signal_reset();
+		procd_signal_restore(&oldset);
 		uloop_done();
 		closefd(opipe[0]);
 		closefd(epipe[0]);
@@ -800,6 +806,8 @@ instance_start(struct service_instance *in)
 		instance_run(in, opipe[1], epipe[1]);
 		return;
 	}
+
+	procd_signal_restore(&oldset);
 
 	P_DEBUG(2, "Started instance %s::%s[%d]\n", in->srv->name, in->name, pid);
 	in->proc.pid = pid;

@@ -140,3 +140,23 @@ void procd_signal_reset(void)
 	for (i = 1; i < _NSIG; i++)
 		sigaction(i, &s, NULL);
 }
+
+void procd_signal_block(sigset_t *oldset)
+{
+	sigset_t set;
+
+	sigemptyset(&set);
+	sigaddset(&set, SIGTERM);
+	sigaddset(&set, SIGINT);
+	sigaddset(&set, SIGUSR1);
+	sigaddset(&set, SIGUSR2);
+	sigaddset(&set, SIGPWR);
+	sigaddset(&set, SIGHUP);
+
+	sigprocmask(SIG_BLOCK, &set, oldset);
+}
+
+void procd_signal_restore(const sigset_t *oldset)
+{
+	sigprocmask(SIG_SETMASK, oldset, NULL);
+}

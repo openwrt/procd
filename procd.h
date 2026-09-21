@@ -52,6 +52,8 @@ void procd_early(void);
 void procd_preinit(void);
 void procd_signal(void);
 void procd_signal_reset(void);
+void procd_signal_block(sigset_t *oldset);
+void procd_signal_restore(const sigset_t *oldset);
 void procd_signal_preinit(void);
 void procd_inittab(void);
 void procd_inittab_run(const char *action);
