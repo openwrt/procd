@@ -2348,6 +2348,7 @@ static int uxc_boot(const char *mountpoint)
 		if (rsstate)
 			continue;
 
+		autostart = false;
 		if (tb[CONF_AUTOSTART])
 			autostart = blobmsg_get_bool(tb[CONF_AUTOSTART]);
 
