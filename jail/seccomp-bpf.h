@@ -62,7 +62,14 @@ struct seccomp_data {
 
 #define syscall_nr (offsetof(struct seccomp_data, nr))
 #define arch_nr (offsetof(struct seccomp_data, arch))
-#define syscall_arg(x) (offsetof(struct seccomp_data, args[x]))
+
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+# define syscall_arg(x) (offsetof(struct seccomp_data, args[x]))
+#elif __BYTE_ORDER == __BIG_ENDIAN
+# define syscall_arg(x) (offsetof(struct seccomp_data, args[x]) + sizeof(__u32))
+#else
+# error "unsupported byte order"
+#endif
 
 #if defined(__aarch64__)
 # define ARCH_NR	AUDIT_ARCH_AARCH64
