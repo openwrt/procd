@@ -695,7 +695,9 @@ instance_remove_cgroup(const char *service, const char *instance)
 	if (ret >= (int)sizeof(cgnamebuf))
 		return;
 
-	(void)rmdir(cgnamebuf);
+	if (rmdir(cgnamebuf) && errno == EBUSY)
+		ULOG_WARN("failed to remove busy cgroup of %s::%s\n", service,
+			  instance);
 
 	sep = strrchr(cgnamebuf, '/');
 	if (sep)
