@@ -171,6 +171,7 @@ static void state_enter(void)
 		break;
 
 	case STATE_SHUTDOWN:
+		ulog_open(ULOG_KMSG, LOG_DAEMON, "procd");
 		/* Redirect output to the console for the users' benefit */
 		set_console();
 		LOG("- shutdown -\n");
