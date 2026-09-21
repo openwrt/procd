@@ -6710,7 +6710,7 @@ int main(int argc, char **argv)
 	 * env import from cmdline is not available for OCI containers
 	 */
 	if (opts.ocibundle && !list_empty(&envl)) {
-		ret=-ENOTSUP;
+		ret=EXIT_FAILURE;
 		goto errout;
 	}
 
@@ -6729,6 +6729,7 @@ int main(int argc, char **argv)
 				if (ret < 0) {
 					ERROR("filed to handle envargs %s\n", tmp);
 					free(enve);
+					ret=EXIT_FAILURE;
 					goto errout;
 				}
 			}
@@ -6748,7 +6749,7 @@ int main(int argc, char **argv)
 
 	if (opts.capabilities && parseOCIcapabilities_from_file(&opts.capset, opts.capabilities)) {
 		ERROR("failed to read capabilities from file %s\n", opts.capabilities);
-		ret=-1;
+		ret=EXIT_FAILURE;
 		goto errout;
 	}
 
@@ -6760,20 +6761,20 @@ int main(int argc, char **argv)
 
 		if (!opts.name) {
 			ERROR("OCI bundle needs a named jail\n");
-			ret=-1;
+			ret=EXIT_FAILURE;
 			goto errout;
 		}
 
 		parent_ctx = ubus_connect(NULL);
 		if (!parent_ctx) {
 			ERROR("Connection to ubus failed\n");
-			ret = -ECONNREFUSED;
+			ret = EXIT_FAILURE;
 			goto errout;
 		}
 
 		if (asprintf(&jsonfile, "%s/config.json", opts.ocibundle) < 0) {
 			jail_reason_set("jail.internal", ENOMEM);
-			ret=-ENOMEM;
+			ret=EXIT_FAILURE;
 			goto errout;
 		}
 		ocires = parseOCI(jsonfile);
@@ -6781,7 +6782,7 @@ int main(int argc, char **argv)
 		if (ocires) {
 			ERROR("parsing of OCI JSON spec has failed: %s (%d)\n", strerror(ocires), ocires);
 			jail_reason_set("jail.bundle", ocires);
-			ret=ocires;
+			ret=EXIT_FAILURE;
 			goto errout;
 		}
 
@@ -6796,7 +6797,7 @@ int main(int argc, char **argv)
 		if (ret) {
 			ERROR("failed to idmap credential %s: %s\n",
 			      cred_targets[credidx], strerror(ret));
-			ret = -1;
+			ret = EXIT_FAILURE;
 			goto errout;
 		}
 	}
@@ -6804,7 +6805,7 @@ int main(int argc, char **argv)
 	if (opts.namespace & CLONE_NEWNET) {
 		if (!opts.name) {
 			ERROR("netns needs a named jail\n");
-			ret=-1;
+			ret=EXIT_FAILURE;
 			goto errout;
 		}
 	}
@@ -6818,19 +6819,19 @@ int main(int argc, char **argv)
 
 	if (opts.tmpoverlaysize && strlen(opts.tmpoverlaysize) > 8) {
 		ERROR("size parameter too long: \"%s\"\n", opts.tmpoverlaysize);
-		ret=-1;
+		ret=EXIT_FAILURE;
 		goto errout;
 	}
 
 	if (opts.extroot && checkpath(opts.extroot)) {
 		ERROR("invalid rootfs path '%s'", opts.extroot);
-		ret=-1;
+		ret=EXIT_FAILURE;
 		goto errout;
 	}
 
 	if (opts.overlaydir && checkpath(opts.overlaydir)) {
 		ERROR("invalid rootfs overlay path '%s'", opts.overlaydir);
-		ret=-1;
+		ret=EXIT_FAILURE;
 		goto errout;
 	}
 
@@ -6866,7 +6867,7 @@ int main(int argc, char **argv)
 
 	if (!parent_ctx) {
 		ERROR("Connection to ubus failed\n");
-		ret = -ECONNREFUSED;
+		ret = EXIT_FAILURE;
 		goto errout;
 	}
 
@@ -6876,7 +6877,7 @@ int main(int argc, char **argv)
 		char *objname;
 		if (asprintf(&objname, "container.%s", opts.name) < 0) {
 			jail_reason_set("jail.internal", ENOMEM);
-			ret=-ENOMEM;
+			ret=EXIT_FAILURE;
 			goto errout;
 		}
 
@@ -6885,7 +6886,7 @@ int main(int argc, char **argv)
 		if (ret) {
 			ERROR("Failed to add object: %s\n", ubus_strerror(ret));
 			jail_reason_set("jail.name", EEXIST);
-			ret=-1;
+			ret=EXIT_FAILURE;
 			goto errout;
 		}
 		container_registered = true;
@@ -6919,7 +6920,7 @@ int main(int argc, char **argv)
 	if (!opts.extroot) {
 		if (opts.namespace && add_path_and_deps(*opts.jail_argv, 1, -1, 0)) {
 			ERROR("failed to load dependencies\n");
-			ret=-1;
+			ret=EXIT_FAILURE;
 			goto errout;
 		}
 	}
@@ -6929,7 +6930,7 @@ int main(int argc, char **argv)
 		ERROR("failed to compile seccomp filter %s\n", opts.seccomp);
 		opts.seccomp = 0;
 		if (opts.require_jail) {
-			ret=-1;
+			ret=EXIT_FAILURE;
 			goto errout;
 		}
 	}
