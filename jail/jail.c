@@ -102,7 +102,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"a:b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
+#define OPT_ARGS	"a:A:b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
 
 #define JAIL_MAX_CREDENTIALS	16
 static const char *cred_targets[JAIL_MAX_CREDENTIALS];
@@ -158,6 +158,7 @@ static struct {
 	unsigned int idmap_offset;
 	char *pidfile;
 	int notify_fd;
+	uint64_t incarnation;
 	struct sysctl_val **sysctl;
 	int no_new_privs;
 	int namespace;
@@ -2408,6 +2409,7 @@ static void usage(void)
 	fprintf(stderr, "  -i\t\tstart container immediately\n");
 	fprintf(stderr, "  -P <pidfile>\tcreate <pidfile>\n");
 	fprintf(stderr, "  -a <fd>\tsend SIGCHLD through inherited pidfd <fd> once the container is gone\n");
+	fprintf(stderr, "  -A <num>\ttag the lifecycle events of this run with incarnation <num>\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -6643,6 +6645,9 @@ int main(int argc, char **argv)
 			    syscall(SYS_pidfd_send_signal, opts.notify_fd, 0, NULL, 0))
 				opts.notify_fd = -1;
 			break;
+		case 'A':
+			opts.incarnation = strtoull(optarg, NULL, 10);
+			break;
 		case 'Y':
 			opts.console_socket = optarg;
 			break;
@@ -7367,6 +7372,9 @@ static void emit_instance_event(const char *event)
 	blob_buf_init(&notify_buf, 0);
 	blobmsg_add_string(&notify_buf, "service", opts.name);
 	blobmsg_add_string(&notify_buf, "instance", opts.name);
+	blobmsg_add_u32(&notify_buf, "pid", getpid());
+	if (opts.incarnation)
+		blobmsg_add_u64(&notify_buf, "incarnation", opts.incarnation);
 	if (!strcmp(event, "instance.stopped") ||
 	    !strcmp(event, "instance.create_failed")) {
 		if (jail_reason)
