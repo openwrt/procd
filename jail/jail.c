@@ -259,6 +259,7 @@ static int jail_process_pidfd = -1;
 static struct ubus_context *parent_ctx;
 static volatile sig_atomic_t jail_stop_requested;
 static bool netifd_restart_pending;
+static bool container_registered;
 static char **restart_argv;
 
 int console_fd;
@@ -1557,7 +1558,8 @@ static void free_and_exit(int ret)
 	}
 
 	if (!exit_from_child && opts.ocibundle && parent_ctx && opts.name)
-		emit_instance_event("instance.stopped");
+		emit_instance_event(container_registered ? "instance.stopped" :
+							  "instance.create_failed");
 
 	if (!exit_from_child && parent_ctx)
 		ubus_free(parent_ctx);
@@ -6648,6 +6650,7 @@ int main(int argc, char **argv)
 			ret=-1;
 			goto errout;
 		}
+		container_registered = true;
 	}
 
 	/* deliberately not using 'else' on unrelated conditional branches */
