@@ -6908,6 +6908,7 @@ static void post_prestart(void)
 {
 	if (hook_chain_failed) {
 		ERROR("prestart hook failed; aborting container\n");
+		jail_reason_set("hooks.prestart", ECANCELED);
 		free_and_exit(EXIT_FAILURE);
 	}
 	run_hooks(opts.hooks.createRuntime, post_create_runtime);
@@ -7416,6 +7417,7 @@ static void post_create_runtime(void)
 {
 	if (hook_chain_failed) {
 		ERROR("createRuntime hook failed; aborting container\n");
+		jail_reason_set("hooks.createRuntime", ECANCELED);
 		free_and_exit(EXIT_FAILURE);
 	}
 
@@ -7769,6 +7771,7 @@ static void post_poststart(void)
 {
 	if (hook_chain_failed) {
 		ERROR("poststart hook failed; stopping container\n");
+		jail_reason_set("hooks.poststart", ECANCELED);
 	} else {
 		netifd_restart_watch();
 		uloop_run(); /* idle here while jail is running */
