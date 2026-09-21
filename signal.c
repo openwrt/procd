@@ -15,9 +15,35 @@
 #include <sys/reboot.h>
 #include <sys/types.h>
 
+#include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "procd.h"
+
+static int crash_kmsg_fd = -1;
+
+static void crash_kmsg(void)
+{
+	static const char msg[] = "<3>procd: Rebooting as procd has crashed\n";
+	size_t left = sizeof(msg) - 1;
+	const char *p = msg;
+	ssize_t rv;
+
+	if (crash_kmsg_fd < 0)
+		return;
+
+	while (left > 0) {
+		rv = write(crash_kmsg_fd, p, left);
+		if (rv < 0 && errno == EINTR)
+			continue;
+		if (rv <= 0)
+			return;
+
+		left -= rv;
+		p += rv;
+	}
+}
 
 static void do_reboot(void)
 {
@@ -66,7 +92,7 @@ struct sigaction sa_shutdown = {
 
 static void signal_crash(int signal, siginfo_t *siginfo, void *data)
 {
-	ERROR("Rebooting as procd has crashed\n");
+	crash_kmsg();
 	do_reboot();
 }
 
@@ -90,6 +116,7 @@ void procd_signal(void)
 	signal(SIGPIPE, SIG_IGN);
 	if (getpid() != 1)
 		return;
+	crash_kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	sigaction(SIGTERM, &sa_shutdown, NULL);
 	sigaction(SIGINT, &sa_shutdown, NULL);
 	sigaction(SIGUSR1, &sa_shutdown, NULL);
