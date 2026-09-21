@@ -683,13 +683,11 @@ instance_kill_cgroup(const char *service, const char *instance)
 }
 
 static void
-instance_remove_cgroup(const char *service, const char *instance)
+instance_rmdir_cgroup(const char *service, const char *instance)
 {
 	char cgnamebuf[256];
 	char *sep;
 	int ret;
-
-	instance_kill_cgroup(service, instance);
 
 	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
 		       service, instance);
@@ -704,6 +702,13 @@ instance_remove_cgroup(const char *service, const char *instance)
 	if (sep)
 		*sep = '\0';
 	(void)rmdir(cgnamebuf);
+}
+
+static void
+instance_remove_cgroup(const char *service, const char *instance)
+{
+	instance_kill_cgroup(service, instance);
+	instance_rmdir_cgroup(service, instance);
 }
 
 static void
@@ -1031,6 +1036,9 @@ instance_exit_done(struct service_instance *in)
 
 	if (in->proc.pending)
 		return;
+
+	if (in->has_jail)
+		instance_rmdir_cgroup(in->srv->name, in->name);
 
 	runtime = in->stop.tv_sec - in->start.tv_sec;
 
