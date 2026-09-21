@@ -2456,6 +2456,7 @@ static int setns_open(unsigned long nstype)
 
 static int jail_running = 0;
 static int jail_return_code = 0;
+static bool jail_reaped;
 
 static void jail_process_timeout_cb(struct uloop_timeout *t);
 static struct uloop_timeout jail_process_timeout = {
@@ -2465,6 +2466,7 @@ static void poststop(void);
 static void jail_process_handler(struct uloop_process *c, int ret)
 {
 	uloop_timeout_cancel(&jail_process_timeout);
+	jail_reaped = true;
 	if (WIFEXITED(ret)) {
 		jail_return_code = WEXITSTATUS(ret);
 		INFO("jail (%d) exited with exit: %d\n", c->pid, jail_return_code);
@@ -7358,12 +7360,16 @@ static void emit_instance_event(const char *event)
 	blob_buf_init(&notify_buf, 0);
 	blobmsg_add_string(&notify_buf, "service", opts.name);
 	blobmsg_add_string(&notify_buf, "instance", opts.name);
-	if (jail_reason && (!strcmp(event, "instance.stopped") ||
-			    !strcmp(event, "instance.create_failed"))) {
-		blobmsg_add_string(&notify_buf, "reason", jail_reason);
-		if (jail_reason_errno)
+	if (!strcmp(event, "instance.stopped") ||
+	    !strcmp(event, "instance.create_failed")) {
+		if (jail_reason)
+			blobmsg_add_string(&notify_buf, "reason", jail_reason);
+		if (jail_reason && jail_reason_errno)
 			blobmsg_add_u32(&notify_buf, "errno",
 					jail_reason_errno);
+		if (jail_reaped)
+			blobmsg_add_u32(&notify_buf, "exit_code",
+					jail_return_code);
 	}
 	ubus_send_event(parent_ctx, event, notify_buf.head);
 }
