@@ -20,6 +20,7 @@
 #include <grp.h>
 #include <net/if.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <fcntl.h>
@@ -206,6 +207,8 @@ static const struct rlimit_name rlimit_names[] = {
 	{ NULL, 0 }
 };
 
+static uint64_t last_incarnation;
+
 static void closefd(int fd)
 {
 	if (fd > STDERR_FILENO)
@@ -305,6 +308,7 @@ instance_gen_setns_argstr(struct blob_attr *attr)
 static inline int
 jail_run(struct service_instance *in, char **argv)
 {
+	static char incarnation_str[21];
 	static char notify_fd_str[12];
 	char *term_timeout_str;
 	struct blobmsg_list_node *var;
@@ -434,6 +438,11 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = "-a";
 		argv[argc++] = notify_fd_str;
 	}
+
+	snprintf(incarnation_str, sizeof(incarnation_str), "%" PRIu64,
+		 in->incarnation);
+	argv[argc++] = "-A";
+	argv[argc++] = incarnation_str;
 
 	if (jail->systemd_cgroup)
 		argv[argc++] = "-Z";
@@ -783,6 +792,8 @@ instance_start(struct service_instance *in)
 
 	if (!in->valid)
 		return;
+
+	in->incarnation = ++last_incarnation;
 
 	procd_signal_block(&oldset);
 
@@ -1459,7 +1470,7 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	blobmsg_parse(jail_attr, __JAIL_ATTR_MAX, tb,
 		blobmsg_data(attr), blobmsg_data_len(attr));
 
-	jail->argc = 4;
+	jail->argc = 6;
 
 	if (tb[JAIL_ATTR_REQUIREJAIL] && blobmsg_get_bool(tb[JAIL_ATTR_REQUIREJAIL])) {
 		in->require_jail = true;
@@ -2079,6 +2090,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 	blobmsg_add_u8(b, "running", in->proc.pending);
 	if (in->proc.pending)
 		blobmsg_add_u32(b, "pid", in->proc.pid);
+	if (in->incarnation)
+		blobmsg_add_u64(b, "incarnation", in->incarnation);
 	if (in->command)
 		blobmsg_add_blob(b, in->command);
 	if (in->bundle)

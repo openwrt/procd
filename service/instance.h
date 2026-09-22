@@ -105,6 +105,7 @@ struct service_instance {
 	char *bundle;
 	int syslog_facility;
 	int exit_code;
+	uint64_t incarnation;
 
 	uint32_t term_timeout;
 	uint32_t respawn_timeout;
