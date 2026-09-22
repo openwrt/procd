@@ -477,6 +477,7 @@ int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t 
 	uloop_timeout_set(&netifd_giveup_timeout, 5000);
 	uloop_run();
 	uloop_timeout_cancel(&netifd_giveup_timeout);
+	uloop_cancelled = false;
 
 	if (!netifd_start_done)
 		ERROR("jail netifd did not come up; container network may be degraded\n");
