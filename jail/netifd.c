@@ -49,8 +49,10 @@ static const char ubus_sock_name[] = "ubus.sock";
 static char *jail_name, *ubus_sock_path, *ubus_sock_dir, *uci_config_network = NULL;
 static bool netifd_start_done;
 
+static bool netifd_wait_active;
+
 static char *inotify_buffer;
-static struct uloop_fd fd_inotify_read;
+static struct uloop_fd fd_inotify_read = { .fd = -1 };
 static struct passwd *ubus_pw;
 static pid_t ns_pid;
 
@@ -104,6 +106,25 @@ static int gen_jail_uci_network(void)
 	return ret;
 }
 
+/* uloop_end() is global, so only the owner of the nested wait may call it */
+static void netifd_wait_end(void)
+{
+	if (netifd_wait_active)
+		uloop_end();
+}
+
+static void inotify_disarm(void)
+{
+	if (fd_inotify_read.fd < 0)
+		return;
+
+	uloop_fd_delete(&fd_inotify_read);
+	close(fd_inotify_read.fd);
+	fd_inotify_read.fd = -1;
+	free(inotify_buffer);
+	inotify_buffer = NULL;
+}
+
 static void run_ubusd(struct uloop_timeout *t)
 {
 	static struct blob_buf req;
@@ -144,8 +165,7 @@ static void run_netifd(struct uloop_timeout *t)
 	uint32_t id;
 	bool running = false;
 
-	uloop_fd_delete(&fd_inotify_read);
-	close(fd_inotify_read.fd);
+	inotify_disarm();
 
 	jail_ubus_ctx = ubus_connect(ubus_sock_path);
 	if (!jail_ubus_ctx)
@@ -269,7 +289,7 @@ netifd_out_resolvconf_dir:
 	free(resolvconf_dir);
 
 	netifd_start_done = running;
-	uloop_end();
+	netifd_wait_end();
 }
 
 static struct uloop_timeout netifd_start_timeout = { .cb = run_netifd, };
@@ -277,7 +297,7 @@ static struct uloop_timeout netifd_start_timeout = { .cb = run_netifd, };
 static void netifd_start_giveup(struct uloop_timeout *t)
 {
 	ERROR("timed out waiting for jail netifd to start\n");
-	uloop_end();
+	netifd_wait_end();
 }
 
 static struct uloop_timeout netifd_giveup_timeout = { .cb = netifd_start_giveup, };
@@ -423,7 +443,6 @@ static int jail_netifd_arm(void)
 
 	if (inotify_add_watch(fd_inotify_read.fd, ubus_sock_dir, IN_CREATE) == -1) {
 		ERROR("failed to add inotify watch on %s\n", ubus_sock_dir);
-		free(inotify_buffer);
 		goto err_close;
 	}
 
@@ -432,7 +451,7 @@ static int jail_netifd_arm(void)
 	return 0;
 
 err_close:
-	close(fd_inotify_read.fd);
+	inotify_disarm();
 	return EIO;
 }
 
@@ -473,9 +492,11 @@ int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t 
 		goto errout;
 
 	netifd_start_done = false;
+	netifd_wait_active = true;
 	uloop_timeout_add(&ubus_start_timeout);
 	uloop_timeout_set(&netifd_giveup_timeout, 5000);
 	uloop_run();
+	netifd_wait_active = false;
 	uloop_timeout_cancel(&netifd_giveup_timeout);
 	uloop_cancelled = false;
 
@@ -509,6 +530,8 @@ static int jail_delete_instance(const char *instance)
 
 int jail_network_teardown(void)
 {
+	inotify_disarm();
+
 	if (jail_ubus_ctx) {
 		ubus_free(jail_ubus_ctx);
 		jail_ubus_ctx = NULL;
