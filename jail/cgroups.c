@@ -599,7 +599,7 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 			 *tbtd[__OCI_LINUX_CGROUPS_BLOCKIO_THROTTLEDEVICE_MAX],
 			 *cur;
 	int rem;
-	int weight = -1, leafweight = -1;
+	int weight = -1;
 	size_t numweightstrs = 0, numiomaxstrs = 0, strtotlen = 1;
 	char **weightstrs = NULL, **iomaxstrs = NULL, **curstr;
 	char *weightstr, *iomaxstr;
@@ -634,7 +634,7 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 
 	blobmsg_for_each_attr(cur, tb[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE], rem) {
 		uint64_t major, minor;
-		int devweight = weight, devleafweight = leafweight;
+		int devweight = weight;
 
 		blobmsg_parse(oci_linux_cgroups_blockio_weightdevice_policy, __OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_MAX, tbwd, blobmsg_data(cur), blobmsg_len(cur));
 		if (!tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_MAJOR] ||
@@ -649,12 +649,6 @@ static int parseOCIlinuxcgroups_legacy_blockio(struct blob_attr *msg)
 			devweight = blobmsg_get_u32(tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_WEIGHT]);
 
 		if (devweight > CGROUP_IO_WEIGHT_MAX)
-			return ERANGE;
-
-		if (tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_LEAFWEIGHT])
-			devleafweight = blobmsg_get_u32(tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_LEAFWEIGHT]);
-
-		if (devleafweight > CGROUP_IO_WEIGHT_MAX)
 			return ERANGE;
 
 		if (tbwd[OCI_LINUX_CGROUPS_BLOCKIO_WEIGHTDEVICE_LEAFWEIGHT])
