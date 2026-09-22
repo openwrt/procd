@@ -128,7 +128,7 @@ static void inotify_disarm(void)
 static void run_ubusd(struct uloop_timeout *t)
 {
 	static struct blob_buf req;
-	void *ins, *in, *cmd;
+	void *ins, *in, *cmd, *rsp;
 	uint32_t id;
 
 	blob_buf_init(&req, 0);
@@ -145,6 +145,9 @@ static void run_ubusd(struct uloop_timeout *t)
 		blobmsg_add_string(&req, "user", "ubus");
 		blobmsg_add_string(&req, "group", "ubus");
 	}
+
+	rsp = blobmsg_open_array(&req, "respawn");
+	blobmsg_close_array(&req, rsp);
 
 	blobmsg_close_table(&req, in);
 	blobmsg_close_table(&req, ins);
