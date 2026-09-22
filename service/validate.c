@@ -115,6 +115,7 @@ void
 service_validate_add(struct service *s, struct blob_attr *msg)
 {
 	struct blob_attr *tb[__SERVICE_VAL_MAX];
+	size_t option_len, rule_len;
 	struct validate *v;
 	char *type, *package;
 	struct blob_attr *cur;
@@ -144,13 +145,17 @@ service_validate_add(struct service *s, struct blob_attr *msg)
 	blobmsg_for_each_attr(cur, tb[SERVICE_VAL_DATA], rem) {
 		char *option;
 		char *rule;
-		struct vrule *vr = calloc_a(sizeof(*vr), &option, strlen(blobmsg_name(cur)) + 1,
-			&rule, strlen(blobmsg_get_string(cur)) + 1);
+		struct vrule *vr;
+
+		option_len = strlen(blobmsg_name(cur)) + 1;
+		rule_len = strlen(blobmsg_get_string(cur)) + 1;
+		vr = calloc_a(sizeof(*vr), &option, option_len,
+			      &rule, rule_len);
 
 		vr->avl.key = vr->option = option;
 		vr->rule = rule;
-		strcpy(vr->option, blobmsg_name(cur));
-		strcpy(vr->rule, blobmsg_get_string(cur));
+		memcpy(vr->option, blobmsg_name(cur), option_len);
+		memcpy(vr->rule, blobmsg_get_string(cur), rule_len);
 		if (avl_insert(&v->rules, &vr->avl))
 			free(vr);
 	}
