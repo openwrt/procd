@@ -184,8 +184,10 @@ static void run_netifd(struct uloop_timeout *t)
 	if (!mkdtemp(uci_dir))
 		goto netifd_out_resolvconf;
 
-	if (asprintf(&uci_config_network, "%s/network", uci_dir) == -1)
+	if (asprintf(&uci_config_network, "%s/network", uci_dir) == -1) {
+		uci_config_network = NULL;
 		goto netifd_out_ucidir;
+	}
 
 	if (asprintf(&ucimount, "%s:/etc/config", uci_dir) == -1)
 		goto netifd_out_ucinetconf;
@@ -283,6 +285,7 @@ netifd_out_ucinetconf:
 	if (!running) {
 		unlink(uci_config_network);
 		free(uci_config_network);
+		uci_config_network = NULL;
 	}
 netifd_out_ucidir:
 	if (!running)
