@@ -45,6 +45,7 @@
 static const char ubusd_path[] = "/sbin/ubusd";
 static const char netifd_path[] = "/sbin/netifd";
 static const char ubus_sock_name[] = "ubus.sock";
+static const char ubus_instance[] = "ubus";
 
 static char *jail_name, *ubus_sock_path, *ubus_sock_dir, *uci_config_network = NULL;
 static bool netifd_start_done;
@@ -134,7 +135,7 @@ static void run_ubusd(struct uloop_timeout *t)
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", jail_name);
 	ins = blobmsg_open_table(&req, "instances");
-	in = blobmsg_open_table(&req, "ubus");
+	in = blobmsg_open_table(&req, ubus_instance);
 	cmd = blobmsg_open_array(&req, "command");
 	blobmsg_add_string(&req, "", ubusd_path);
 	blobmsg_add_string(&req, "", "-s");
@@ -172,10 +173,10 @@ static void run_netifd(struct uloop_timeout *t)
 
 	jail_ubus_ctx = ubus_connect(ubus_sock_path);
 	if (!jail_ubus_ctx)
-		return;
+		goto netifd_out_done;
 
 	if (asprintf(&resolvconf_dir, "/tmp/resolv.conf-%s.d", jail_name) == -1)
-		return;
+		goto netifd_out_done;
 
 	if (asprintf(&resolvconf, "%s/resolv.conf.auto", resolvconf_dir) == -1)
 		goto netifd_out_resolvconf_dir;
@@ -290,20 +291,12 @@ netifd_out_resolvconf:
 	free(resolvconf);
 netifd_out_resolvconf_dir:
 	free(resolvconf_dir);
-
+netifd_out_done:
 	netifd_start_done = running;
 	netifd_wait_end();
 }
 
 static struct uloop_timeout netifd_start_timeout = { .cb = run_netifd, };
-
-static void netifd_start_giveup(struct uloop_timeout *t)
-{
-	ERROR("timed out waiting for jail netifd to start\n");
-	netifd_wait_end();
-}
-
-static struct uloop_timeout netifd_giveup_timeout = { .cb = netifd_start_giveup, };
 
 static void inotify_read_handler(struct uloop_fd *u, unsigned int events)
 {
@@ -383,25 +376,56 @@ static void jail_network_reload(struct uloop_timeout *t)
 	ubus_invoke(jail_ubus_ctx, id, "reload", NULL, NULL, NULL, 3000);
 }
 
-static const struct blobmsg_policy service_watch_policy = { "config", BLOBMSG_TYPE_STRING };
+enum {
+	NOTIFY_CONFIG,
+	NOTIFY_SERVICE,
+	NOTIFY_INSTANCE,
+	__NOTIFY_MAX,
+};
+
+static const struct blobmsg_policy service_watch_policy[__NOTIFY_MAX] = {
+	[NOTIFY_CONFIG]   = { "config",   BLOBMSG_TYPE_STRING },
+	[NOTIFY_SERVICE]  = { "service",  BLOBMSG_TYPE_STRING },
+	[NOTIFY_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+};
+
 static struct uloop_timeout jail_network_reload_timeout = { .cb = jail_network_reload, };
+
+static void ubusd_gone(struct blob_attr **tb)
+{
+	if (!tb[NOTIFY_SERVICE] || !tb[NOTIFY_INSTANCE])
+		return;
+
+	if (strcmp(blobmsg_get_string(tb[NOTIFY_SERVICE]), jail_name))
+		return;
+
+	if (strcmp(blobmsg_get_string(tb[NOTIFY_INSTANCE]), ubus_instance))
+		return;
+
+	ERROR("the container's ubusd could not be started\n");
+	netifd_wait_end();
+}
 
 static int config_watch_notify_cb(struct ubus_context *ctx, struct ubus_object *obj,
 			   struct ubus_request_data *req, const char *method,
 			   struct blob_attr *msg)
 {
-	struct blob_attr *attr;
-	const char *config;
+	struct blob_attr *tb[__NOTIFY_MAX];
+
+	blobmsg_parse(service_watch_policy, __NOTIFY_MAX, tb, blob_data(msg), blob_len(msg));
+
+	if (!strcmp(method, "instance.fail")) {
+		ubusd_gone(tb);
+		return 0;
+	}
 
 	if (strcmp(method, "config.change"))
 		return 0;
 
-	blobmsg_parse(&service_watch_policy, 1, &attr, blob_data(msg), blob_len(msg));
-	if (!attr)
+	if (!tb[NOTIFY_CONFIG])
 		return 1;
 
-	config = blobmsg_get_string(attr);
-	if (strcmp(config, "network"))
+	if (strcmp(blobmsg_get_string(tb[NOTIFY_CONFIG]), "network"))
 		return 0;
 
 	uloop_timeout_add(&jail_network_reload_timeout);
@@ -497,14 +521,15 @@ int jail_network_start(struct ubus_context *new_ctx, char *new_jail_name, pid_t 
 	netifd_start_done = false;
 	netifd_wait_active = true;
 	uloop_timeout_add(&ubus_start_timeout);
-	uloop_timeout_set(&netifd_giveup_timeout, 5000);
 	uloop_run();
 	netifd_wait_active = false;
-	uloop_timeout_cancel(&netifd_giveup_timeout);
 	uloop_cancelled = false;
 
-	if (!netifd_start_done)
-		ERROR("jail netifd did not come up; container network may be degraded\n");
+	if (!netifd_start_done) {
+		inotify_disarm();
+		ERROR("the container's netifd did not come up\n");
+		return EIO;
+	}
 
 	return 0;
 
@@ -541,7 +566,7 @@ int jail_network_teardown(void)
 	}
 
 	jail_delete_instance("netifd");
-	jail_delete_instance("ubus");
+	jail_delete_instance(ubus_instance);
 
 	if (uci_config_network) {
 		unlink(uci_config_network);

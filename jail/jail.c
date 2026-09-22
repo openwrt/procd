@@ -7429,9 +7429,12 @@ static void post_main(struct uloop_timeout *t)
 			jail_network_attach(parent_ctx, opts.name, jail_process.pid);
 
 		if ((opts.namespace & CLONE_NEWNET) && opts.private_ubus) {
-			if (!jail_network_start(parent_ctx, opts.name, jail_process.pid,
-						opts.private_netifd))
-				opts.jail_network_started = true;
+			opts.jail_network_started = true;
+			if (jail_network_start(parent_ctx, opts.name, jail_process.pid,
+					       opts.private_netifd)) {
+				jail_reason_set("jail.network", EIO);
+				free_and_exit(EXIT_FAILURE);
+			}
 		}
 
 		if (opts.netdevices &&
