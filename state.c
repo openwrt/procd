@@ -12,14 +12,22 @@
  * GNU General Public License for more details.
  */
 
+#include <errno.h>
 #include <fcntl.h>
+#include <mntent.h>
 #include <pwd.h>
+#include <stdbool.h>
+#include <sys/mount.h>
 #include <sys/reboot.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <signal.h>
+
+#include <libubox/utils.h>
 
 #include "container.h"
 #include "procd.h"
@@ -89,6 +97,186 @@ static void set_console(void)
 
 	if (tty != NULL)
 		set_stdio(tty);
+}
+
+/* SIGCHLD is ignored by now, so the kernel reaps the dead on its own and
+ * waitpid() fails with ECHILD once nothing is left */
+static void halt_reap(void)
+{
+	int i;
+
+	for (i = 0; i < 50; i++) {
+		if (waitpid(-1, NULL, WNOHANG) < 0 && errno == ECHILD)
+			return;
+		usleep(100000);
+	}
+	ERROR("some processes survived SIGKILL\n");
+}
+
+/* nothing to write back, or still needed until reboot() */
+static bool halt_skip_fs(const char *type)
+{
+	static const char * const skip[] = {
+		"proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "ramfs",
+		"cgroup", "cgroup2", "debugfs", "tracefs", "securityfs",
+		"pstore", "bpf", "mqueue", "hugetlbfs", "configfs", "fusectl",
+		"binfmt_misc", "nsfs", "autofs", "efivarfs", "selinuxfs",
+		"rpc_pipefs",
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(skip); i++)
+		if (!strcmp(type, skip[i]))
+			return true;
+
+	return false;
+}
+
+/* the network is down by now, so anything that talks to a server hangs */
+static bool halt_network_fs(const char *type)
+{
+	static const char * const net[] = {
+		"nfs", "nfs4", "cifs", "smb3", "afs", "ceph", "9p", "glusterfs",
+		"fuse.sshfs",
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(net); i++)
+		if (!strcmp(type, net[i]))
+			return true;
+
+	return false;
+}
+
+struct halt_mount {
+	char *dir;
+	bool rw;
+	bool net;
+};
+
+/* deepest first, so that a stacked mount goes before what it sits on */
+static int halt_mount_cmp(const void *a, const void *b)
+{
+	const struct halt_mount *ma = a, *mb = b;
+
+	return (int)strlen(mb->dir) - (int)strlen(ma->dir);
+}
+
+static void halt_free_mounts(struct halt_mount *list, int n)
+{
+	while (n-- > 0)
+		free(list[n].dir);
+	free(list);
+}
+
+static int halt_read_mounts(struct halt_mount **list)
+{
+	struct halt_mount *m = NULL, *tmp;
+	struct mntent *me;
+	FILE *fp;
+	int n = 0;
+
+	*list = NULL;
+
+	fp = setmntent("/proc/self/mounts", "r");
+	if (!fp) {
+		ERROR("failed to open /proc/self/mounts: %m\n");
+		return -1;
+	}
+
+	while ((me = getmntent(fp))) {
+		if (halt_skip_fs(me->mnt_type))
+			continue;
+
+		tmp = realloc(m, (n + 1) * sizeof(*m));
+		if (!tmp)
+			break;
+
+		m = tmp;
+		m[n].dir = strdup(me->mnt_dir);
+		m[n].rw = !hasmntopt(me, "ro");
+		m[n].net = halt_network_fs(me->mnt_type);
+		if (!m[n].dir)
+			break;
+		n++;
+	}
+	endmntent(fp);
+
+	qsort(m, n, sizeof(*m), halt_mount_cmp);
+	*list = m;
+
+	return n;
+}
+
+/*
+ * sync() writes the data back but does not leave a filesystem clean: a
+ * journalling filesystem only commits its superblock on remount or unmount.
+ * The shutdown scripts run while every service is still alive, so their
+ * attempts fail with EBUSY. Now that nothing is left to hold a file open,
+ * remount everything read-only and unmount what can be unmounted, deepest
+ * mount first, until a pass makes no progress. Unmounting matters where a
+ * mount pins another filesystem, such as a loop device on a data partition.
+ */
+/* without a mount table, the root can at least still be made clean */
+static void halt_root_only(void)
+{
+	if (mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL))
+		ERROR("failed to remount / read-only: %m\n");
+}
+
+static void halt_mounts(void)
+{
+	struct halt_mount *list;
+	int pass, i, n;
+
+	/* the umount init script may have taken /proc down with the rest */
+	if (access("/proc/self/mounts", R_OK) &&
+	    mount("proc", "/proc", "proc", 0, NULL)) {
+		ERROR("failed to mount /proc: %m\n");
+		halt_root_only();
+		return;
+	}
+
+	for (pass = 0; pass < 10; pass++) {
+		bool progress = false;
+
+		n = halt_read_mounts(&list);
+		if (n < 0) {
+			halt_root_only();
+			return;
+		}
+
+		for (i = 0; i < n; i++) {
+			const char *dir = list[i].dir;
+
+			if (list[i].net) {
+				if (!umount2(dir, MNT_DETACH))
+					progress = true;
+				continue;
+			}
+
+			if (list[i].rw &&
+			    !mount(NULL, dir, NULL, MS_REMOUNT | MS_RDONLY, NULL)) {
+				LOG("remounted %s read-only\n", dir);
+				progress = true;
+			}
+
+			if (strcmp(dir, "/") && !umount(dir)) {
+				LOG("unmounted %s\n", dir);
+				progress = true;
+			}
+		}
+		halt_free_mounts(list, n);
+
+		if (!progress)
+			break;
+	}
+
+	n = halt_read_mounts(&list);
+	for (i = 0; i < n; i++)
+		if (list[i].rw && !list[i].net)
+			ERROR("%s is still mounted read-write\n", list[i].dir);
+	halt_free_mounts(list, n);
 }
 
 static void perform_halt()
@@ -180,6 +368,8 @@ static void state_enter(void)
 		break;
 
 	case STATE_HALT:
+		/* logd is gone by now, log to the console instead */
+		ulog_open(ULOG_STDIO, LOG_DAEMON, "procd");
 		// To prevent killed processes from interrupting the sleep
 		signal(SIGCHLD, SIG_IGN);
 		LOG("- SIGTERM processes -\n");
@@ -188,9 +378,11 @@ static void state_enter(void)
 		sleep(1);
 		LOG("- SIGKILL processes -\n");
 		kill(-1, SIGKILL);
+		halt_reap();
 		sync();
-		sleep(1);
 #ifndef DISABLE_INIT
+		if (!is_container())
+			halt_mounts();
 		perform_halt();
 #else
 		exit(EXIT_SUCCESS);
