@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -35,10 +36,15 @@
 #include <grp.h>
 
 #include "../procd.h"
+#include "../utils/utils.h"
 
 #include "hotplug.h"
 
 #define HOTPLUG_WAIT	500
+
+#define HOTPLUG_RULES_EVENTS	(IN_CREATE | IN_CLOSE_WRITE | IN_MOVED_TO | \
+				 IN_DELETE | IN_MOVED_FROM | IN_DELETE_SELF | \
+				 IN_MOVE_SELF)
 
 struct cmd_handler;
 struct cmd_queue {
@@ -585,13 +591,20 @@ static struct json_script_ctx jctx = {
 	.handle_file = rule_handle_file,
 };
 
+static struct inotify_watch rules_watch;
+
+static void hotplug_rules_flush(void)
+{
+	json_script_free(&jctx);
+	json_script_init(&jctx);
+}
+
 static int hotplug_rules_reload(struct ubus_context *ctx,
 				struct ubus_object *obj,
 				struct ubus_request_data *req,
 				const char *method, struct blob_attr *msg)
 {
-	json_script_free(&jctx);
-	json_script_init(&jctx);
+	hotplug_rules_flush();
 
 	return UBUS_STATUS_OK;
 }
@@ -620,6 +633,29 @@ void ubus_init_hotplug_rules(struct ubus_context *ctx)
 	ret = ubus_add_object(ctx, &hotplug_rules_object);
 	if (ret)
 		ERROR("Failed to add object: %s\n", ubus_strerror(ret));
+}
+
+static void hotplug_rules_changed(struct inotify_watch *w,
+				  struct inotify_event *ev)
+{
+	hotplug_rules_flush();
+}
+
+static void hotplug_rules_watch(const char *rules)
+{
+	char *dir;
+
+	dir = malloc(strlen(rules) + sizeof(".d"));
+	if (!dir)
+		return;
+
+	sprintf(dir, "%s.d", rules);
+
+	if (inotify_watch_add(&rules_watch, dir, HOTPLUG_RULES_EVENTS,
+			      hotplug_rules_changed))
+		ERROR("Failed to watch %s: %m\n", dir);
+
+	free(dir);
 }
 
 static void hotplug_handler_debug(struct blob_attr *data)
@@ -696,6 +732,7 @@ void hotplug(char *rules)
 		ERROR("Failed to resize receive buffer: %m\n");
 
 	json_script_init(&jctx);
+	hotplug_rules_watch(rules);
 	queue_proc.cb = queue_proc_cb;
 	uloop_fd_add(&hotplug_fd, ULOOP_READ);
 }
