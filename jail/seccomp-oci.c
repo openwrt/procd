@@ -297,23 +297,28 @@ static uint32_t resolve_architecture(char *archname)
 }
 
 const char * const seccomp_linker_base[] = {
-	"access", "arch_prctl", "brk", "close", "faccessat", "fcntl", "fstat",
-	"fstatfs", "futex", "getrandom", "mmap", "mprotect", "munmap",
+	"access", "arch_prctl", "brk", "close", "faccessat", "fcntl", "fcntl64",
+	"fstat", "fstat64", "fstatat64", "fstatfs", "fstatfs64", "futex",
+	"getrandom", "getrlimit", "mmap", "mmap2", "mprotect", "munmap",
 	"newfstatat", "open", "openat", "pread64", "prctl", "prlimit64", "read",
-	"readlinkat", "rseq", "rt_sigaction", "sched_getscheduler",
-	"set_robust_list", "set_tid_address", "sigaltstack", "statfs", NULL,
+	"readlink", "readlinkat", "rseq", "rt_sigaction", "sched_getscheduler",
+	"set_robust_list", "set_thread_area", "set_tid_address", "set_tls",
+	"sigaltstack", "statfs", "statfs64", "statx", "ugetrlimit", NULL,
 };
 
 const char * const seccomp_init_base[] = {
-	"arch_prctl", "brk", "futex", "getrandom", "mmap", "mprotect", "munmap",
-	"prctl", "prlimit64", "rseq", "rt_sigaction", "sched_getscheduler",
-	"set_robust_list", "set_tid_address", "sigaltstack", NULL,
+	"arch_prctl", "brk", "futex", "getrandom", "getrlimit", "mmap", "mmap2",
+	"mprotect", "munmap", "prctl", "prlimit64", "readlinkat", "rseq",
+	"rt_sigaction", "sched_getscheduler", "set_robust_list",
+	"set_thread_area", "set_tid_address", "set_tls", "sigaltstack",
+	"ugetrlimit", NULL,
 };
 
 const char * const seccomp_loader_files[] = {
-	"access", "close", "faccessat", "fcntl", "fstat", "fstatfs",
-	"newfstatat", "open", "openat", "pread64", "read", "readlinkat",
-	"statfs", NULL,
+	"access", "close", "faccessat", "fcntl", "fcntl64", "fstat", "fstat64",
+	"fstatat64", "fstatfs", "fstatfs64", "newfstatat", "open", "openat",
+	"pread64", "read", "readlink", "readlinkat", "statfs", "statfs64",
+	"statx", NULL,
 };
 
 enum {
