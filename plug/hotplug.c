@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -28,16 +29,22 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <libgen.h>
 #include <grp.h>
 
 #include "../procd.h"
+#include "../utils/utils.h"
 
 #include "hotplug.h"
 
 #define HOTPLUG_WAIT	500
+
+#define HOTPLUG_RULES_EVENTS	(IN_CREATE | IN_CLOSE_WRITE | IN_MOVED_TO | \
+				 IN_DELETE | IN_MOVED_FROM | IN_DELETE_SELF | \
+				 IN_MOVE_SELF)
 
 struct cmd_handler;
 struct cmd_queue {
@@ -492,18 +499,50 @@ static const char* rule_handle_var(struct json_script_ctx *ctx, const char *name
 }
 
 static struct json_script_file *
-rule_handle_file(struct json_script_ctx *ctx, const char *name)
+rule_load_file(const char *path, const char *key)
 {
 	json_object *obj;
 
-	obj = json_object_from_file((char*)name);
+	obj = json_object_from_file(path);
 	if (!obj)
 		return NULL;
 
 	blob_buf_init(&script, 0);
 	blobmsg_add_json_element(&script, "", obj);
+	json_object_put(obj);
 
-	return json_script_file_from_blobmsg(name, blob_data(script.head), blob_len(script.head));
+	return json_script_file_from_blobmsg(key, blob_data(script.head), blob_len(script.head));
+}
+
+static struct json_script_file *
+rule_handle_file(struct json_script_ctx *ctx, const char *name)
+{
+	struct json_script_file *head = NULL, *f, **tail;
+	const char *key = name;
+	glob_t gl;
+	size_t i;
+
+	if (!strpbrk(name, "*?["))
+		return rule_load_file(name, name);
+
+	if (glob(name, 0, NULL, &gl)) {
+		globfree(&gl);
+		return NULL;
+	}
+
+	tail = &head;
+	for (i = 0; i < gl.gl_pathc; i++) {
+		f = rule_load_file(gl.gl_pathv[i], key);
+		if (!f)
+			continue;
+
+		key = NULL;
+		*tail = f;
+		tail = &f->next;
+	}
+	globfree(&gl);
+
+	return head;
 }
 
 static void rule_handle_command(struct json_script_ctx *ctx, const char *name,
@@ -551,6 +590,73 @@ static struct json_script_ctx jctx = {
 	.handle_command = rule_handle_command,
 	.handle_file = rule_handle_file,
 };
+
+static struct inotify_watch rules_watch;
+
+static void hotplug_rules_flush(void)
+{
+	json_script_free(&jctx);
+	json_script_init(&jctx);
+}
+
+static int hotplug_rules_reload(struct ubus_context *ctx,
+				struct ubus_object *obj,
+				struct ubus_request_data *req,
+				const char *method, struct blob_attr *msg)
+{
+	hotplug_rules_flush();
+
+	return UBUS_STATUS_OK;
+}
+
+static const struct ubus_method hotplug_rules_methods[] = {
+	UBUS_METHOD_NOARG("reload", hotplug_rules_reload),
+};
+
+static struct ubus_object_type hotplug_rules_object_type =
+	UBUS_OBJECT_TYPE("hotplug", hotplug_rules_methods);
+
+static struct ubus_object hotplug_rules_object = {
+	.name = "hotplug",
+	.type = &hotplug_rules_object_type,
+	.methods = hotplug_rules_methods,
+	.n_methods = ARRAY_SIZE(hotplug_rules_methods),
+};
+
+void ubus_init_hotplug_rules(struct ubus_context *ctx)
+{
+	int ret;
+
+	if (!rule_file)
+		return;
+
+	ret = ubus_add_object(ctx, &hotplug_rules_object);
+	if (ret)
+		ERROR("Failed to add object: %s\n", ubus_strerror(ret));
+}
+
+static void hotplug_rules_changed(struct inotify_watch *w,
+				  struct inotify_event *ev)
+{
+	hotplug_rules_flush();
+}
+
+static void hotplug_rules_watch(const char *rules)
+{
+	char *dir;
+
+	dir = malloc(strlen(rules) + sizeof(".d"));
+	if (!dir)
+		return;
+
+	sprintf(dir, "%s.d", rules);
+
+	if (inotify_watch_add(&rules_watch, dir, HOTPLUG_RULES_EVENTS,
+			      hotplug_rules_changed))
+		ERROR("Failed to watch %s: %m\n", dir);
+
+	free(dir);
+}
 
 static void hotplug_handler_debug(struct blob_attr *data)
 {
@@ -626,6 +732,7 @@ void hotplug(char *rules)
 		ERROR("Failed to resize receive buffer: %m\n");
 
 	json_script_init(&jctx);
+	hotplug_rules_watch(rules);
 	queue_proc.cb = queue_proc_cb;
 	uloop_fd_add(&hotplug_fd, ULOOP_READ);
 }

@@ -21,6 +21,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 
@@ -29,6 +31,10 @@
 #ifndef O_PATH
 #define O_PATH		010000000
 #endif
+
+#define INOTIFY_SZ (sizeof(struct inotify_event) + PATH_MAX + 1)
+
+static char *inotify_buffer;
 
 void
 __blobmsg_list_init(struct blobmsg_list *list, int offset, int len, blobmsg_list_cmp cmp)
@@ -249,4 +255,51 @@ int patch_stdio(const char *device)
 	}
 
 	return rv;
+}
+
+static void inotify_watch_handler(struct uloop_fd *ufd, unsigned int events)
+{
+	struct inotify_watch *w = container_of(ufd, struct inotify_watch, ufd);
+	struct inotify_event *in;
+	char *p;
+	int rc;
+
+	while ((rc = read(ufd->fd, inotify_buffer, INOTIFY_SZ)) == -1 &&
+	       errno == EINTR);
+
+	if (rc <= 0)
+		return;
+
+	for (p = inotify_buffer;
+	     rc - (p - inotify_buffer) >= (int)sizeof(struct inotify_event);
+	     p += sizeof(struct inotify_event) + in->len) {
+		in = (struct inotify_event *)p;
+		w->cb(w, in);
+	}
+}
+
+int inotify_watch_add(struct inotify_watch *w, const char *path,
+		      uint32_t mask, inotify_watch_cb cb)
+{
+	if (!inotify_buffer) {
+		inotify_buffer = calloc(1, INOTIFY_SZ);
+		if (!inotify_buffer)
+			return -1;
+	}
+
+	w->ufd.fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (w->ufd.fd == -1)
+		return -1;
+
+	w->ufd.cb = inotify_watch_handler;
+	w->cb = cb;
+
+	if (inotify_add_watch(w->ufd.fd, path, mask) == -1 ||
+	    uloop_fd_add(&w->ufd, ULOOP_READ)) {
+		close(w->ufd.fd);
+		w->ufd.fd = -1;
+		return -1;
+	}
+
+	return 0;
 }

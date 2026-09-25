@@ -20,7 +20,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
-#include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -39,11 +38,8 @@
 #define HOTPLUG_BASEDIR "/etc/hotplug.d"
 #define HOTPLUG_OBJECT_PREFIX "hotplug."
 
-#define INOTIFY_SZ (sizeof(struct inotify_event) + PATH_MAX + 1)
-
 struct ubus_context *ctx;
-static char *inotify_buffer;
-static struct uloop_fd fd_inotify_read;
+static struct inotify_watch basedir_watch;
 
 static AVL_TREE(subsystems, avl_strcmp, false, NULL);
 
@@ -423,41 +419,24 @@ static int init_subsystems(void)
 	return 0;
 }
 
-static void inotify_read_handler(struct uloop_fd *u, unsigned int events)
+static void basedir_event(struct inotify_watch *w, struct inotify_event *in)
 {
-	int rc;
-	char *p;
-	struct inotify_event *in;
-
-	/* read inotify events */
-	while ((rc = read(u->fd, inotify_buffer, INOTIFY_SZ)) == -1 && errno == EINTR);
-
-	if (rc <= 0)
+	/* skip everything but directories */
+	if (!(in->mask & IN_ISDIR))
 		return;
 
-	/* process events from buffer */
-	for (p = inotify_buffer;
-	     rc - (p - inotify_buffer) >= (int)sizeof(struct inotify_event);
-	     p += sizeof(struct inotify_event) + in->len) {
-		in = (struct inotify_event*)p;
+	if (in->len < 1)
+		return;
 
-		/* skip everything but directories */
-		if (!(in->mask & IN_ISDIR))
-			continue;
+	/* skip hidden files */
+	if (in->name[0] == '.')
+		return;
 
-		if (in->len < 1)
-			continue;
-
-		/* skip hidden files */
-		if (in->name[0] == '.')
-			continue;
-
-		/* add/remove subsystem objects */
-		if (in->mask & (IN_CREATE | IN_MOVED_TO))
-			add_subsystem(in->name);
-		else if (in->mask & (IN_DELETE | IN_MOVED_FROM))
-			remove_subsystem(in->name);
-	}
+	/* add/remove subsystem objects */
+	if (in->mask & (IN_CREATE | IN_MOVED_TO))
+		add_subsystem(in->name);
+	else if (in->mask & (IN_DELETE | IN_MOVED_FROM))
+		remove_subsystem(in->name);
 }
 
 void hotplug_ubus_event(struct blob_attr *data)
@@ -488,20 +467,8 @@ void ubus_init_hotplug(struct ubus_context *newctx)
 		printf("failed to initialize hotplug subsystems from %s\n", HOTPLUG_BASEDIR);
 		return;
 	}
-	fd_inotify_read.fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-	fd_inotify_read.cb = inotify_read_handler;
-	if (fd_inotify_read.fd == -1) {
+	if (inotify_watch_add(&basedir_watch, HOTPLUG_BASEDIR,
+			      IN_CREATE | IN_MOVED_TO | IN_DELETE |
+			      IN_MOVED_FROM | IN_ONLYDIR, basedir_event))
 		printf("failed to initialize inotify handler for %s\n", HOTPLUG_BASEDIR);
-		return;
-	}
-
-	inotify_buffer = calloc(1, INOTIFY_SZ);
-	if (!inotify_buffer)
-		return;
-
-	if (inotify_add_watch(fd_inotify_read.fd, HOTPLUG_BASEDIR,
-		IN_CREATE | IN_MOVED_TO | IN_DELETE | IN_MOVED_FROM | IN_ONLYDIR) == -1)
-		return;
-
-	uloop_fd_add(&fd_inotify_read, ULOOP_READ);
 }

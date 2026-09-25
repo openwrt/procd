@@ -15,9 +15,12 @@
 #ifndef __PROCD_UTILS_H
 #define __PROCD_UTILS_H
 
+#include <sys/inotify.h>
+
 #include <libubox/avl.h>
 #include <libubox/blob.h>
 #include <libubox/blobmsg.h>
+#include <libubox/uloop.h>
 
 #define CMDLINE_SIZE 2048
 
@@ -59,5 +62,18 @@ char *get_active_console(char *out, int len);
 
 int patch_fd(const char *device, int fd, int flags);
 int patch_stdio(const char *device);
+
+struct inotify_watch;
+
+typedef void (*inotify_watch_cb)(struct inotify_watch *w,
+				 struct inotify_event *ev);
+
+struct inotify_watch {
+	struct uloop_fd ufd;
+	inotify_watch_cb cb;
+};
+
+int inotify_watch_add(struct inotify_watch *w, const char *path,
+		      uint32_t mask, inotify_watch_cb cb);
 
 #endif
