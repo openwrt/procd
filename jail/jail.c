@@ -6671,9 +6671,18 @@ int main(int argc, char **argv)
 			opts.namespace |= CLONE_NEWUTS;
 			opts.hostname = strdup(optarg);
 			break;
-		case 'j':
-			jail_join_ns(optarg);
+		case 'j': {
+			char *spec = strdup(optarg);
+			int err = jail_join_ns(optarg);
+
+			if (err) {
+				ERROR("-j %s: %s\n", spec ?: optarg, strerror(err));
+				free(spec);
+				return -1;
+			}
+			free(spec);
 			break;
+		}
 		case 'b':
 			if (!opts.ocibundle)
 				opts.namespace |= CLONE_NEWNS;
