@@ -45,6 +45,7 @@ int fs_mount_enable_idmap(const char *target, uint32_t uid, uint32_t gid);
 char *resolve_mount_source(const char *source);
 int add_mount_fd(int fd, const char *target, int error);
 int mask_path_now(const char *path);
+int bind_remount_readonly(const char *path, unsigned long flags);
 
 /* open_tree()/mount_setattr() wrappers - no glibc wrappers yet.
  * Fields must match the kernel's struct mount_attr layout exactly

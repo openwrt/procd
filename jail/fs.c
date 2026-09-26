@@ -424,6 +424,24 @@ static unsigned long mountinfo_current_flags(const char *path)
 	return flags;
 }
 
+/*
+ * Self-bind @path and remount it read-only, preserving the flags already in
+ * effect. Mounts copied in by unshare(CLONE_NEWNS) under a userns that does
+ * not own them are MNT_LOCK_{NOSUID,NODEV,NOEXEC,ATIME}; a remount clearing
+ * any of those fails with EPERM.
+ */
+int bind_remount_readonly(const char *path, unsigned long flags)
+{
+	if (mount(path, path, "bind", MS_BIND | (flags & MS_REC), NULL))
+		return -1;
+
+	flags |= MS_REMOUNT | MS_BIND | MS_RDONLY | mountinfo_current_flags(path);
+	if (mount(path, path, "bind", flags, NULL))
+		return -1;
+
+	return 0;
+}
+
 static bool fs_userns;
 
 void jail_fs_set_userns(bool enabled)
