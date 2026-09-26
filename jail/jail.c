@@ -488,6 +488,12 @@ static inline bool userns_deferred(void)
 	       false;
 }
 
+/* jail root maps to a host uid: own userns or a joined one */
+static inline bool jail_has_userns(void)
+{
+	return (opts.namespace & CLONE_NEWUSER) || opts.setns.user != -1;
+}
+
 static inline bool has_namespaces(void)
 {
 return ((opts.setns.pid != -1) ||
@@ -1100,7 +1106,7 @@ static struct mknod_args default_devices[] = {
 static int prepare_jail_dev(void)
 {
 	struct mknod_args **cur, *curdef;
-	uid_t base = (opts.namespace & CLONE_NEWUSER) ? opts.root_map_uid : 0;
+	uid_t base = jail_has_userns() ? opts.root_map_uid : 0;
 	mode_t oldmask = umask(0);
 	char path[PATH_MAX], *tmp;
 	int consfd;
@@ -1561,7 +1567,7 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	jail_fs_set_userns((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1));
+	jail_fs_set_userns(jail_has_userns());
 
 	if (mount_all(jail_root, jail_dev)) {
 		ERROR("mount_all() failed\n");
@@ -3402,7 +3408,7 @@ static void post_start_hook(void)
 
 	/* restore securebits back to normal (and lock them if not in userns) */
 	if (opts.capset.apply) {
-		if (prctl(PR_SET_SECUREBITS, (opts.namespace & CLONE_NEWUSER)?0:
+		if (prctl(PR_SET_SECUREBITS, jail_has_userns() ? 0 :
 		    SECBIT_KEEP_CAPS_LOCKED|SECBIT_NO_SETUID_FIXUP_LOCKED|SECBIT_NOROOT_LOCKED)) {
 			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
 			free_and_exit(EXIT_FAILURE);
@@ -4216,6 +4222,62 @@ static int jail_join_ns(char *arg)
 	} while (tmp);
 
 	return 0;
+}
+
+/*
+ * Set opts.root_map_uid from a joined userns. A helper enters it with
+ * setns() and reports what uid 0 maps to from its own uid_map; that works
+ * for a namespace kept alive only by a bind-mounted nsfs file, which has no
+ * process to read /proc/<pid>/uid_map from. The default stays on failure.
+ */
+static void userns_root_map(int nsfd)
+{
+	uint32_t inside, outside, count, uid = 0;
+	bool found = false;
+	int pfd[2], status;
+	pid_t pid;
+	FILE *f;
+
+	if (pipe2(pfd, O_CLOEXEC))
+		return;
+
+	pid = fork();
+	if (pid < 0) {
+		close(pfd[0]);
+		close(pfd[1]);
+		return;
+	}
+
+	if (!pid) {
+		close(pfd[0]);
+		if (setns(nsfd, CLONE_NEWUSER))
+			_exit(1);
+		f = fopen("/proc/self/uid_map", "re");
+		if (!f)
+			_exit(1);
+		while (fscanf(f, "%u %u %u", &inside, &outside, &count) == 3) {
+			if (inside == 0 && count >= 1) {
+				if (write(pfd[1], &outside, sizeof(outside)) == sizeof(outside))
+					_exit(0);
+				break;
+			}
+		}
+		_exit(1);
+	}
+
+	close(pfd[1]);
+	if (read(pfd[0], &uid, sizeof(uid)) == sizeof(uid))
+		found = true;
+	close(pfd[0]);
+	waitpid(pid, &status, 0);
+
+	if (found) {
+		opts.root_map_uid = uid;
+		DEBUG("root of the joined user namespace is uid %d\n", uid);
+	} else {
+		WARNING("cannot determine the root uid of the joined user namespace; "
+			"assuming %d\n", opts.root_map_uid);
+	}
 }
 
 static void get_jail_root_user(bool is_gidmap, uint32_t container_id, uint32_t host_id, uint32_t size)
@@ -6845,6 +6907,9 @@ int main(int argc, char **argv)
 		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "jail");
 	}
 
+	if (opts.setns.user != -1)
+		userns_root_map(opts.setns.user);
+
 	for (credidx = 0; credidx < n_cred_targets; credidx++) {
 		ret = fs_mount_enable_idmap(cred_targets[credidx],
 					    opts.pw_uid > 0 ? (uint32_t)opts.pw_uid : 0,
@@ -7144,7 +7209,7 @@ static void post_main(struct uloop_timeout *t)
 			add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0,
 				  "mode=1777,size=10%", -1);
 			{
-				const char *ptsopts = (opts.namespace & CLONE_NEWUSER) ?
+				const char *ptsopts = jail_has_userns() ?
 					"newinstance,ptmxmode=0666,mode=0620,gid=0" :
 					"newinstance,ptmxmode=0666,mode=0620,gid=5";
 
@@ -7225,7 +7290,7 @@ static void post_main(struct uloop_timeout *t)
 			free_and_exit(EXIT_FAILURE);
 		}
 
-		if (opts.namespace & CLONE_NEWUSER) {
+		if (jail_has_userns()) {
 			if (opts.overlaydir) {
 				if (chown(opts.overlaydir, opts.root_map_uid, opts.root_map_uid)) {
 					ERROR("chown(%s, %d, %d) failed: %m\n",
@@ -7276,12 +7341,12 @@ static void post_main(struct uloop_timeout *t)
 				close(parent_master);
 			} else {
 				console_fd = parent_master;
-				if ((opts.namespace & CLONE_NEWUSER) && seteuid(0)) {
+				if (jail_has_userns() && seteuid(0)) {
 					ERROR("seteuid(0) failed: %m\n");
 					free_and_exit(EXIT_FAILURE);
 				}
 				pass_console(console_fd);
-				if ((opts.namespace & CLONE_NEWUSER) && seteuid(opts.root_map_uid)) {
+				if (jail_has_userns() && seteuid(opts.root_map_uid)) {
 					ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
 					free_and_exit(EXIT_FAILURE);
 				}
