@@ -6830,8 +6830,17 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (opts.namespace && !opts.ocibundle)
-		opts.namespace |= CLONE_NEWIPC | CLONE_NEWPID;
+	/*
+	 * Not for namespaces joined via -j: clone(CLONE_NEWPID) is EINVAL
+	 * after setns(CLONE_NEWPID), and a new ipcns would shadow the joined
+	 * one.
+	 */
+	if (opts.namespace && !opts.ocibundle) {
+		if (opts.setns.ipc == -1)
+			opts.namespace |= CLONE_NEWIPC;
+		if (opts.setns.pid == -1)
+			opts.namespace |= CLONE_NEWPID;
+	}
 
 	/*
 	 * env import from cmdline is not available for OCI containers
