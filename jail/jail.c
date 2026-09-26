@@ -470,10 +470,17 @@ static char console_slave_name[64];
  * Joining a namespace by path needs privilege in the user namespace owning it,
  * which our own user namespace would take away, so in that case it is created
  * after the joins instead of by clone(). crun makes the same distinction.
+ *
+ * A userns joined with -j (opts.setns.user) drops privilege the same way and
+ * never owns the pidns clone() created, so procfs must be mounted before
+ * entering it. Both cases are entered in enter_userns(), after build_jail_fs().
  */
 static inline bool userns_deferred(void)
 {
-	if (!(opts.namespace & CLONE_NEWUSER) || opts.setns.user != -1)
+	if (opts.setns.user != -1)
+		return true;
+
+	if (!(opts.namespace & CLONE_NEWUSER))
 		return false;
 
 	return (opts.setns.pid != -1) ||
@@ -1786,6 +1793,7 @@ static void free_and_exit(int ret)
 	exit(ret);
 }
 
+static int setns_open(unsigned long nstype);
 static void post_jail_fs(void);
 static void enter_userns(void);
 static int userns_wait_idmaps(void);
@@ -1850,13 +1858,26 @@ static int userns_wait_idmaps(void)
 		return -1;
 	}
 
+	return 0;
+}
+
+/* become root in the userns just entered */
+static int userns_become_root(void)
+{
 	if (setregid(0, 0) < 0 || setreuid(0, 0) < 0) {
-		ERROR("cannot become root in our user namespace: %m\n");
+		ERROR("cannot become root in the user namespace: %m\n");
 		return -1;
 	}
+
 	if (setgroups(0, NULL) < 0) {
-		ERROR("setgroups: %m\n");
-		return -1;
+		/* setgroups=deny is permanent once gid_map is written; only a
+		 * joined userns can have it */
+		if (errno != EPERM || opts.setns.user == -1) {
+			ERROR("setgroups: %m\n");
+			return -1;
+		}
+		WARNING("setgroups(0, NULL) denied by the joined userns; "
+			"continuing without dropping supplementary groups\n");
 	}
 
 	return 0;
@@ -1869,12 +1890,25 @@ static void enter_userns(void)
 		return;
 	}
 
-	if (unshare(CLONE_NEWUSER)) {
-		ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
-		free_and_exit(-1);
+	if (opts.setns.user != -1) {
+		/* maps exist already, no handshake */
+		int ret = setns_open(CLONE_NEWUSER);
+
+		if (ret) {
+			ERROR("failed to join user namespace: %s\n", strerror(ret));
+			free_and_exit(-1);
+		}
+	} else {
+		if (unshare(CLONE_NEWUSER)) {
+			ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
+			free_and_exit(-1);
+		}
+
+		if (userns_wait_idmaps())
+			free_and_exit(-1);
 	}
 
-	if (userns_wait_idmaps())
+	if (userns_become_root())
 		free_and_exit(-1);
 
 #ifdef CLONE_NEWTIME
@@ -3156,21 +3190,14 @@ static int exec_jail(void *arg)
 	}
 
 	/*
-	 * Joining an external userns drops privilege immediately, so this has
-	 * to run before it. A userns of our own owns the mount namespace it
-	 * was created with and locks everything inherited into it, so there
-	 * the detach neither works nor is needed.
+	 * Must run before enter_userns() drops privilege over the inherited
+	 * mounts. A userns from clone() owns its mntns and has everything
+	 * inherited MNT_LOCKED, so there the detach is neither possible nor
+	 * needed.
 	 */
-	if ((opts.namespace & CLONE_NEWNS) &&
-	    (userns_deferred() || opts.setns.user != -1) &&
+	if ((opts.namespace & CLONE_NEWNS) && userns_deferred() &&
 	    detach_inherited_mounts()) {
 		ERROR("failed to detach inherited mounts\n");
-		return EXIT_FAILURE;
-	}
-
-	ret = setns_open(CLONE_NEWUSER);
-	if (ret) {
-		ERROR("failed to join user namespace: %s\n", strerror(ret));
 		return EXIT_FAILURE;
 	}
 
@@ -3195,14 +3222,9 @@ static int exec_jail(void *arg)
 				  false,
 				  recv_fds, nrecv, &extroot_idmap_fd, &overlay_idmap_fd);
 
-	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred() &&
-	    userns_wait_idmaps())
-		return EXIT_FAILURE;
-
-	if (opts.setns.user != -1 && (opts.namespace & CLONE_NEWNS) &&
-	    unshare(CLONE_NEWNS)) {
-		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
-		return EXIT_FAILURE;
+	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred()) {
+		if (userns_wait_idmaps() || userns_become_root())
+			return EXIT_FAILURE;
 	}
 
 	if (opts.namespace & CLONE_NEWCGROUP)
@@ -3212,27 +3234,6 @@ static int exec_jail(void *arg)
 	if (ret) {
 		ERROR("failed to join cgroup namespace: %s\n", strerror(ret));
 		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (opts.setns.user != -1) {
-		if (setregid(0, 0) < 0) {
-			ERROR("setgid\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-		if (setreuid(0, 0) < 0) {
-			ERROR("setuid\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-		if (setgroups(0, NULL) < 0) {
-			if (errno != EPERM) {
-				ERROR("setgroups\n");
-				free_and_exit(EXIT_FAILURE);
-			}
-			WARNING("setgroups(0, NULL) denied by the joined "
-				"userns (setgroups=deny is permanent once a "
-				"gid_map is written); continuing without "
-				"dropping supplementary groups\n");
-		}
 	}
 
 #ifdef CLONE_NEWTIME
