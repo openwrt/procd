@@ -339,7 +339,7 @@ int mask_path_now(const char *path)
 	} else {
 		if (mount(JAIL_NOAFILE, path, "bind", MS_BIND, NULL))
 			return -1;
-		if (mount(JAIL_NOAFILE, path, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, NULL))
+		if (remount_readonly(path, MS_NOSUID | MS_NOEXEC | MS_NODEV))
 			return -1;
 	}
 
@@ -430,16 +430,19 @@ static unsigned long mountinfo_current_flags(const char *path)
  * not own them are MNT_LOCK_{NOSUID,NODEV,NOEXEC,ATIME}; a remount clearing
  * any of those fails with EPERM.
  */
+int remount_readonly(const char *path, unsigned long flags)
+{
+	flags |= MS_REMOUNT | MS_BIND | MS_RDONLY | mountinfo_current_flags(path);
+
+	return mount(NULL, path, NULL, flags, NULL);
+}
+
 int bind_remount_readonly(const char *path, unsigned long flags)
 {
 	if (mount(path, path, "bind", MS_BIND | (flags & MS_REC), NULL))
 		return -1;
 
-	flags |= MS_REMOUNT | MS_BIND | MS_RDONLY | mountinfo_current_flags(path);
-	if (mount(path, path, "bind", flags, NULL))
-		return -1;
-
-	return 0;
+	return remount_readonly(path, flags);
 }
 
 static bool fs_userns;
@@ -500,7 +503,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 			if (mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL))
 				return error;
 
-			if (mount(UJAIL_NOAFILE, new, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, NULL))
+			if (remount_readonly(new, MS_NOSUID | MS_NOEXEC | MS_NODEV))
 				return error;
 		}
 
