@@ -1853,12 +1853,6 @@ static int userns_wait_idmaps(void)
 		return -1;
 	}
 
-	if ((opts.namespace & CLONE_NEWNS) &&
-	    mount("none", "/", "none", mountns_propagation(), NULL)) {
-		ERROR("mount propagation failed: %m\n");
-		return -1;
-	}
-
 	return 0;
 }
 
