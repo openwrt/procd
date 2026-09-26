@@ -532,19 +532,25 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	snprintf(new, sizeof(new), "%s%s", root, target?target:source);
 
 	if (is_mask) {
+		int err;
+
 		if (stat(new, &s))
 			return 0; /* doesn't exists, nothing to mask */
 
 		if (S_ISDIR(s.st_mode)) {/* use empty 0-sized tmpfs for directories */
-			if (mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000"))
-				return error;
+			err = mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000");
 		} else {
 			/* mount-bind 0-sized file having mode 000 */
-			if (mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL))
-				return error;
+			err = mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL);
+			if (!err)
+				err = remount_readonly(new, MS_NOSUID | MS_NOEXEC | MS_NODEV);
+		}
 
-			if (remount_readonly(new, MS_NOSUID | MS_NOEXEC | MS_NODEV))
-				return error;
+		if (err) {
+			if (error)
+				ERROR("failed to mask %s%s: %m\n", new,
+				      S_ISDIR(s.st_mode) ? "" : " with " UJAIL_NOAFILE);
+			return error;
 		}
 
 		DEBUG("masked path %s\n", new);
