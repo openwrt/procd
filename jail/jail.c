@@ -7392,6 +7392,15 @@ static void post_main(struct uloop_timeout *t)
 			}
 		}
 
+		/*
+		 * A userns from clone() cannot mount sysfs for a netns it does
+		 * not own. Deferred/joined jails mount privileged anyway; a jail
+		 * with its own netns can do it itself.
+		 */
+		if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred() &&
+		    !(opts.namespace & CLONE_NEWNET) && premount_sysfs())
+			WARNING("cannot mount sysfs for the jail: %m\n");
+
 		prime_jail_mount(opts.extroot);
 		prime_jail_mount(opts.overlaydir);
 		for (size_t i = 0; i < (size_t)num_volume_sources; i++)

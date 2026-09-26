@@ -126,6 +126,31 @@ unsigned long detect_atime_flag(const char *mountpoint)
 #define MOUNT_ATTR_NODIRATIME	0x00000080
 #endif
 
+/* MS_* -> MOUNT_ATTR_* for fsmount()/mount_setattr() */
+static unsigned mountflags_to_attr(unsigned long mountflags)
+{
+	unsigned attr = 0;
+
+	if (mountflags & MS_RDONLY)
+		attr |= MOUNT_ATTR_RDONLY;
+	if (mountflags & MS_NOSUID)
+		attr |= MOUNT_ATTR_NOSUID;
+	if (mountflags & MS_NODEV)
+		attr |= MOUNT_ATTR_NODEV;
+	if (mountflags & MS_NOEXEC)
+		attr |= MOUNT_ATTR_NOEXEC;
+	if (mountflags & MS_NODIRATIME)
+		attr |= MOUNT_ATTR_NODIRATIME;
+	if (mountflags & MS_NOATIME)
+		attr |= MOUNT_ATTR_NOATIME;
+	else if (mountflags & MS_STRICTATIME)
+		attr |= MOUNT_ATTR_STRICTATIME;
+	else
+		attr |= MOUNT_ATTR_RELATIME;
+
+	return attr;
+}
+
 int sys_openat2(int dfd, const char *path, struct open_how *how, size_t size)
 {
 	return syscall(SYS_openat2, dfd, path, how, size);
@@ -310,6 +335,21 @@ int sys_open_tree(int dfd, const char *path, unsigned flags)
 int sys_move_mount(int from_dfd, const char *from_path, int to_dfd, const char *to_path, unsigned flags)
 {
 	return syscall(SYS_move_mount, from_dfd, from_path, to_dfd, to_path, flags);
+}
+
+int sys_fsopen(const char *fsname, unsigned flags)
+{
+	return syscall(SYS_fsopen, fsname, flags);
+}
+
+int sys_fsconfig(int fd, unsigned cmd, const char *key, const void *value, int aux)
+{
+	return syscall(SYS_fsconfig, fd, cmd, key, value, aux);
+}
+
+int sys_fsmount(int fd, unsigned flags, unsigned attr_flags)
+{
+	return syscall(SYS_fsmount, fd, flags, attr_flags);
 }
 
 int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mount_attr *attr, size_t size)
@@ -761,6 +801,42 @@ int add_mount_fd(int fd, const char *target, int error)
 	avl_insert(&mounts, &m->avl);
 	list_add_tail(&m->list, &mounts_order);
 	DEBUG("adding mount fd:%d %s bind(1) ro(?) err(%d)\n", fd, target, error != 0);
+
+	return 0;
+}
+
+/*
+ * Mounting sysfs requires CAP_SYS_ADMIN in the userns owning the netns. A
+ * child with a userns from clone() that stays in the parent's netns cannot
+ * do it. Called in the parent before clone(): fsmount() every queued sysfs
+ * entry with its requested flags and leave the fd for do_mount_fd().
+ */
+int premount_sysfs(void)
+{
+	struct mount *m;
+
+	list_for_each_entry(m, &mounts_order, list) {
+		int fsfd, mfd;
+
+		if (!m->filesystemtype || strcmp(m->filesystemtype, "sysfs") ||
+		    m->source_fd >= 0)
+			continue;
+
+		fsfd = sys_fsopen("sysfs", FSOPEN_CLOEXEC);
+		if (fsfd < 0)
+			return -1;
+		if (sys_fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0)) {
+			close(fsfd);
+			return -1;
+		}
+		mfd = sys_fsmount(fsfd, FSMOUNT_CLOEXEC, mountflags_to_attr(m->mountflags));
+		close(fsfd);
+		if (mfd < 0)
+			return -1;
+
+		m->source_fd = mfd;
+		DEBUG("pre-mounted sysfs for %s as fd:%d\n", m->target, mfd);
+	}
 
 	return 0;
 }
@@ -1337,26 +1413,8 @@ static int idmap_tree_fd(const char *source, int source_fd, int userns_fd,
 		return -1;
 	}
 
-	attr.attr_set = MOUNT_ATTR_IDMAP;
-	if (mountflags & MS_RDONLY)
-		attr.attr_set |= MOUNT_ATTR_RDONLY;
-	if (mountflags & MS_NOSUID)
-		attr.attr_set |= MOUNT_ATTR_NOSUID;
-	if (mountflags & MS_NODEV)
-		attr.attr_set |= MOUNT_ATTR_NODEV;
-	if (mountflags & MS_NOEXEC)
-		attr.attr_set |= MOUNT_ATTR_NOEXEC;
-	if (mountflags & MS_NODIRATIME)
-		attr.attr_set |= MOUNT_ATTR_NODIRATIME;
-	if (mountflags & (MS_NOATIME | MS_RELATIME | MS_STRICTATIME)) {
-		attr.attr_clr |= MOUNT_ATTR__ATIME;
-		if (mountflags & MS_NOATIME)
-			attr.attr_set |= MOUNT_ATTR_NOATIME;
-		else if (mountflags & MS_STRICTATIME)
-			attr.attr_set |= MOUNT_ATTR_STRICTATIME;
-		else
-			attr.attr_set |= MOUNT_ATTR_RELATIME;
-	}
+	attr.attr_set = MOUNT_ATTR_IDMAP | mountflags_to_attr(mountflags);
+	attr.attr_clr |= MOUNT_ATTR__ATIME;
 	attr.propagation = propagation;
 	attr.userns_fd = userns_fd;
 
