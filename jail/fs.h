@@ -45,6 +45,8 @@ int fs_mount_enable_idmap(const char *target, uint32_t uid, uint32_t gid);
 char *resolve_mount_source(const char *source);
 int add_mount_fd(int fd, const char *target, int error);
 int mask_path_now(const char *path);
+int remount_readonly(const char *path, unsigned long flags);
+int bind_remount_readonly(const char *path, unsigned long flags);
 
 /* open_tree()/mount_setattr() wrappers - no glibc wrappers yet.
  * Fields must match the kernel's struct mount_attr layout exactly
@@ -57,6 +59,29 @@ int sys_open_tree(int dfd, const char *path, unsigned flags);
 int sys_move_mount(int from_dfd, const char *from_path, int to_dfd,
 		   const char *to_path, unsigned flags);
 int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mount_attr *attr, size_t size);
+int sys_fsopen(const char *fsname, unsigned flags);
+int sys_fsconfig(int fd, unsigned cmd, const char *key, const void *value, int aux);
+int sys_fsmount(int fd, unsigned flags, unsigned attr_flags);
+int premount_sysfs(void);
+
+#ifndef FSOPEN_CLOEXEC
+#define FSOPEN_CLOEXEC 0x00000001
+#endif
+#ifndef FSMOUNT_CLOEXEC
+#define FSMOUNT_CLOEXEC 0x00000001
+#endif
+#ifndef FSCONFIG_CMD_CREATE
+#define FSCONFIG_CMD_CREATE 6
+#endif
+#ifndef MOUNT_ATTR_NOSUID
+#define MOUNT_ATTR_NOSUID 0x00000002
+#endif
+#ifndef MOUNT_ATTR_NODEV
+#define MOUNT_ATTR_NODEV 0x00000004
+#endif
+#ifndef MOUNT_ATTR_NOEXEC
+#define MOUNT_ATTR_NOEXEC 0x00000008
+#endif
 
 #ifndef OPEN_TREE_CLONE
 #define OPEN_TREE_CLONE 1

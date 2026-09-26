@@ -470,10 +470,17 @@ static char console_slave_name[64];
  * Joining a namespace by path needs privilege in the user namespace owning it,
  * which our own user namespace would take away, so in that case it is created
  * after the joins instead of by clone(). crun makes the same distinction.
+ *
+ * A userns joined with -j (opts.setns.user) drops privilege the same way and
+ * never owns the pidns clone() created, so procfs must be mounted before
+ * entering it. Both cases are entered in enter_userns(), after build_jail_fs().
  */
 static inline bool userns_deferred(void)
 {
-	if (!(opts.namespace & CLONE_NEWUSER) || opts.setns.user != -1)
+	if (opts.setns.user != -1)
+		return true;
+
+	if (!(opts.namespace & CLONE_NEWUSER))
 		return false;
 
 	return (opts.setns.pid != -1) ||
@@ -486,6 +493,12 @@ static inline bool userns_deferred(void)
 	       (opts.setns.time != -1) ||
 #endif
 	       false;
+}
+
+/* jail root maps to a host uid: own userns or a joined one */
+static inline bool jail_has_userns(void)
+{
+	return (opts.namespace & CLONE_NEWUSER) || opts.setns.user != -1;
 }
 
 static inline bool has_namespaces(void)
@@ -1100,7 +1113,7 @@ static struct mknod_args default_devices[] = {
 static int prepare_jail_dev(void)
 {
 	struct mknod_args **cur, *curdef;
-	uid_t base = (opts.namespace & CLONE_NEWUSER) ? opts.root_map_uid : 0;
+	uid_t base = jail_has_userns() ? opts.root_map_uid : 0;
 	mode_t oldmask = umask(0);
 	char path[PATH_MAX], *tmp;
 	int consfd;
@@ -1561,7 +1574,7 @@ static int build_jail_fs(void)
 		return -1;
 	}
 
-	jail_fs_set_userns((opts.namespace & CLONE_NEWUSER) || (opts.setns.user != -1));
+	jail_fs_set_userns(jail_has_userns());
 
 	if (mount_all(jail_root, jail_dev)) {
 		ERROR("mount_all() failed\n");
@@ -1780,6 +1793,7 @@ static void free_and_exit(int ret)
 	exit(ret);
 }
 
+static int setns_open(unsigned long nstype);
 static void post_jail_fs(void);
 static void enter_userns(void);
 static int userns_wait_idmaps(void);
@@ -1844,19 +1858,26 @@ static int userns_wait_idmaps(void)
 		return -1;
 	}
 
+	return 0;
+}
+
+/* become root in the userns just entered */
+static int userns_become_root(void)
+{
 	if (setregid(0, 0) < 0 || setreuid(0, 0) < 0) {
-		ERROR("cannot become root in our user namespace: %m\n");
-		return -1;
-	}
-	if (setgroups(0, NULL) < 0) {
-		ERROR("setgroups: %m\n");
+		ERROR("cannot become root in the user namespace: %m\n");
 		return -1;
 	}
 
-	if ((opts.namespace & CLONE_NEWNS) &&
-	    mount("none", "/", "none", mountns_propagation(), NULL)) {
-		ERROR("mount propagation failed: %m\n");
-		return -1;
+	if (setgroups(0, NULL) < 0) {
+		/* setgroups=deny is permanent once gid_map is written; only a
+		 * joined userns can have it */
+		if (errno != EPERM || opts.setns.user == -1) {
+			ERROR("setgroups: %m\n");
+			return -1;
+		}
+		WARNING("setgroups(0, NULL) denied by the joined userns; "
+			"continuing without dropping supplementary groups\n");
 	}
 
 	return 0;
@@ -1869,12 +1890,25 @@ static void enter_userns(void)
 		return;
 	}
 
-	if (unshare(CLONE_NEWUSER)) {
-		ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
-		free_and_exit(-1);
+	if (opts.setns.user != -1) {
+		/* maps exist already, no handshake */
+		int ret = setns_open(CLONE_NEWUSER);
+
+		if (ret) {
+			ERROR("failed to join user namespace: %s\n", strerror(ret));
+			free_and_exit(-1);
+		}
+	} else {
+		if (unshare(CLONE_NEWUSER)) {
+			ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
+			free_and_exit(-1);
+		}
+
+		if (userns_wait_idmaps())
+			free_and_exit(-1);
 	}
 
-	if (userns_wait_idmaps())
+	if (userns_become_root())
 		free_and_exit(-1);
 
 #ifdef CLONE_NEWTIME
@@ -2111,9 +2145,7 @@ static int remount_readonly_now(const char *path)
 	if (stat(path, &s))
 		return 0; /* doesn't exist, nothing to restrict */
 
-	if (mount(path, path, "bind", MS_BIND | MS_REC, NULL))
-		return -1;
-	if (mount(path, path, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_REC, NULL))
+	if (bind_remount_readonly(path, MS_REC))
 		return -1;
 
 	DEBUG("read-only path %s\n", path);
@@ -2170,10 +2202,8 @@ static void remount_proc_sys_after_unshare(void)
 	if (opts.namespace & CLONE_NEWNET)
 		mount("/proc/sys/net", "/proc/self/net", "bind", MS_BIND, NULL);
 
-	if (mount("/proc/sys", "/proc/sys", "bind", MS_BIND, NULL))
-		return;
-	if (mount("/proc/sys", "/proc/sys", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, NULL))
-		WARNING("could not remount /proc/sys read-only\n");
+	if (bind_remount_readonly("/proc/sys", 0))
+		WARNING("could not remount /proc/sys read-only: %m\n");
 
 	if (opts.namespace & CLONE_NEWNET)
 		mount("/proc/self/net", "/proc/sys/net", "bind", MS_MOVE, NULL);
@@ -3160,21 +3190,14 @@ static int exec_jail(void *arg)
 	}
 
 	/*
-	 * Joining an external userns drops privilege immediately, so this has
-	 * to run before it. A userns of our own owns the mount namespace it
-	 * was created with and locks everything inherited into it, so there
-	 * the detach neither works nor is needed.
+	 * Must run before enter_userns() drops privilege over the inherited
+	 * mounts. A userns from clone() owns its mntns and has everything
+	 * inherited MNT_LOCKED, so there the detach is neither possible nor
+	 * needed.
 	 */
-	if ((opts.namespace & CLONE_NEWNS) &&
-	    (userns_deferred() || opts.setns.user != -1) &&
+	if ((opts.namespace & CLONE_NEWNS) && userns_deferred() &&
 	    detach_inherited_mounts()) {
 		ERROR("failed to detach inherited mounts\n");
-		return EXIT_FAILURE;
-	}
-
-	ret = setns_open(CLONE_NEWUSER);
-	if (ret) {
-		ERROR("failed to join user namespace: %s\n", strerror(ret));
 		return EXIT_FAILURE;
 	}
 
@@ -3199,14 +3222,9 @@ static int exec_jail(void *arg)
 				  false,
 				  recv_fds, nrecv, &extroot_idmap_fd, &overlay_idmap_fd);
 
-	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred() &&
-	    userns_wait_idmaps())
-		return EXIT_FAILURE;
-
-	if (opts.setns.user != -1 && (opts.namespace & CLONE_NEWNS) &&
-	    unshare(CLONE_NEWNS)) {
-		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
-		return EXIT_FAILURE;
+	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred()) {
+		if (userns_wait_idmaps() || userns_become_root())
+			return EXIT_FAILURE;
 	}
 
 	if (opts.namespace & CLONE_NEWCGROUP)
@@ -3216,27 +3234,6 @@ static int exec_jail(void *arg)
 	if (ret) {
 		ERROR("failed to join cgroup namespace: %s\n", strerror(ret));
 		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (opts.setns.user != -1) {
-		if (setregid(0, 0) < 0) {
-			ERROR("setgid\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-		if (setreuid(0, 0) < 0) {
-			ERROR("setuid\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-		if (setgroups(0, NULL) < 0) {
-			if (errno != EPERM) {
-				ERROR("setgroups\n");
-				free_and_exit(EXIT_FAILURE);
-			}
-			WARNING("setgroups(0, NULL) denied by the joined "
-				"userns (setgroups=deny is permanent once a "
-				"gid_map is written); continuing without "
-				"dropping supplementary groups\n");
-		}
 	}
 
 #ifdef CLONE_NEWTIME
@@ -3412,7 +3409,7 @@ static void post_start_hook(void)
 
 	/* restore securebits back to normal (and lock them if not in userns) */
 	if (opts.capset.apply) {
-		if (prctl(PR_SET_SECUREBITS, (opts.namespace & CLONE_NEWUSER)?0:
+		if (prctl(PR_SET_SECUREBITS, jail_has_userns() ? 0 :
 		    SECBIT_KEEP_CAPS_LOCKED|SECBIT_NO_SETUID_FIXUP_LOCKED|SECBIT_NOROOT_LOCKED)) {
 			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
 			free_and_exit(EXIT_FAILURE);
@@ -4226,6 +4223,62 @@ static int jail_join_ns(char *arg)
 	} while (tmp);
 
 	return 0;
+}
+
+/*
+ * Set opts.root_map_uid from a joined userns. A helper enters it with
+ * setns() and reports what uid 0 maps to from its own uid_map; that works
+ * for a namespace kept alive only by a bind-mounted nsfs file, which has no
+ * process to read /proc/<pid>/uid_map from. The default stays on failure.
+ */
+static void userns_root_map(int nsfd)
+{
+	uint32_t inside, outside, count, uid = 0;
+	bool found = false;
+	int pfd[2], status;
+	pid_t pid;
+	FILE *f;
+
+	if (pipe2(pfd, O_CLOEXEC))
+		return;
+
+	pid = fork();
+	if (pid < 0) {
+		close(pfd[0]);
+		close(pfd[1]);
+		return;
+	}
+
+	if (!pid) {
+		close(pfd[0]);
+		if (setns(nsfd, CLONE_NEWUSER))
+			_exit(1);
+		f = fopen("/proc/self/uid_map", "re");
+		if (!f)
+			_exit(1);
+		while (fscanf(f, "%u %u %u", &inside, &outside, &count) == 3) {
+			if (inside == 0 && count >= 1) {
+				if (write(pfd[1], &outside, sizeof(outside)) == sizeof(outside))
+					_exit(0);
+				break;
+			}
+		}
+		_exit(1);
+	}
+
+	close(pfd[1]);
+	if (read(pfd[0], &uid, sizeof(uid)) == sizeof(uid))
+		found = true;
+	close(pfd[0]);
+	waitpid(pid, &status, 0);
+
+	if (found) {
+		opts.root_map_uid = uid;
+		DEBUG("root of the joined user namespace is uid %d\n", uid);
+	} else {
+		WARNING("cannot determine the root uid of the joined user namespace; "
+			"assuming %d\n", opts.root_map_uid);
+	}
 }
 
 static void get_jail_root_user(bool is_gidmap, uint32_t container_id, uint32_t host_id, uint32_t size)
@@ -6618,9 +6671,18 @@ int main(int argc, char **argv)
 			opts.namespace |= CLONE_NEWUTS;
 			opts.hostname = strdup(optarg);
 			break;
-		case 'j':
-			jail_join_ns(optarg);
+		case 'j': {
+			char *spec = strdup(optarg);
+			int err = jail_join_ns(optarg);
+
+			if (err) {
+				ERROR("-j %s: %s\n", spec ?: optarg, strerror(err));
+				free(spec);
+				return -1;
+			}
+			free(spec);
 			break;
+		}
 		case 'b':
 			if (!opts.ocibundle)
 				opts.namespace |= CLONE_NEWNS;
@@ -6768,8 +6830,17 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (opts.namespace && !opts.ocibundle)
-		opts.namespace |= CLONE_NEWIPC | CLONE_NEWPID;
+	/*
+	 * Not for namespaces joined via -j: clone(CLONE_NEWPID) is EINVAL
+	 * after setns(CLONE_NEWPID), and a new ipcns would shadow the joined
+	 * one.
+	 */
+	if (opts.namespace && !opts.ocibundle) {
+		if (opts.setns.ipc == -1)
+			opts.namespace |= CLONE_NEWIPC;
+		if (opts.setns.pid == -1)
+			opts.namespace |= CLONE_NEWPID;
+	}
 
 	/*
 	 * env import from cmdline is not available for OCI containers
@@ -6854,6 +6925,9 @@ int main(int argc, char **argv)
 		/* stdout and stderr belong to the container, not to us */
 		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "jail");
 	}
+
+	if (opts.setns.user != -1)
+		userns_root_map(opts.setns.user);
 
 	for (credidx = 0; credidx < n_cred_targets; credidx++) {
 		ret = fs_mount_enable_idmap(cred_targets[credidx],
@@ -7154,7 +7228,7 @@ static void post_main(struct uloop_timeout *t)
 			add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0,
 				  "mode=1777,size=10%", -1);
 			{
-				const char *ptsopts = (opts.namespace & CLONE_NEWUSER) ?
+				const char *ptsopts = jail_has_userns() ?
 					"newinstance,ptmxmode=0666,mode=0620,gid=0" :
 					"newinstance,ptmxmode=0666,mode=0620,gid=5";
 
@@ -7235,7 +7309,7 @@ static void post_main(struct uloop_timeout *t)
 			free_and_exit(EXIT_FAILURE);
 		}
 
-		if (opts.namespace & CLONE_NEWUSER) {
+		if (jail_has_userns()) {
 			if (opts.overlaydir) {
 				if (chown(opts.overlaydir, opts.root_map_uid, opts.root_map_uid)) {
 					ERROR("chown(%s, %d, %d) failed: %m\n",
@@ -7286,12 +7360,12 @@ static void post_main(struct uloop_timeout *t)
 				close(parent_master);
 			} else {
 				console_fd = parent_master;
-				if ((opts.namespace & CLONE_NEWUSER) && seteuid(0)) {
+				if (jail_has_userns() && seteuid(0)) {
 					ERROR("seteuid(0) failed: %m\n");
 					free_and_exit(EXIT_FAILURE);
 				}
 				pass_console(console_fd);
-				if ((opts.namespace & CLONE_NEWUSER) && seteuid(opts.root_map_uid)) {
+				if (jail_has_userns() && seteuid(opts.root_map_uid)) {
 					ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
 					free_and_exit(EXIT_FAILURE);
 				}
@@ -7317,6 +7391,15 @@ static void post_main(struct uloop_timeout *t)
 				cargs.cgroup = (__u64)init_cgroup_fd;
 			}
 		}
+
+		/*
+		 * A userns from clone() cannot mount sysfs for a netns it does
+		 * not own. Deferred/joined jails mount privileged anyway; a jail
+		 * with its own netns can do it itself.
+		 */
+		if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred() &&
+		    !(opts.namespace & CLONE_NEWNET) && premount_sysfs())
+			WARNING("cannot mount sysfs for the jail: %m\n");
 
 		prime_jail_mount(opts.extroot);
 		prime_jail_mount(opts.overlaydir);
