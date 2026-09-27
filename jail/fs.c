@@ -126,6 +126,31 @@ unsigned long detect_atime_flag(const char *mountpoint)
 #define MOUNT_ATTR_NODIRATIME	0x00000080
 #endif
 
+/* MS_* -> MOUNT_ATTR_* for fsmount()/mount_setattr() */
+static unsigned mountflags_to_attr(unsigned long mountflags)
+{
+	unsigned attr = 0;
+
+	if (mountflags & MS_RDONLY)
+		attr |= MOUNT_ATTR_RDONLY;
+	if (mountflags & MS_NOSUID)
+		attr |= MOUNT_ATTR_NOSUID;
+	if (mountflags & MS_NODEV)
+		attr |= MOUNT_ATTR_NODEV;
+	if (mountflags & MS_NOEXEC)
+		attr |= MOUNT_ATTR_NOEXEC;
+	if (mountflags & MS_NODIRATIME)
+		attr |= MOUNT_ATTR_NODIRATIME;
+	if (mountflags & MS_NOATIME)
+		attr |= MOUNT_ATTR_NOATIME;
+	else if (mountflags & MS_STRICTATIME)
+		attr |= MOUNT_ATTR_STRICTATIME;
+	else
+		attr |= MOUNT_ATTR_RELATIME;
+
+	return attr;
+}
+
 int sys_openat2(int dfd, const char *path, struct open_how *how, size_t size)
 {
 	return syscall(SYS_openat2, dfd, path, how, size);
@@ -1335,26 +1360,10 @@ static int idmap_tree_fd(const char *source, int source_fd, int userns_fd,
 		return -1;
 	}
 
-	attr.attr_set = MOUNT_ATTR_IDMAP;
-	if (mountflags & MS_RDONLY)
-		attr.attr_set |= MOUNT_ATTR_RDONLY;
-	if (mountflags & MS_NOSUID)
-		attr.attr_set |= MOUNT_ATTR_NOSUID;
-	if (mountflags & MS_NODEV)
-		attr.attr_set |= MOUNT_ATTR_NODEV;
-	if (mountflags & MS_NOEXEC)
-		attr.attr_set |= MOUNT_ATTR_NOEXEC;
-	if (mountflags & MS_NODIRATIME)
-		attr.attr_set |= MOUNT_ATTR_NODIRATIME;
-	if (mountflags & (MS_NOATIME | MS_RELATIME | MS_STRICTATIME)) {
+	/* keep the (possibly locked) atime mode unless one is requested */
+	attr.attr_set = MOUNT_ATTR_IDMAP | mountflags_to_attr(mountflags);
+	if (mountflags & (MS_NOATIME | MS_RELATIME | MS_STRICTATIME))
 		attr.attr_clr |= MOUNT_ATTR__ATIME;
-		if (mountflags & MS_NOATIME)
-			attr.attr_set |= MOUNT_ATTR_NOATIME;
-		else if (mountflags & MS_STRICTATIME)
-			attr.attr_set |= MOUNT_ATTR_STRICTATIME;
-		else
-			attr.attr_set |= MOUNT_ATTR_RELATIME;
-	}
 	attr.propagation = propagation;
 	attr.userns_fd = userns_fd;
 
