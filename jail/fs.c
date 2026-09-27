@@ -337,6 +337,21 @@ int sys_move_mount(int from_dfd, const char *from_path, int to_dfd, const char *
 	return syscall(SYS_move_mount, from_dfd, from_path, to_dfd, to_path, flags);
 }
 
+int sys_fsopen(const char *fsname, unsigned flags)
+{
+	return syscall(SYS_fsopen, fsname, flags);
+}
+
+int sys_fsconfig(int fd, unsigned cmd, const char *key, const void *value, int aux)
+{
+	return syscall(SYS_fsconfig, fd, cmd, key, value, aux);
+}
+
+int sys_fsmount(int fd, unsigned flags, unsigned attr_flags)
+{
+	return syscall(SYS_fsmount, fd, flags, attr_flags);
+}
+
 int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mount_attr *attr, size_t size)
 {
 	return syscall(SYS_mount_setattr, dfd, path, flags, attr, size);
@@ -784,6 +799,39 @@ int add_mount_fd(int fd, const char *target, int error)
 	avl_insert(&mounts, &m->avl);
 	list_add_tail(&m->list, &mounts_order);
 	DEBUG("adding mount fd:%d %s bind(1) ro(?) err(%d)\n", fd, target, error != 0);
+
+	return 0;
+}
+
+/*
+ * sysfs needs CAP_SYS_ADMIN in the userns owning the netns. fsmount() the
+ * queued sysfs entries here, before clone(), for do_mount_fd().
+ */
+int premount_sysfs(void)
+{
+	struct mount *m;
+	int fsfd, mfd;
+
+	list_for_each_entry(m, &mounts_order, list) {
+		if (!m->filesystemtype || strcmp(m->filesystemtype, "sysfs") ||
+		    m->source_fd >= 0)
+			continue;
+
+		fsfd = sys_fsopen("sysfs", FSOPEN_CLOEXEC);
+		if (fsfd < 0)
+			return -1;
+		if (sys_fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0)) {
+			close(fsfd);
+			return -1;
+		}
+		mfd = sys_fsmount(fsfd, FSMOUNT_CLOEXEC, mountflags_to_attr(m->mountflags));
+		close(fsfd);
+		if (mfd < 0)
+			return -1;
+
+		m->source_fd = mfd;
+		DEBUG("pre-mounted sysfs for %s as fd:%d\n", m->target, mfd);
+	}
 
 	return 0;
 }
@@ -1609,6 +1657,7 @@ static int mount_one(const char *jailroot, const char *jail_dev, struct mount *m
 {
 	char devtarget[PATH_MAX];
 	struct mount *outer;
+	int ret;
 
 	if (m->mounted)
 		return 0;
@@ -1639,8 +1688,11 @@ static int mount_one(const char *jailroot, const char *jail_dev, struct mount *m
 	if (m->idmap)
 		return do_idmap_mount(jailroot, m) ? -1 : 0;
 
-	if (m->source_fd >= 0)
-		return do_mount_fd(jailroot, m->source_fd, m->target, m->error) ? -1 : 0;
+	if (m->source_fd >= 0) {
+		ret = do_mount_fd(jailroot, m->source_fd, m->target, m->error);
+		m->source_fd = -1;
+		return ret ? -1 : 0;
+	}
 
 	if (do_mount(jailroot, m->source, m->target, m->filesystemtype, m->mountflags,
 		     m->propflags, m->optstr, m->error, m->inner, m->source_fd))
