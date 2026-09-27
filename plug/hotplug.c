@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -28,6 +29,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <glob.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -35,10 +37,15 @@
 #include <grp.h>
 
 #include "../procd.h"
+#include "../utils/utils.h"
 
 #include "hotplug.h"
 
 #define HOTPLUG_WAIT	500
+
+#define HOTPLUG_RULES_EVENTS	(IN_CREATE | IN_CLOSE_WRITE | IN_MOVED_TO | \
+				 IN_DELETE | IN_MOVED_FROM | IN_DELETE_SELF | \
+				 IN_MOVE_SELF)
 
 struct cmd_handler;
 struct cmd_queue {
@@ -53,6 +60,13 @@ struct cmd_queue {
 	void (*complete)(struct blob_attr *msg, struct blob_attr *data, int ret);
 };
 
+struct rules_dir {
+	struct list_head list;
+	char *pattern;
+	char *path;
+	int wd;
+};
+
 struct button_timeout {
 	struct list_head list;
 	struct uloop_timeout timeout;
@@ -63,6 +77,8 @@ struct button_timeout {
 
 static LIST_HEAD(cmd_queue);
 static LIST_HEAD(button_timer);
+static LIST_HEAD(rules_dirs);
+static struct inotify_watch rules_watch;
 static struct uloop_process queue_proc;
 static struct uloop_timeout last_event;
 static struct blob_buf b, button_buf;
@@ -492,6 +508,46 @@ static const char* rule_handle_var(struct json_script_ctx *ctx, const char *name
 	return NULL;
 }
 
+static void rules_dir_add(const char *name)
+{
+	struct rules_dir *rd;
+	char *path, *pattern;
+	const char *sep;
+	size_t dirlen;
+
+	sep = strrchr(name, '/');
+	if (!sep)
+		return;
+
+	dirlen = sep == name ? 1 : (size_t)(sep - name);
+
+	list_for_each_entry(rd, &rules_dirs, list) {
+		if (strncmp(rd->path, name, dirlen) || rd->path[dirlen])
+			continue;
+
+		if (strcmp(rd->pattern, sep + 1))
+			continue;
+
+		if (rd->wd == -1)
+			rd->wd = inotify_watch_add(&rules_watch, rd->path,
+						   HOTPLUG_RULES_EVENTS);
+
+		return;
+	}
+
+	rd = calloc_a(sizeof(*rd), &path, dirlen + 1,
+		      &pattern, strlen(sep + 1) + 1);
+	if (!rd)
+		return;
+
+	memcpy(path, name, dirlen);
+	strcpy(pattern, sep + 1);
+	rd->path = path;
+	rd->pattern = pattern;
+	rd->wd = inotify_watch_add(&rules_watch, path, HOTPLUG_RULES_EVENTS);
+	list_add_tail(&rd->list, &rules_dirs);
+}
+
 static struct json_script_file *
 rule_load_file(const char *path, const char *key)
 {
@@ -515,6 +571,8 @@ rule_handle_file(struct json_script_ctx *ctx, const char *name)
 	const char *key = name;
 	glob_t gl;
 	size_t i;
+
+	rules_dir_add(name);
 
 	if (!strpbrk(name, "*?["))
 		return rule_load_file(name, name);
@@ -584,6 +642,30 @@ static struct json_script_ctx jctx = {
 	.handle_command = rule_handle_command,
 	.handle_file = rule_handle_file,
 };
+
+static void rules_dir_event(struct inotify_watch *w, struct inotify_event *ev)
+{
+	struct rules_dir *rd;
+	bool reload = false;
+
+	list_for_each_entry(rd, &rules_dirs, list) {
+		if (rd->wd != ev->wd)
+			continue;
+
+		if (ev->mask & IN_IGNORED)
+			rd->wd = -1;
+		else if (ev->len && fnmatch(rd->pattern, ev->name, 0))
+			continue;
+
+		reload = true;
+	}
+
+	if (!reload)
+		return;
+
+	json_script_free(&jctx);
+	json_script_init(&jctx);
+}
 
 static void hotplug_handler_debug(struct blob_attr *data)
 {
@@ -659,6 +741,9 @@ void hotplug(char *rules)
 		ERROR("Failed to resize receive buffer: %m\n");
 
 	json_script_init(&jctx);
+	if (inotify_watch_open(&rules_watch, rules_dir_event))
+		ERROR("Failed to watch hotplug rule files: %m\n");
+
 	queue_proc.cb = queue_proc_cb;
 	uloop_fd_add(&hotplug_fd, ULOOP_READ);
 }
