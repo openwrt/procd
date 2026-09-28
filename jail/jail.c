@@ -6988,6 +6988,9 @@ int main(int argc, char **argv)
 			ret=EXIT_FAILURE;
 			goto errout;
 		}
+		/* an absent process.capabilities block means the empty set */
+		opts.capset.apply = 1;
+
 		ocires = parseOCI(jsonfile);
 		free(jsonfile);
 		if (ocires) {
