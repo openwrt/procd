@@ -4171,6 +4171,9 @@ static const char *nstype_link(int nstype)
 	return NULL;
 }
 
+/* linux.namespaces entries are unique by type */
+static int oci_ns_seen;
+
 static int parseOCIlinuxns(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_LINUX_NAMESPACE_MAX];
@@ -4187,18 +4190,20 @@ static int parseOCIlinuxns(struct blob_attr *msg)
 	if (!nstype)
 		return EINVAL;
 
-	if (opts.namespace & nstype)
-		return ENOTUNIQ;
-
 	setns = get_namespace_fd(nstype);
 
 	if (!setns)
 		return EFAULT;
 
-	if (*setns != -1)
+	if (oci_ns_seen & nstype)
 		return ENOTUNIQ;
 
+	oci_ns_seen |= nstype;
+
 	if (tb[OCI_LINUX_NAMESPACE_PATH]) {
+		if (*setns != -1)
+			return ENOTUNIQ;
+
 		DEBUG("opening existing %s namespace from path %s\n",
 			blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_TYPE]),
 			blobmsg_get_string(tb[OCI_LINUX_NAMESPACE_PATH]));
@@ -4256,9 +4261,6 @@ static int jail_join_ns(char *arg)
 		nstype = resolve_nstype(tmp);
 		if (!nstype)
 			return EINVAL;
-
-		if (opts.namespace & nstype)
-			return ENOTUNIQ;
 
 		setns = get_namespace_fd(nstype);
 
@@ -6999,6 +7001,26 @@ int main(int argc, char **argv)
 		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "jail");
 	}
 
+	if (opts.setns.ns != -1 && (opts.namespace & CLONE_NEWNS)) {
+		ERROR("cannot build a jail filesystem in a joined mount namespace\n");
+		ret = EXIT_FAILURE;
+		goto errout;
+	}
+
+	/* clone(CLONE_NEWPID) after setns(CLONE_NEWPID) is EINVAL */
+	if (opts.setns.net != -1)
+		opts.namespace &= ~CLONE_NEWNET;
+	if (opts.setns.ipc != -1)
+		opts.namespace &= ~CLONE_NEWIPC;
+	if (opts.setns.uts != -1)
+		opts.namespace &= ~CLONE_NEWUTS;
+	if (opts.setns.pid != -1)
+		opts.namespace &= ~CLONE_NEWPID;
+	if (opts.setns.user != -1)
+		opts.namespace &= ~CLONE_NEWUSER;
+	if (opts.setns.cgroup != -1)
+		opts.namespace &= ~CLONE_NEWCGROUP;
+
 	if (opts.setns.user != -1)
 		joined_userns_mapped = userns_root_map();
 
@@ -7235,6 +7257,7 @@ static void netifd_restart_watch(void)
 static void post_main(struct uloop_timeout *t)
 {
 	int child_status;
+	int nsret;
 
 	if (apply_rlimits()) {
 		ERROR("error applying resource limits\n");
@@ -7366,7 +7389,12 @@ static void post_main(struct uloop_timeout *t)
 
 		if (opts.setns.pid != -1) {
 			pidns_fd = ns_open_pid("pid", getpid());
-			setns_open(CLONE_NEWPID);
+			nsret = setns_open(CLONE_NEWPID);
+			if (nsret) {
+				ERROR("failed to join pid namespace: %s\n",
+				      strerror(nsret));
+				free_and_exit(EXIT_FAILURE);
+			}
 		} else {
 			pidns_fd = -1;
 		}
