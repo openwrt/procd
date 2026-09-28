@@ -363,9 +363,13 @@ static void mountinfo_unescape(char *s)
 	*w = '\0';
 }
 
+/*
+ * The flags a locked mount will not let a remount clear. The atime class is
+ * deliberately absent: path_mount() preserves it when the remount names none.
+ */
 static unsigned long mountinfo_current_flags(const char *path)
 {
-	unsigned long flags = MS_RELATIME;
+	unsigned long flags = 0;
 	bool found = false;
 	FILE *f;
 	char *line = NULL;
@@ -403,12 +407,6 @@ static unsigned long mountinfo_current_flags(const char *path)
 				this_flags |= MS_NODEV;
 			else if (!strcmp(tok, "noexec"))
 				this_flags |= MS_NOEXEC;
-			else if (!strcmp(tok, "noatime"))
-				this_flags |= MS_NOATIME;
-			else if (!strcmp(tok, "relatime"))
-				this_flags |= MS_RELATIME;
-			else if (!strcmp(tok, "nodiratime"))
-				this_flags |= MS_NODIRATIME;
 		}
 
 		/* last match wins: it's the topmost/effective entry */
@@ -419,9 +417,27 @@ static unsigned long mountinfo_current_flags(const char *path)
 	fclose(f);
 
 	if (!found)
-		return MS_RELATIME;
+		return 0;
 
 	return flags;
+}
+
+/*
+ * Self-bind @path and remount it read-only, preserving the flags already in
+ * effect. Mounts copied in by unshare(CLONE_NEWNS) under a userns that does
+ * not own them are MNT_LOCK_{NOSUID,NODEV,NOEXEC,ATIME}; a remount clearing
+ * any of those fails with EPERM.
+ */
+int bind_remount_readonly(const char *path, unsigned long flags)
+{
+	if (mount(path, path, "bind", MS_BIND | (flags & MS_REC), NULL))
+		return -1;
+
+	flags |= MS_REMOUNT | MS_BIND | MS_RDONLY | mountinfo_current_flags(path);
+	if (mount(path, path, "bind", flags, NULL))
+		return -1;
+
+	return 0;
 }
 
 static bool fs_userns;

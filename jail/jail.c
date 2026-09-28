@@ -2105,9 +2105,7 @@ static int remount_readonly_now(const char *path)
 	if (stat(path, &s))
 		return 0; /* doesn't exist, nothing to restrict */
 
-	if (mount(path, path, "bind", MS_BIND | MS_REC, NULL))
-		return -1;
-	if (mount(path, path, "bind", MS_REMOUNT | MS_BIND | MS_RDONLY | MS_REC, NULL))
+	if (bind_remount_readonly(path, MS_REC))
 		return -1;
 
 	DEBUG("read-only path %s\n", path);
@@ -2164,10 +2162,8 @@ static void remount_proc_sys_after_unshare(void)
 	if (opts.namespace & CLONE_NEWNET)
 		mount("/proc/sys/net", "/proc/self/net", "bind", MS_BIND, NULL);
 
-	if (mount("/proc/sys", "/proc/sys", "bind", MS_BIND, NULL))
-		return;
-	if (mount("/proc/sys", "/proc/sys", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, NULL))
-		WARNING("could not remount /proc/sys read-only\n");
+	if (bind_remount_readonly("/proc/sys", 0))
+		WARNING("could not remount /proc/sys read-only: %m\n");
 
 	if (opts.namespace & CLONE_NEWNET)
 		mount("/proc/self/net", "/proc/sys/net", "bind", MS_MOVE, NULL);
