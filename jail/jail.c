@@ -470,10 +470,17 @@ static char console_slave_name[64];
  * Joining a namespace by path needs privilege in the user namespace owning it,
  * which our own user namespace would take away, so in that case it is created
  * after the joins instead of by clone(). crun makes the same distinction.
+ *
+ * A userns joined with -j (opts.setns.user) drops privilege the same way and
+ * never owns the pidns clone() created, so procfs must be mounted before
+ * entering it. Both cases are entered in enter_userns(), after build_jail_fs().
  */
 static inline bool userns_deferred(void)
 {
-	if (!(opts.namespace & CLONE_NEWUSER) || opts.setns.user != -1)
+	if (opts.setns.user != -1)
+		return true;
+
+	if (!(opts.namespace & CLONE_NEWUSER))
 		return false;
 
 	return (opts.setns.pid != -1) ||
@@ -1797,13 +1804,14 @@ static void free_and_exit(int ret)
 	exit(ret);
 }
 
+static int setns_open(unsigned long nstype);
 static void post_jail_fs(void);
 static void enter_userns(void);
 static int userns_wait_idmaps(void);
 #ifdef CLONE_NEWTIME
 static int timens_create(void);
 #endif
-static void remask_after_unshare(void);
+static int remask_after_unshare(void);
 static void remount_proc_sys_after_unshare(void);
 static void enter_jail_fs(void)
 {
@@ -1861,13 +1869,26 @@ static int userns_wait_idmaps(void)
 		return -1;
 	}
 
+	return 0;
+}
+
+/* become root in the userns just entered */
+static int userns_become_root(void)
+{
 	if (setregid(0, 0) < 0 || setreuid(0, 0) < 0) {
-		ERROR("cannot become root in our user namespace: %m\n");
+		ERROR("cannot become root in the user namespace: %m\n");
 		return -1;
 	}
+
 	if (setgroups(0, NULL) < 0) {
-		ERROR("setgroups: %m\n");
-		return -1;
+		/* setgroups=deny is permanent once gid_map is written; only a
+		 * joined userns can have it */
+		if (errno != EPERM || opts.setns.user == -1) {
+			ERROR("setgroups: %m\n");
+			return -1;
+		}
+		WARNING("setgroups(0, NULL) denied by the joined userns; "
+			"continuing without dropping supplementary groups\n");
 	}
 
 	return 0;
@@ -1875,17 +1896,31 @@ static int userns_wait_idmaps(void)
 
 static void enter_userns(void)
 {
+	int ret;
+
 	if (!userns_deferred()) {
 		post_jail_fs();
 		return;
 	}
 
-	if (unshare(CLONE_NEWUSER)) {
-		ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
-		free_and_exit(-1);
+	if (opts.setns.user != -1) {
+		/* maps exist already, no handshake */
+		ret = setns_open(CLONE_NEWUSER);
+		if (ret) {
+			ERROR("failed to join user namespace: %s\n", strerror(ret));
+			free_and_exit(-1);
+		}
+	} else {
+		if (unshare(CLONE_NEWUSER)) {
+			ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
+			free_and_exit(-1);
+		}
+
+		if (userns_wait_idmaps())
+			free_and_exit(-1);
 	}
 
-	if (userns_wait_idmaps())
+	if (userns_become_root())
 		free_and_exit(-1);
 
 #ifdef CLONE_NEWTIME
@@ -1899,7 +1934,9 @@ static void enter_userns(void)
 		free_and_exit(-1);
 	}
 	if (opts.namespace & CLONE_NEWNS) {
-		remask_after_unshare();
+		if (remask_after_unshare())
+			free_and_exit(-1);
+
 		remount_proc_sys_after_unshare();
 	}
 
@@ -2131,34 +2168,52 @@ static int remount_readonly_now(const char *path)
 
 /* re-apply masks inside the container's own mntns: the first pass is
  * locked once copied in after unshare(CLONE_NEWNS); best-effort */
-static void remask_after_unshare(void)
+static int mask_paths_now(const char **paths, bool critical)
 {
 	const char **p;
+
+	for (p = paths; *p; p++) {
+		if (!mask_path_now(*p))
+			continue;
+
+		if (critical) {
+			ERROR("failed to mask sensitive path %s: %m\n", *p);
+			return -1;
+		}
+
+		WARNING("could not mask optional path %s: %m\n", *p);
+	}
+
+	return 0;
+}
+
+static int remask_after_unshare(void)
+{
 	char **dp;
 
 	if (!opts.ocibundle) {
-		if (opts.procfs) {
-			for (p = proc_mask_critical; *p; p++)
-				mask_path_now(*p);
-			for (p = proc_mask_optional; *p; p++)
-				mask_path_now(*p);
-		}
+		if (opts.procfs &&
+		    (mask_paths_now(proc_mask_critical, true) ||
+		     mask_paths_now(proc_mask_optional, false)))
+			return -1;
 
-		if (opts.sysfs) {
-			for (p = sys_mask_critical; *p; p++)
-				mask_path_now(*p);
-		}
+		if (opts.sysfs && mask_paths_now(sys_mask_critical, true))
+			return -1;
 	}
 
 	/* same reason as the default masks above: locked in phase 1, an
 	 * OCI bundle's own masks would outlive its unshare(CLONE_NEWNS). */
 	if (opts.oci_deferred_masked)
 		for (dp = opts.oci_deferred_masked; *dp; dp++)
-			mask_path_now(*dp);
+			if (mask_path_now(*dp))
+				WARNING("could not mask %s: %m\n", *dp);
 
 	if (opts.oci_deferred_readonly)
 		for (dp = opts.oci_deferred_readonly; *dp; dp++)
-			remount_readonly_now(*dp);
+			if (remount_readonly_now(*dp))
+				WARNING("could not make %s read-only: %m\n", *dp);
+
+	return 0;
 }
 
 /* /proc/sys is locked read-only for every procfs jail via a self-bind,
@@ -2171,19 +2226,29 @@ static void remount_proc_sys_after_unshare(void)
 
 	if (!(opts.procfs || opts.ocibundle))
 		return;
+	if (mount_is_defined("/proc/sys"))
+		return;
 	if (stat("/proc/sys", &s))
 		return;
 
 	/* the MS_MOVE below needs a mountpoint to move from, or it's a
 	 * silent EINVAL. */
-	if (opts.namespace & CLONE_NEWNET)
-		mount("/proc/sys/net", "/proc/self/net", "bind", MS_BIND, NULL);
+	if ((opts.namespace & CLONE_NEWNET) &&
+	    mount("/proc/sys/net", "/proc/self/net", "bind", MS_BIND, NULL)) {
+		ERROR("failed to stash /proc/sys/net: %m\n");
+		free_and_exit(-1);
+	}
 
-	if (bind_remount_readonly("/proc/sys", 0))
-		WARNING("could not remount /proc/sys read-only: %m\n");
+	if (bind_remount_readonly("/proc/sys", 0)) {
+		ERROR("failed to remount /proc/sys read-only: %m\n");
+		free_and_exit(-1);
+	}
 
-	if (opts.namespace & CLONE_NEWNET)
-		mount("/proc/self/net", "/proc/sys/net", "bind", MS_MOVE, NULL);
+	if ((opts.namespace & CLONE_NEWNET) &&
+	    mount("/proc/self/net", "/proc/sys/net", "bind", MS_MOVE, NULL)) {
+		ERROR("failed to restore /proc/sys/net: %m\n");
+		free_and_exit(-1);
+	}
 }
 
 static bool resolve_jail_user_gids(int primary_gid)
@@ -3167,21 +3232,14 @@ static int exec_jail(void *arg)
 	}
 
 	/*
-	 * Joining an external userns drops privilege immediately, so this has
-	 * to run before it. A userns of our own owns the mount namespace it
-	 * was created with and locks everything inherited into it, so there
-	 * the detach neither works nor is needed.
+	 * Must run before enter_userns() drops privilege over the inherited
+	 * mounts. A userns from clone() owns its mntns and has everything
+	 * inherited MNT_LOCKED, so there the detach is neither possible nor
+	 * needed.
 	 */
-	if ((opts.namespace & CLONE_NEWNS) &&
-	    (userns_deferred() || opts.setns.user != -1) &&
+	if ((opts.namespace & CLONE_NEWNS) && userns_deferred() &&
 	    detach_inherited_mounts()) {
 		ERROR("failed to detach inherited mounts\n");
-		return EXIT_FAILURE;
-	}
-
-	ret = setns_open(CLONE_NEWUSER);
-	if (ret) {
-		ERROR("failed to join user namespace: %s\n", strerror(ret));
 		return EXIT_FAILURE;
 	}
 
@@ -3206,14 +3264,9 @@ static int exec_jail(void *arg)
 				  false,
 				  recv_fds, nrecv, &extroot_idmap_fd, &overlay_idmap_fd);
 
-	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred() &&
-	    userns_wait_idmaps())
-		return EXIT_FAILURE;
-
-	if (opts.setns.user != -1 && (opts.namespace & CLONE_NEWNS) &&
-	    unshare(CLONE_NEWNS)) {
-		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
-		return EXIT_FAILURE;
+	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred()) {
+		if (userns_wait_idmaps() || userns_become_root())
+			return EXIT_FAILURE;
 	}
 
 	if (opts.namespace & CLONE_NEWCGROUP)
@@ -3223,27 +3276,6 @@ static int exec_jail(void *arg)
 	if (ret) {
 		ERROR("failed to join cgroup namespace: %s\n", strerror(ret));
 		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (opts.setns.user != -1) {
-		if (setregid(0, 0) < 0) {
-			ERROR("setgid\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-		if (setreuid(0, 0) < 0) {
-			ERROR("setuid\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-		if (setgroups(0, NULL) < 0) {
-			if (errno != EPERM) {
-				ERROR("setgroups\n");
-				free_and_exit(EXIT_FAILURE);
-			}
-			WARNING("setgroups(0, NULL) denied by the joined "
-				"userns (setgroups=deny is permanent once a "
-				"gid_map is written); continuing without "
-				"dropping supplementary groups\n");
-		}
 	}
 
 #ifdef CLONE_NEWTIME
