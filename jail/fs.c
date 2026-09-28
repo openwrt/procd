@@ -504,7 +504,7 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 	char devpts_data[512];
 	const char *mount_data;
 	char *source = (char *)orig_source;
-	int fd, ret = 0;
+	int fd, err, ret = 0;
 	bool is_bind = (orig_mountflags & MS_BIND);
 	bool is_mask = (source == (void *)(-1));
 	bool use_fd = false;
@@ -534,15 +534,21 @@ static int do_mount(const char *root, const char *orig_source, const char *targe
 			return 0; /* doesn't exists, nothing to mask */
 
 		if (S_ISDIR(s.st_mode)) {/* use empty 0-sized tmpfs for directories */
-			if (mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000"))
-				return error;
+			err = mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000");
 		} else {
 			/* mount-bind 0-sized file having mode 000 */
-			if (mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL))
-				return error;
+			err = mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL);
+			if (!err)
+				err = remount_readonly(new, MS_NOSUID | MS_NOEXEC | MS_NODEV);
+		}
 
-			if (remount_readonly(new, MS_NOSUID | MS_NOEXEC | MS_NODEV))
-				return error;
+		if (err) {
+			if (error)
+				ERROR("failed to mask %s: %m\n", new);
+			else
+				WARNING("could not mask optional path %s: %m\n",
+					new);
+			return error;
 		}
 
 		DEBUG("masked path %s\n", new);
