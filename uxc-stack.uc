@@ -226,9 +226,8 @@ if (action == 'up') {
 	let kept = [];
 
 	for (let reg in members) {
-		let krc = system([ 'uxc', 'kill', reg.name ]);
-		if (krc != 0 && krc != 254)
-			printf('uxc-stack: uxc kill %s -> %d\n', reg.name, krc);
+		/* an already stopped member is normal; delete reports a real failure */
+		system([ 'uxc', 'kill', reg.name ]);
 		uxc('delete', reg.name);
 		unlink(REG_DIR + '/' + reg.name + '.json');
 		unlink(REG_DIR + '/' + reg.name + '.annotations');

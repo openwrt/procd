@@ -422,7 +422,7 @@ static void uxc_wait_disarm(void)
 	active_wait = NULL;
 }
 
-static int usage(void) {
+static void usage(void) {
 	printf("syntax: uxc [global options] <command> [parameters ...]\n");
 	printf("global options:\n");
 	printf("\t[--debug|-v] [--log <path>] [--log-format <text|json>]\n");
@@ -455,7 +455,6 @@ static int usage(void) {
 	printf("\texec <conf> [--process <file>] [-d] [-p <pid-file>] [-- cmd args]\n");
 	printf("\t\t\t\t\t\trun a command inside running container <conf>\n");
 	printf("\tupdate <conf> --resources <file>\tapply linux.resources from <file> to running container <conf>\n");
-	return -EINVAL;
 }
 
 enum {
@@ -745,7 +744,7 @@ static void get_ocistate(struct blob_attr **ocistate, const char *name)
 	*ocistate = NULL;
 
 	if (asprintf(&objname, "container.%s", name) == -1)
-		exit(ENOMEM);
+		exit(EXIT_FAILURE);
 
 	ret = ubus_lookup_id(ctx, objname, &id);
 	free(objname);
@@ -1892,7 +1891,7 @@ static int uxc_start(const char *name, bool console)
 	if (console) {
 		pid = fork();
 		if (pid > 0)
-			exit(uxc_attach(name));
+			exit(uxc_attach(name) ? EXIT_FAILURE : 0);
 	}
 
 	if (asprintf(&objname, "container.%s", name) == -1)
@@ -1917,7 +1916,7 @@ static int uxc_start(const char *name, bool console)
 	if (ret) {
 		fprintf(stderr, "uxc: start %s: %s\n", name, ubus_strerror(ret));
 		uxc_wait_disarm();
-		return ret;
+		return -EIO;
 	}
 
 	uxc_wait_run(&wait_state, 30000);
@@ -2440,7 +2439,7 @@ static int uxc_boot(const char *mountpoint)
 
 	ret = ubus_invoke(ctx, id, "get", req.head, fstab_cb, NULL, 3000);
 	if (ret)
-		return ret;
+		return -EIO;
 
 	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
@@ -2496,8 +2495,10 @@ static int uxc_boot(const char *mountpoint)
 			continue;
 		}
 
-		if (uxc_create(name, true, NULL, false, NULL))
-			++ret;
+		if (uxc_create(name, true, NULL, false, NULL)) {
+			fprintf(stderr, "uxc: boot: could not start %s\n", name);
+			ret = -EIO;
+		}
 
 		free(name);
 	}
@@ -2968,7 +2969,7 @@ static int purge_cb(const char *path, const struct stat *sb, int typeflag,
 	return remove(path);
 }
 
-static void reconcile_purge(const char *name, const char *statedir)
+static int reconcile_purge(const char *name, const char *statedir)
 {
 	char path[PATH_MAX];
 
@@ -2977,10 +2978,12 @@ static void reconcile_purge(const char *name, const char *statedir)
 
 	if (nftw(statedir, purge_cb, 16, FTW_DEPTH | FTW_PHYS)) {
 		fprintf(stderr, "uxc: reconcile: could not purge state for %s\n", name);
-		return;
+		return -EIO;
 	}
 
 	fprintf(stderr, "uxc: reconcile: purged orphaned state for %s\n", name);
+
+	return 0;
 }
 
 static int uxc_reconcile(void)
@@ -2988,7 +2991,7 @@ static int uxc_reconcile(void)
 	char glob_pat[PATH_MAX];
 	const char *name;
 	glob_t gl;
-	int i, ret = 0;
+	int i, purged = 0, ret = 0;
 
 	snprintf(glob_pat, sizeof(glob_pat), "%s/state/*", UXC_VOL_CONFDIR);
 	if (glob(glob_pat, GLOB_NOSORT, NULL, &gl))
@@ -2999,11 +3002,17 @@ static int uxc_reconcile(void)
 		name = name ? name + 1 : gl.gl_pathv[i];
 		if (uxc_registered(name))
 			continue;
-		reconcile_purge(name, gl.gl_pathv[i]);
-		++ret;
+		if (reconcile_purge(name, gl.gl_pathv[i])) {
+			ret = -EIO;
+			continue;
+		}
+		++purged;
 	}
 
 	globfree(&gl);
+	if (purged)
+		fprintf(stderr, "uxc: purged %d orphaned container(s)\n", purged);
+
 	return ret;
 }
 
@@ -3057,9 +3066,10 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	}
 
 	if (rsstate) {
-		ret = ubus_lookup_id(ctx, "container", &id);
-		if (ret)
+		if (ubus_lookup_id(ctx, "container", &id)) {
+			ret = -EIO;
 			goto errout;
+		}
 
 		uxc_runtime_delete(rsstate->container_name);
 
@@ -3202,7 +3212,7 @@ int main(int argc, char **argv)
 			if (!strcmp(a, name)) { \
 				if (i + 1 >= argc) { \
 					fprintf(stderr, "uxc: %s requires an argument\n", a); \
-					return -EINVAL; \
+					return EXIT_FAILURE; \
 				} \
 				dst = argv[++i]; \
 				goto next_global; \
@@ -3221,30 +3231,33 @@ int main(int argc, char **argv)
 			continue;
 
 		fprintf(stderr, "uxc: unknown option '%s'\n", a);
-		return usage();
+		usage();
+		return EXIT_FAILURE;
 next_global:
 		continue;
 	}
 
-	if (i >= argc)
-		return usage();
+	if (i >= argc) {
+		usage();
+		return EXIT_FAILURE;
+	}
 
 	if (log_path) {
 		int fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 		if (fd < 0) {
 			fprintf(stderr, "uxc: cannot open --log path %s: %m\n", log_path);
-			return -EIO;
+			return EXIT_FAILURE;
 		}
 		stdio_fds[2] = dup(STDERR_FILENO);
 		if (stdio_fds[2] < 0) {
 			fprintf(stderr, "uxc: cannot preserve stderr: %m\n");
 			close(fd);
-			return -EIO;
+			return EXIT_FAILURE;
 		}
 		if (dup2(fd, STDERR_FILENO) < 0) {
 			dprintf(fd, "uxc: dup2(--log path) failed: %m\n");
 			close(fd);
-			return -EIO;
+			return EXIT_FAILURE;
 		}
 		close(fd);
 	}
@@ -3263,7 +3276,7 @@ next_global:
 
 	ctx = ubus_connect(NULL);
 	if (!ctx)
-		return -ENODEV;
+		return EXIT_FAILURE;
 
 	ret = conf_load(false);
 	if (ret < 0)
@@ -3377,10 +3390,14 @@ next_global:
 		if (verb_argc != 2)
 			goto usage_out;
 		ret = uxc_set(verb_argv[1], NULL, 1, NULL, NULL, NULL, NULL);
+		if (ret > 0)
+			ret = 0;
 	} else if (!strcmp(verb, "disable")) {
 		if (verb_argc != 2)
 			goto usage_out;
 		ret = uxc_set(verb_argv[1], NULL, 0, NULL, NULL, NULL, NULL);
+		if (ret > 0)
+			ret = 0;
 	} else if (!strcmp(verb, "delete")) {
 		bool force = false;
 		bool volumes = false;
@@ -3519,7 +3536,8 @@ next_global:
 	goto runtime_out;
 
 usage_out:
-	ret = usage();
+	usage();
+	ret = EXIT_FAILURE;
 runtime_out:
 	runtime_free();
 settings_avl_out:
@@ -3531,8 +3549,10 @@ conf_out:
 out:
 	ubus_free(ctx);
 
-	if (ret < 0)
+	if (ret < 0) {
 		fprintf(stderr, "uxc error: %s\n", strerror(-ret));
+		return EXIT_FAILURE;
+	}
 
 	return ret;
 }
