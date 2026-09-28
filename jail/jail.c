@@ -4130,27 +4130,45 @@ static const struct blobmsg_policy oci_linux_namespace_policy[] = {
 	[OCI_LINUX_NAMESPACE_PATH] = { "path", BLOBMSG_TYPE_STRING },
 };
 
-static int resolve_nstype(char *type) {
-	if (!strcmp("pid", type))
-		return CLONE_NEWPID;
-	else if (!strcmp("network", type))
-		return CLONE_NEWNET;
-	else if (!strcmp("net", type))
-		return CLONE_NEWNET;
-	else if (!strcmp("mount", type))
-		return CLONE_NEWNS;
-	else if (!strcmp("ipc", type))
-		return CLONE_NEWIPC;
-	else if (!strcmp("uts", type))
-		return CLONE_NEWUTS;
-	else if (!strcmp("user", type))
-		return CLONE_NEWUSER;
-	else if (!strcmp("cgroup", type))
-		return CLONE_NEWCGROUP;
-	else if (!strcmp("time", type))
-		return CLONE_NEWTIME;
-	else
-		return 0;
+/* the name -j accepts, and the /proc/<pid>/ns/ link it actually lives under */
+static const struct {
+	const char *name;
+	const char *link;
+	int nstype;
+} ns_types[] = {
+	{ "pid",     "pid",    CLONE_NEWPID },
+	{ "net",     "net",    CLONE_NEWNET },
+	{ "network", "net",    CLONE_NEWNET },
+	{ "mnt",     "mnt",    CLONE_NEWNS },
+	{ "mount",   "mnt",    CLONE_NEWNS },
+	{ "ipc",     "ipc",    CLONE_NEWIPC },
+	{ "uts",     "uts",    CLONE_NEWUTS },
+	{ "user",    "user",   CLONE_NEWUSER },
+	{ "cgroup",  "cgroup", CLONE_NEWCGROUP },
+	{ "time",    "time",   CLONE_NEWTIME },
+	{ NULL,      NULL,     0 },
+};
+
+static int resolve_nstype(const char *type)
+{
+	int i;
+
+	for (i = 0; ns_types[i].name; i++)
+		if (!strcmp(ns_types[i].name, type))
+			return ns_types[i].nstype;
+
+	return 0;
+}
+
+static const char *nstype_link(int nstype)
+{
+	int i;
+
+	for (i = 0; ns_types[i].name; i++)
+		if (ns_types[i].nstype == nstype)
+			return ns_types[i].link;
+
+	return NULL;
 }
 
 static int parseOCIlinuxns(struct blob_attr *msg)
@@ -4250,7 +4268,7 @@ static int jail_join_ns(char *arg)
 		if (*setns != -1)
 			return ENOTUNIQ;
 
-		if (asprintf(&nspath, "/proc/%d/ns/%s", pid, tmp) < 0)
+		if (asprintf(&nspath, "/proc/%d/ns/%s", pid, nstype_link(nstype)) < 0)
 			return ENOMEM;
 
 		fd = open(nspath, O_RDONLY);
@@ -6740,7 +6758,12 @@ int main(int argc, char **argv)
 			opts.hostname = strdup(optarg);
 			break;
 		case 'j':
-			jail_join_ns(optarg);
+			ret = jail_join_ns(optarg);
+			if (ret) {
+				ERROR("failed to join namespace: %s\n",
+				      strerror(ret));
+				return EXIT_FAILURE;
+			}
 			break;
 		case 'b':
 			if (!opts.ocibundle)
