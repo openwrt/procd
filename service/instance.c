@@ -39,6 +39,7 @@
 
 #include "service.h"
 #include "instance.h"
+#include "vrf.h"
 
 #define UJAIL_BIN_PATH "/sbin/ujail"
 #define CGROUP_BASEDIR "/sys/fs/cgroup/services"
@@ -67,6 +68,7 @@ enum {
 	INSTANCE_ATTR_SECCOMP_MODE,
 	INSTANCE_ATTR_SECCOMP_LOG,
 	INSTANCE_ATTR_CAPABILITIES,
+	INSTANCE_ATTR_VRF,
 	INSTANCE_ATTR_PIDFILE,
 	INSTANCE_ATTR_RELOADSIG,
 	INSTANCE_ATTR_TERMTIMEOUT,
@@ -102,6 +104,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_SECCOMP_MODE] = { "seccomp_mode", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_SECCOMP_LOG] = { "seccomp_log", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_CAPABILITIES] = { "capabilities", BLOBMSG_TYPE_STRING },
+	[INSTANCE_ATTR_VRF] = { "vrf", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
 	[INSTANCE_ATTR_TERMTIMEOUT] = { "term_timeout", BLOBMSG_TYPE_INT32 },
@@ -664,10 +667,43 @@ instance_add_cgroup(const char *service, const char *instance)
 	if (fd == -1)
 		return -EIO;
 
-	dprintf(fd, "%d", getpid());
+	ret = dprintf(fd, "%d", getpid());
 	close(fd);
+	if (ret < 0)
+		return -EIO;
 
 	return 0;
+}
+
+/*
+ * Bind the sockets of the instance to its VRF. The program is attached to
+ * the instance cgroup, which outlives the process, so detach the one of an
+ * earlier run if the instance has no VRF anymore.
+ */
+static int
+instance_set_vrf(struct service_instance *in)
+{
+	char cgnamebuf[256];
+	int fd, ret;
+
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
+		       in->srv->name, in->name);
+	if (ret >= (int)sizeof(cgnamebuf))
+		return in->vrf ? -ENAMETOOLONG : 0;
+
+	fd = open(cgnamebuf, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (fd < 0)
+		return in->vrf ? -errno : 0;
+
+	ret = 0;
+	if (in->vrf)
+		ret = vrf_attach(fd, in->vrf);
+	else
+		vrf_detach(fd);
+
+	close(fd);
+
+	return ret;
 }
 
 static void
@@ -838,6 +874,18 @@ instance_start(struct service_instance *in)
 		if (ret)
 			ULOG_WARN("failed adding instance cgroup for %s: %s\n",
 				  in->srv->name, strerror(-ret));
+
+		/*
+		 * Never run the instance outside of its VRF. The program only
+		 * binds the sockets of processes inside the instance cgroup.
+		 */
+		if (!ret || !in->vrf)
+			ret = instance_set_vrf(in);
+		if (ret) {
+			ERROR("failed binding %s::%s to vrf %s: %s\n", in->srv->name,
+			      in->name, in->vrf, strerror(-ret));
+			exit(127);
+		}
 
 		instance_run(in, opipe[1], epipe[1]);
 		return;
@@ -1349,6 +1397,13 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->capabilities, in_new->capabilities))
 		return true;
 
+	if (string_changed(in->vrf, in_new->vrf))
+		return true;
+
+	/* sockets stay bound to the old ifindex if the VRF was recreated */
+	if (in->vrf_ifindex != in_new->vrf_ifindex)
+		return true;
+
 	if (!blobmsg_list_equal(&in->limits, &in_new->limits))
 		return true;
 
@@ -1754,6 +1809,11 @@ instance_config_parse(struct service_instance *in)
 	if (tb[INSTANCE_ATTR_CAPABILITIES])
 		in->capabilities = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_CAPABILITIES]));
 
+	if (tb[INSTANCE_ATTR_VRF] && *blobmsg_get_string(tb[INSTANCE_ATTR_VRF])) {
+		in->vrf = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_VRF]));
+		in->vrf_ifindex = if_nametoindex(in->vrf);
+	}
+
 	if (tb[INSTANCE_ATTR_EXTROOT])
 		in->extroot = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_EXTROOT]));
 
@@ -1839,6 +1899,17 @@ instance_config_parse(struct service_instance *in)
 	if (!in->trace && tb[INSTANCE_ATTR_JAIL])
 		in->has_jail = instance_jail_parse(in, tb[INSTANCE_ATTR_JAIL]);
 
+	/*
+	 * The VRF is looked up in our network namespace and its program is
+	 * attached to the instance cgroup, which a container leaves.
+	 */
+	if (in->vrf && (in->bundle || in->jail.netns ||
+			!avl_is_empty(&in->jail.setns.avl))) {
+		ERROR("Cannot use vrf %s for service %s::%s with bundle, netns or setns\n",
+				in->vrf, in->srv->name, in->name);
+		return false;
+	}
+
 	if (in->has_jail) {
 		r = stat(UJAIL_BIN_PATH, &s);
 		if (r < 0) {
@@ -1922,12 +1993,14 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->has_jail = in_src->has_jail;
 	in->jail.flags = in_src->jail.flags;
 	in->jail.argc = in_src->jail.argc;
+	in->vrf_ifindex = in_src->vrf_ifindex;
 
 	instance_config_move_strdup(&in->pidfile, in_src->pidfile);
 	instance_config_move_strdup(&in->seccomp, in_src->seccomp);
 	instance_config_move_strdup(&in->seccomp_mode, in_src->seccomp_mode);
 	instance_config_move_strdup(&in->seccomp_log, in_src->seccomp_log);
 	instance_config_move_strdup(&in->capabilities, in_src->capabilities);
+	instance_config_move_strdup(&in->vrf, in_src->vrf);
 	instance_config_move_strdup(&in->bundle, in_src->bundle);
 	instance_config_move_strdup(&in->extroot, in_src->extroot);
 	instance_config_move_strdup(&in->overlaydir, in_src->overlaydir);
@@ -2054,6 +2127,7 @@ instance_free(struct service_instance *in)
 	free(in->seccomp_mode);
 	free(in->seccomp_log);
 	free(in->capabilities);
+	free(in->vrf);
 	free(in->pidfile);
 	free(in);
 }
@@ -2195,6 +2269,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 
 	if (in->capabilities)
 		blobmsg_add_string(b, "capabilities", in->capabilities);
+
+	if (in->vrf)
+		blobmsg_add_string(b, "vrf", in->vrf);
 
 	if (in->pidfile)
 		blobmsg_add_string(b, "pidfile", in->pidfile);

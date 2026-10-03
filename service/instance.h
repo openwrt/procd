@@ -98,6 +98,8 @@ struct service_instance {
 	char *seccomp_mode;
 	char *seccomp_log;
 	char *capabilities;
+	char *vrf;
+	unsigned int vrf_ifindex;
 	char *pidfile;
 	char *extroot;
 	char *overlaydir;
