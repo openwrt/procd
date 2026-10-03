@@ -99,6 +99,7 @@ struct service_instance {
 	char *seccomp_log;
 	char *capabilities;
 	char *pidfile;
+	char *workdir;
 	char *extroot;
 	char *overlaydir;
 	char *tmpoverlaysize;
