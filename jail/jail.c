@@ -102,7 +102,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"a:A:b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
+#define OPT_ARGS	"a:A:b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:r:R:sS:uU:V:w:W:x:t:T:yY:Z"
 
 #define JAIL_MAX_CREDENTIALS	16
 static const char *cred_targets[JAIL_MAX_CREDENTIALS];
@@ -2464,6 +2464,7 @@ static void usage(void)
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "  -e <var>\timport environment variable\n");
 	fprintf(stderr, "  -x <file>\tappend KEY=VALUE lines from <file> to the container env\n");
+	fprintf(stderr, "  -W <dir>\tworking directory for the jailed process\n");
 	fprintf(stderr, "namespace jail options:\n");
 	fprintf(stderr, "  -h <hostname>\tchange the hostname of the jail\n");
 	fprintf(stderr, "  -N\t\tjail has network namespace\n");
@@ -4084,8 +4085,10 @@ static int parseOCIprocess(struct blob_attr *msg)
 	if (tb[OCI_PROCESS_NONEWPRIVILEGES])
 		opts.no_new_privs = blobmsg_get_bool(tb[OCI_PROCESS_NONEWPRIVILEGES]);
 
-	if (tb[OCI_PROCESS_CWD])
+	if (tb[OCI_PROCESS_CWD]) {
+		free(opts.cwd);
 		opts.cwd = strdup(blobmsg_get_string(tb[OCI_PROCESS_CWD]));
+	}
 
 	if (tb[OCI_PROCESS_ENV]) {
 		res = parseOCIenvarray(tb[OCI_PROCESS_ENV], &opts.envp);
@@ -6840,6 +6843,12 @@ int main(int argc, char **argv)
 			break;
 		case 'G':
 			opts.group = optarg;
+			break;
+		case 'W':
+			free(opts.cwd);
+			opts.cwd = strdup(optarg);
+			if (!opts.cwd)
+				free_and_exit(EXIT_FAILURE);
 			break;
 		case 'O':
 			opts.overlaydir = realpath(optarg, NULL);
