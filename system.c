@@ -331,6 +331,155 @@ kscale(unsigned long b, unsigned long bs)
 	return (b * (unsigned long long) bs + 1024/2) / 1024;
 }
 
+#ifdef linux
+/* @yt-procfs-helpers:start -- local patch: read uptime, load, memory and
+ * swap from /proc so that containerized environments (e.g. LXC with LXCFS)
+ * report the container view instead of the host-wide values returned by
+ * sysinfo(2).  Values from /proc are preferred, sysinfo(2) is the fallback. */
+struct procfs_mem {
+	uint64_t total, free, shared, buffered, available, cached;
+	uint64_t swap_total, swap_free;
+	unsigned int have_total:1, have_free:1, have_shared:1, have_buffered:1,
+		     have_available:1, have_cached:1, have_swap_total:1, have_swap_free:1;
+};
+
+static void
+procfs_read_mem(struct procfs_mem *mem)
+{
+	char line[256], *key, *val;
+	FILE *f;
+
+	memset(mem, 0, sizeof(*mem));
+
+	f = fopen("/proc/meminfo", "r");
+	if (!f)
+		return;
+
+	while (fgets(line, sizeof(line), f)) {
+		key = strtok(line, " :");
+		val = strtok(NULL, " ");
+
+		if (!key || !val)
+			continue;
+
+		if (!strcasecmp(key, "MemTotal")) {
+			mem->total = 1024ULL * strtoull(val, NULL, 10);
+			mem->have_total = 1;
+		} else if (!strcasecmp(key, "MemFree")) {
+			mem->free = 1024ULL * strtoull(val, NULL, 10);
+			mem->have_free = 1;
+		} else if (!strcasecmp(key, "Shmem")) {
+			mem->shared = 1024ULL * strtoull(val, NULL, 10);
+			mem->have_shared = 1;
+		} else if (!strcasecmp(key, "Buffers")) {
+			mem->buffered = 1024ULL * strtoull(val, NULL, 10);
+			mem->have_buffered = 1;
+		} else if (!strcasecmp(key, "MemAvailable")) {
+			mem->available = 1024ULL * strtoull(val, NULL, 10);
+			mem->have_available = 1;
+		} else if (!strcasecmp(key, "Cached")) {
+			mem->cached = 1024ULL * strtoull(val, NULL, 10);
+			mem->have_cached = 1;
+		} else if (!strcasecmp(key, "SwapTotal")) {
+			mem->swap_total = 1024ULL * strtoull(val, NULL, 10);
+			mem->have_swap_total = 1;
+		} else if (!strcasecmp(key, "SwapFree")) {
+			mem->swap_free = 1024ULL * strtoull(val, NULL, 10);
+			mem->have_swap_free = 1;
+		}
+	}
+
+	fclose(f);
+}
+
+static int
+procfs_read_swaps(uint64_t *total, uint64_t *free)
+{
+	char line[256];
+	unsigned long long size, used;
+	uint64_t t = 0, u = 0;
+	int header = 1;
+	FILE *f;
+
+	f = fopen("/proc/swaps", "r");
+	if (!f)
+		return -1;
+
+	while (fgets(line, sizeof(line), f)) {
+		if (header) {
+			header = 0;
+			continue;
+		}
+
+		if (sscanf(line, "%*s %*s %llu %llu", &size, &used) != 2)
+			continue;
+
+		t += size * 1024ULL;
+		u += used * 1024ULL;
+	}
+
+	fclose(f);
+
+	*total = t;
+	*free = t - u;
+
+	return 0;
+}
+
+static int
+procfs_read_uptime(uint64_t *uptime)
+{
+	double up;
+	FILE *f;
+
+	f = fopen("/proc/uptime", "r");
+	if (!f)
+		return -1;
+
+	if (fscanf(f, "%lf", &up) != 1) {
+		fclose(f);
+		return -1;
+	}
+
+	fclose(f);
+
+	if (up < 0)
+		up = 0;
+
+	*uptime = (uint64_t)up;
+
+	return 0;
+}
+
+static int
+procfs_read_loadavg(uint64_t loads[3])
+{
+	double l[3];
+	int i;
+	FILE *f;
+
+	f = fopen("/proc/loadavg", "r");
+	if (!f)
+		return -1;
+
+	if (fscanf(f, "%lf %lf %lf", &l[0], &l[1], &l[2]) != 3) {
+		fclose(f);
+		return -1;
+	}
+
+	fclose(f);
+
+	for (i = 0; i < 3; i++) {
+		if (l[i] < 0)
+			l[i] = 0;
+		loads[i] = (uint64_t)(l[i] * 65536.0 + 0.5);
+	}
+
+	return 0;
+}
+/* @yt-procfs-helpers:end */
+#endif
+
 static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
                 struct ubus_request_data *req, const char *method,
                 struct blob_attr *msg)
@@ -340,10 +489,9 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 #ifdef linux
 	struct sysinfo info;
 	void *c;
-	char line[256];
-	char *key, *val;
-	unsigned long long available, cached;
-	FILE *f;
+	struct procfs_mem mem;
+	uint64_t uptime = 0, loads[3] = { 0, 0, 0 };
+	int have_sysinfo, have_uptime, have_load;
 	int i;
 	struct statvfs s;
 	const char *fslist[] = {
@@ -351,31 +499,51 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 		"/tmp", "tmp",
 	};
 
-	if (sysinfo(&info))
+	have_sysinfo = (sysinfo(&info) == 0);
+	procfs_read_mem(&mem);
+	have_uptime = (procfs_read_uptime(&uptime) == 0);
+	have_load = (procfs_read_loadavg(loads) == 0);
+
+	if (!have_sysinfo && !have_uptime && !have_load && !mem.have_total)
 		return UBUS_STATUS_UNKNOWN_ERROR;
 
-	if ((f = fopen("/proc/meminfo", "r")) == NULL)
-		return UBUS_STATUS_UNKNOWN_ERROR;
+	/* resolve each value: /proc reflects the container view (e.g. LXCFS
+	 * in LXC), sysinfo(2) always reports host-wide values in containers */
+	if (!have_uptime)
+		uptime = have_sysinfo ? (uint64_t)info.uptime : 0;
 
-	/* if linux < 3.14 MemAvailable is not in meminfo */
-	available = 0;
-	cached = 0;
+	if (!have_load && have_sysinfo)
+		for (i = 0; i < 3; i++)
+			loads[i] = info.loads[i];
 
-	while (fgets(line, sizeof(line), f))
-	{
-		key = strtok(line, " :");
-		val = strtok(NULL, " ");
+	if (!mem.have_total)
+		mem.total = have_sysinfo ? (uint64_t)info.mem_unit * (uint64_t)info.totalram : 0;
+	if (!mem.have_free)
+		mem.free = have_sysinfo ? (uint64_t)info.mem_unit * (uint64_t)info.freeram : 0;
+	if (!mem.have_shared)
+		mem.shared = have_sysinfo ? (uint64_t)info.mem_unit * (uint64_t)info.sharedram : 0;
+	if (!mem.have_buffered)
+		mem.buffered = have_sysinfo ? (uint64_t)info.mem_unit * (uint64_t)info.bufferram : 0;
 
-		if (!key || !val)
-			continue;
+	if (!mem.have_swap_total || !mem.have_swap_free) {
+		uint64_t st, sf;
 
-		if (!strcasecmp(key, "MemAvailable"))
-			available = 1024 * atoll(val);
-		else if (!strcasecmp(key, "Cached"))
-			cached = 1024 * atoll(val);
+		if (!procfs_read_swaps(&st, &sf)) {
+			if (!mem.have_swap_total) {
+				mem.swap_total = st;
+				mem.have_swap_total = 1;
+			}
+			if (!mem.have_swap_free) {
+				mem.swap_free = sf;
+				mem.have_swap_free = 1;
+			}
+		}
 	}
 
-	fclose(f);
+	if (!mem.have_swap_total && have_sysinfo)
+		mem.swap_total = (uint64_t)info.mem_unit * (uint64_t)info.totalswap;
+	if (!mem.have_swap_free && have_sysinfo)
+		mem.swap_free = (uint64_t)info.mem_unit * (uint64_t)info.freeswap;
 #endif
 
 	now = time(NULL);
@@ -388,25 +556,21 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_add_u32(&b, "localtime", now + tm->tm_gmtoff);
 
 #ifdef linux
-	blobmsg_add_u32(&b, "uptime",    info.uptime);
+	blobmsg_add_u32(&b, "uptime", (uint32_t)uptime);
 
 	c = blobmsg_open_array(&b, "load");
-	blobmsg_add_u32(&b, NULL, info.loads[0]);
-	blobmsg_add_u32(&b, NULL, info.loads[1]);
-	blobmsg_add_u32(&b, NULL, info.loads[2]);
+	blobmsg_add_u32(&b, NULL, (uint32_t)loads[0]);
+	blobmsg_add_u32(&b, NULL, (uint32_t)loads[1]);
+	blobmsg_add_u32(&b, NULL, (uint32_t)loads[2]);
 	blobmsg_close_array(&b, c);
 
 	c = blobmsg_open_table(&b, "memory");
-	blobmsg_add_u64(&b, "total",
-			(uint64_t)info.mem_unit * (uint64_t)info.totalram);
-	blobmsg_add_u64(&b, "free",
-			(uint64_t)info.mem_unit * (uint64_t)info.freeram);
-	blobmsg_add_u64(&b, "shared",
-			(uint64_t)info.mem_unit * (uint64_t)info.sharedram);
-	blobmsg_add_u64(&b, "buffered",
-			(uint64_t)info.mem_unit * (uint64_t)info.bufferram);
-	blobmsg_add_u64(&b, "available", available);
-	blobmsg_add_u64(&b, "cached", cached);
+	blobmsg_add_u64(&b, "total", mem.total);
+	blobmsg_add_u64(&b, "free", mem.free);
+	blobmsg_add_u64(&b, "shared", mem.shared);
+	blobmsg_add_u64(&b, "buffered", mem.buffered);
+	blobmsg_add_u64(&b, "available", mem.available);
+	blobmsg_add_u64(&b, "cached", mem.cached);
 	blobmsg_close_table(&b, c);
 
 	for (i = 0; i < sizeof(fslist) / sizeof(fslist[0]); i += 2) {
@@ -427,10 +591,8 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	}
 
 	c = blobmsg_open_table(&b, "swap");
-	blobmsg_add_u64(&b, "total",
-			(uint64_t)info.mem_unit * (uint64_t)info.totalswap);
-	blobmsg_add_u64(&b, "free",
-			(uint64_t)info.mem_unit * (uint64_t)info.freeswap);
+	blobmsg_add_u64(&b, "total", mem.swap_total);
+	blobmsg_add_u64(&b, "free", mem.swap_free);
 	blobmsg_close_table(&b, c);
 #endif
 
