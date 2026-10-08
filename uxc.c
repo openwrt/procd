@@ -84,6 +84,13 @@ enum {
 	OPT_PRESERVE_FDS,
 	OPT_PROCESS,
 	OPT_RESOURCES,
+	OPT_AUTOSTART,
+	OPT_PID_FILE,
+	OPT_TEMP_OVERLAY_SIZE,
+	OPT_WRITE_OVERLAY_PATH,
+	OPT_MOUNTS,
+	OPT_MODULE_VERSION,
+	OPT_UNSET,
 };
 
 static const struct option create_opts[] = {
@@ -136,6 +143,17 @@ static const struct option exec_opts[] = {
 
 static const struct option update_opts[] = {
 	{"resources",		required_argument,	0,	OPT_RESOURCES		},
+	{0,			0,			0,	0			}
+};
+
+static const struct option set_opts[] = {
+	{"autostart",		required_argument,	0,	OPT_AUTOSTART		},
+	{"module-version",	required_argument,	0,	OPT_MODULE_VERSION	},
+	{"mounts",		required_argument,	0,	OPT_MOUNTS		},
+	{"pid-file",		required_argument,	0,	OPT_PID_FILE		},
+	{"temp-overlay-size",	required_argument,	0,	OPT_TEMP_OVERLAY_SIZE	},
+	{"unset",		required_argument,	0,	OPT_UNSET		},
+	{"write-overlay-path",	required_argument,	0,	OPT_WRITE_OVERLAY_PATH	},
 	{0,			0,			0,	0			}
 };
 
@@ -439,6 +457,12 @@ static void usage(void) {
 	printf("\tkill [--signal <sig>] [--all] <conf> [<sig>]\tsignal <conf> (no signal: graceful stop); --all+KILL: whole cgroup\n");
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
 	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
+	printf("\tset <conf> [--autostart 0|1] [--pid-file <path>]\n");
+	printf("\t\t[--temp-overlay-size <size>] [--write-overlay-path <path>]\n");
+	printf("\t\t[--mounts <v1>,<v2>,...,<vN>] [--module-version <string>]\n");
+	printf("\t\t[--unset <key>]...\t\t\tedit the settings of <conf> in one rewrite\n");
+	printf("\t\t\t\t\t\t--unset keys: autostart pidfile temp-overlay-size\n");
+	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
@@ -464,6 +488,7 @@ enum {
 	CONF_HOSTS_FILE,
 	CONF_PROVISION,
 	CONF_ORIGIN,
+	CONF_MODULE_VERSION,
 	__CONF_MAX,
 };
 
@@ -483,6 +508,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_HOSTS_FILE] = { .name = "hosts-file", .type = BLOBMSG_TYPE_STRING },
 	[CONF_PROVISION] = { .name = "provision", .type = BLOBMSG_TYPE_ARRAY },
 	[CONF_ORIGIN] = { .name = "origin", .type = BLOBMSG_TYPE_STRING },
+	[CONF_MODULE_VERSION] = { .name = "module-version", .type = BLOBMSG_TYPE_STRING },
 };
 
 struct settings {
@@ -2033,6 +2059,21 @@ static int string_array_validate(const struct settings_key *key, struct blob_att
 	return 0;
 }
 
+static int ascii_validate(const struct settings_key *key, struct blob_attr *value,
+			  struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	const unsigned char *s = (const unsigned char *)blobmsg_get_string(value);
+
+	if (!*s)
+		return -EINVAL;
+
+	for (; *s; s++)
+		if (*s < 0x20 || *s > 0x7e)
+			return -EINVAL;
+
+	return 0;
+}
+
 static const struct settings_key settings_keys[] = {
 	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
@@ -2041,6 +2082,7 @@ static const struct settings_key settings_keys[] = {
 	{ .name = "write-overlay-path", .excludes = "temp-overlay-size",
 	  .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
 	{ .name = "volumes", .type = BLOBMSG_TYPE_ARRAY, .validate = string_array_validate },
+	{ .name = "module-version", .type = BLOBMSG_TYPE_STRING, .validate = ascii_validate },
 };
 
 static const struct settings_key *settings_key_find(const char *name)
@@ -2064,6 +2106,9 @@ static int settings_patch_check(struct blob_attr *patch, struct blob_attr **reg_
 	blobmsg_for_each_attr(cur, patch, rem) {
 		key = settings_key_find(blobmsg_name(cur));
 		if (!key || blobmsg_type(cur) != key->type)
+			return -EINVAL;
+
+		if (blob_key_find(patch, key->name) != cur)
 			return -EINVAL;
 
 		if (key->excludes && blob_has_key(patch, key->excludes))
@@ -2966,15 +3011,29 @@ static int registration_write(const char *name, struct blob_attr *root)
 	return 1;
 }
 
+static void volumes_array_add(struct blob_buf *buf, char *list)
+{
+	char *curvol, *tmp, *tok;
+	void *arr;
+
+	arr = blobmsg_open_array(buf, "volumes");
+	for (tok = list; ; tok = NULL) {
+		curvol = strtok_r(tok, ",;", &tmp);
+		if (!curvol)
+			break;
+
+		blobmsg_add_string(buf, NULL, curvol);
+	}
+	blobmsg_close_array(buf, arr);
+}
+
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
 	struct settings *usettings = NULL;
 	struct blob_attr *tb[__CONF_MAX];
-	char *curvol, *tmp, *mnttok;
 	static struct blob_buf req;
 	struct blob_attr *found;
 	struct stat sb;
-	void *mntarr;
 	int ret;
 
 	/* nothing to do */
@@ -3018,17 +3077,8 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 	if (writepath)
 		blobmsg_add_string(&req, "write-overlay-path", writepath);
 
-	if (requiredmounts) {
-		mntarr = blobmsg_open_array(&req, "volumes");
-		for (mnttok = requiredmounts; ; mnttok = NULL) {
-			curvol = strtok_r(mnttok, ",;", &tmp);
-			if (!curvol)
-				break;
-
-			blobmsg_add_string(&req, NULL, curvol);
-		}
-		blobmsg_close_array(&req, mntarr);
-	}
+	if (requiredmounts)
+		volumes_array_add(&req, requiredmounts);
 
 	if (path)
 		ret = registration_write(name, req.head);
@@ -3465,14 +3515,64 @@ static int get_signum(const char *name)
 	return -1;
 }
 
+static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
+			  struct blob_buf *unset, const char **name)
+{
+	int c;
+
+	if (argc < 2 || argv[1][0] == '-')
+		return -EINVAL;
+
+	*name = argv[1];
+	argc--;
+	argv++;
+
+	while ((c = getopt_long(argc, argv, "+", set_opts, NULL)) != -1) {
+		switch (c) {
+		case OPT_AUTOSTART:
+			if (strcmp(optarg, "0") && strcmp(optarg, "1"))
+				return -EINVAL;
+			blobmsg_add_u8(patch, "autostart", optarg[0] == '1');
+			break;
+		case OPT_PID_FILE:
+			blobmsg_add_string(patch, "pidfile", optarg);
+			break;
+		case OPT_TEMP_OVERLAY_SIZE:
+			blobmsg_add_string(patch, "temp-overlay-size", optarg);
+			break;
+		case OPT_WRITE_OVERLAY_PATH:
+			blobmsg_add_string(patch, "write-overlay-path", optarg);
+			break;
+		case OPT_MOUNTS:
+			volumes_array_add(patch, optarg);
+			break;
+		case OPT_MODULE_VERSION:
+			blobmsg_add_string(patch, "module-version", optarg);
+			break;
+		case OPT_UNSET:
+			blobmsg_add_string(unset, NULL, optarg);
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	if (optind != argc)
+		return -EINVAL;
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
+	static struct blob_buf set_patch, set_unset;
 	int ret = -EINVAL;
 	const char *verb;
 	const char *log_path = NULL;
 	const char *log_format = NULL;
 	const char *criu_path = NULL;
 	bool systemd_cgroup = false;
+	const char *set_name;
 	int verb_argc, c, i;
 	char **verb_argv;
 
@@ -3699,6 +3799,19 @@ next_global:
 		if (verb_argc != 2)
 			goto usage_out;
 		ret = uxc_set(verb_argv[1], NULL, 0, NULL, NULL, NULL, NULL);
+		if (ret > 0)
+			ret = 0;
+	} else if (!strcmp(verb, "set")) {
+		blob_buf_init(&set_patch, 0);
+		blob_buf_init(&set_unset, 0);
+		if (set_args_parse(verb_argc, verb_argv, &set_patch, &set_unset, &set_name)) {
+			blob_buf_free(&set_patch);
+			blob_buf_free(&set_unset);
+			goto usage_out;
+		}
+		ret = settings_edit(set_name, set_patch.head, set_unset.head);
+		blob_buf_free(&set_patch);
+		blob_buf_free(&set_unset);
 		if (ret > 0)
 			ret = 0;
 	} else if (!strcmp(verb, "delete")) {
