@@ -93,6 +93,7 @@ enum {
 	OPT_MODULE_VERSION,
 	OPT_DATA_VOLUME,
 	OPT_ENV,
+	OPT_RESPAWN,
 	OPT_UNSET,
 };
 
@@ -156,6 +157,7 @@ static const struct option set_opts[] = {
 	{"module-version",	required_argument,	0,	OPT_MODULE_VERSION	},
 	{"mounts",		required_argument,	0,	OPT_MOUNTS		},
 	{"pid-file",		required_argument,	0,	OPT_PID_FILE		},
+	{"respawn",		required_argument,	0,	OPT_RESPAWN		},
 	{"temp-overlay-size",	required_argument,	0,	OPT_TEMP_OVERLAY_SIZE	},
 	{"unset",		required_argument,	0,	OPT_UNSET		},
 	{"write-overlay-path",	required_argument,	0,	OPT_WRITE_OVERLAY_PATH	},
@@ -466,10 +468,12 @@ static void usage(void) {
 	printf("\t\t[--temp-overlay-size <size>] [--write-overlay-path <path>]\n");
 	printf("\t\t[--mounts <v1>,<v2>,...,<vN>] [--module-version <string>]\n");
 	printf("\t\t[--data-volume <vol>:<mnt>[:<size>]]... [--env <KEY>=<value>]...\n");
+	printf("\t\t[--respawn enable=0|1[,min=N,max=N,multiplier=N,"
+	       "max-retries=N,reset-period=N]]\n");
 	printf("\t\t[--unset <key>]...\t\t\tedit the settings of <conf> in one rewrite\n");
 	printf("\t\t\t\t\t\t--unset keys: autostart pidfile temp-overlay-size\n");
 	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
-	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol> env env=<KEY>\n");
+	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol> env env=<KEY> respawn\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
@@ -497,6 +501,7 @@ enum {
 	CONF_ORIGIN,
 	CONF_MODULE_VERSION,
 	CONF_ENV,
+	CONF_RESPAWN,
 	__CONF_MAX,
 };
 
@@ -518,6 +523,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_ORIGIN] = { .name = "origin", .type = BLOBMSG_TYPE_STRING },
 	[CONF_MODULE_VERSION] = { .name = "module-version", .type = BLOBMSG_TYPE_STRING },
 	[CONF_ENV] = { .name = "env", .type = BLOBMSG_TYPE_TABLE },
+	[CONF_RESPAWN] = { .name = "respawn", .type = BLOBMSG_TYPE_TABLE },
 };
 
 struct settings {
@@ -2186,6 +2192,7 @@ struct settings_key {
 			struct blob_attr **reg_tb, struct settings *us, const char *name);
 	int (*unset)(const struct settings_key *key, const char *id,
 		     struct blob_attr **reg_tb, struct settings *us, const char *name);
+	int (*check)(struct blob_attr *value, struct blob_attr **reg_tb);
 	int (*commit)(const struct settings_key *key, struct blob_attr *value,
 		      struct blob_attr **reg_tb, struct settings *us, const char *name);
 };
@@ -2481,6 +2488,98 @@ static int env_validate(const struct settings_key *key, struct blob_attr *value,
 	return 0;
 }
 
+enum {
+	RESPAWN_ENABLE,
+	RESPAWN_MIN,
+	RESPAWN_MAX,
+	RESPAWN_MULTIPLIER,
+	RESPAWN_MAX_RETRIES,
+	RESPAWN_RESET_PERIOD,
+	__RESPAWN_MAX,
+};
+
+static const struct blobmsg_policy respawn_table_policy[__RESPAWN_MAX] = {
+	[RESPAWN_ENABLE] = { .name = "enable", .type = BLOBMSG_TYPE_BOOL },
+	[RESPAWN_MIN] = { .name = "min", .type = BLOBMSG_TYPE_INT32 },
+	[RESPAWN_MAX] = { .name = "max", .type = BLOBMSG_TYPE_INT32 },
+	[RESPAWN_MULTIPLIER] = { .name = "multiplier", .type = BLOBMSG_TYPE_INT32 },
+	[RESPAWN_MAX_RETRIES] = { .name = "max-retries", .type = BLOBMSG_TYPE_INT32 },
+	[RESPAWN_RESET_PERIOD] = { .name = "reset-period", .type = BLOBMSG_TYPE_INT32 },
+};
+
+struct respawn_policy {
+	uint32_t min;
+	uint32_t max;
+	uint32_t multiplier;
+	uint32_t max_retries;
+	uint32_t reset_period;
+	bool enable;
+};
+
+static int respawn_policy_parse(struct blob_attr *table, struct respawn_policy *p)
+{
+	struct blob_attr *tb[__RESPAWN_MAX];
+	int i;
+
+	blobmsg_parse(respawn_table_policy, __RESPAWN_MAX, tb, blobmsg_data(table),
+		      blobmsg_len(table));
+	for (i = 0; i < __RESPAWN_MAX; i++)
+		if (!tb[i])
+			return -EINVAL;
+
+	p->enable = blobmsg_get_bool(tb[RESPAWN_ENABLE]);
+	p->min = blobmsg_get_u32(tb[RESPAWN_MIN]);
+	p->max = blobmsg_get_u32(tb[RESPAWN_MAX]);
+	p->multiplier = blobmsg_get_u32(tb[RESPAWN_MULTIPLIER]);
+	p->max_retries = blobmsg_get_u32(tb[RESPAWN_MAX_RETRIES]);
+	p->reset_period = blobmsg_get_u32(tb[RESPAWN_RESET_PERIOD]);
+
+	if (!p->min || p->max < p->min || p->multiplier < 1000)
+		return -EINVAL;
+
+	if (p->max > INT_MAX / 1000)
+		return -ERANGE;
+
+	return 0;
+}
+
+static struct blob_attr *respawn_policy_effective(struct blob_attr *reg, struct blob_attr *set)
+{
+	static struct blob_buf merged;
+
+	if (!set || !reg)
+		return set ? set : reg;
+
+	blob_buf_init(&merged, 0);
+	blob_table_overlay(&merged, reg, set);
+
+	return blob_data(merged.head);
+}
+
+static int respawn_validate(const struct settings_key *key, struct blob_attr *value,
+			    struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, value, rem)
+		if (blob_key_find(value, blobmsg_name(cur)) != cur)
+			return -EINVAL;
+
+	return 0;
+}
+
+static int respawn_check(struct blob_attr *value, struct blob_attr **reg_tb)
+{
+	struct respawn_policy policy;
+
+	if (!value)
+		return 0;
+
+	return respawn_policy_parse(respawn_policy_effective(reg_tb[CONF_RESPAWN], value),
+				    &policy);
+}
+
 static const struct settings_key settings_keys[] = {
 	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
@@ -2494,6 +2593,8 @@ static const struct settings_key settings_keys[] = {
 	  .type = BLOBMSG_TYPE_ARRAY, .validate = data_volumes_validate,
 	  .unset = data_volumes_unset_check, .commit = data_volumes_commit },
 	{ .name = "env", .entry = "env", .type = BLOBMSG_TYPE_TABLE, .validate = env_validate },
+	{ .name = "respawn", .entry = "respawn", .type = BLOBMSG_TYPE_TABLE,
+	  .validate = respawn_validate, .check = respawn_check },
 };
 
 static const struct settings_key *settings_key_find(const char *name)
@@ -2546,8 +2647,8 @@ static bool settings_unset_has(struct blob_attr *unset, const char *name)
 	return !!settings_unset_first(unset, name);
 }
 
-static int settings_patch_check(struct blob_attr *patch, struct blob_attr **reg_tb,
-				struct settings *us, const char *name)
+static int settings_patch_check(struct blob_attr *patch, struct blob_attr *unset,
+				struct blob_attr **reg_tb, struct settings *us, const char *name)
 {
 	const struct settings_key *key;
 	struct blob_attr *cur;
@@ -2562,6 +2663,9 @@ static int settings_patch_check(struct blob_attr *patch, struct blob_attr **reg_
 			return -EINVAL;
 
 		if (key->excludes && blob_has_key(patch, key->excludes))
+			return -EINVAL;
+
+		if (settings_unset_has(unset, key->name))
 			return -EINVAL;
 
 		if (!key->validate)
@@ -2798,6 +2902,43 @@ static int settings_commit_run(struct blob_attr *patch, struct blob_attr *unset,
 	return 0;
 }
 
+static bool settings_key_touched(const struct settings_key *key, struct blob_attr *patch,
+				 struct blob_attr *unset)
+{
+	struct blob_attr *cur;
+	const char *id;
+	int rem;
+
+	if (blob_has_key(patch, key->name))
+		return true;
+
+	blobmsg_for_each_attr(cur, unset, rem)
+		if (settings_unset_find(blobmsg_get_string(cur), &id) == key)
+			return true;
+
+	return false;
+}
+
+static int settings_result_check(struct blob_attr *file, struct blob_attr *patch,
+				 struct blob_attr *unset, struct blob_attr **reg_tb)
+{
+	const struct settings_key *key;
+	size_t i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(settings_keys); i++) {
+		key = &settings_keys[i];
+		if (!key->check || !settings_key_touched(key, patch, unset))
+			continue;
+
+		ret = key->check(blob_key_find(file, key->name), reg_tb);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static int json_file_write(const char *path, struct blob_attr *root, mode_t mode)
 {
 	char *json, *buf;
@@ -2835,7 +2976,7 @@ static int settings_edit(const char *name, struct blob_attr *patch, struct blob_
 
 	us = avl_find_element(&settings, name, us, avl);
 
-	ret = settings_patch_check(patch, reg_tb, us, name);
+	ret = settings_patch_check(patch, unset, reg_tb, us, name);
 	if (ret)
 		return ret;
 
@@ -2848,6 +2989,12 @@ static int settings_edit(const char *name, struct blob_attr *patch, struct blob_
 	changed = settings_kept_copy(&out, us ? us->file : NULL, patch, unset);
 	if (settings_patch_add(&out, us ? us->file : NULL, patch))
 		changed = true;
+
+	ret = settings_result_check(out.head, patch, unset, reg_tb);
+	if (ret) {
+		blob_buf_free(&out);
+		return ret;
+	}
 
 	if (!changed) {
 		blob_buf_free(&out);
@@ -3659,6 +3806,47 @@ static int env_arg_add(struct blob_buf *buf, char *arg)
 	return 0;
 }
 
+static int respawn_arg_add(struct blob_buf *buf, char *arg)
+{
+	char *key, *val, *end, *next;
+	unsigned long long n;
+	int i;
+
+	for (key = arg; key; key = next) {
+		next = strchr(key, ',');
+		if (next)
+			*next++ = '\0';
+
+		val = strchr(key, '=');
+		if (!val || val == key || !isdigit((unsigned char)val[1]))
+			return -EINVAL;
+
+		*val++ = '\0';
+		n = strtoull(val, &end, 10);
+		if (*end || n > UINT32_MAX)
+			return -EINVAL;
+
+		for (i = 0; i < __RESPAWN_MAX; i++)
+			if (!strcmp(respawn_table_policy[i].name, key))
+				break;
+
+		if (i == __RESPAWN_MAX)
+			return -EINVAL;
+
+		if (respawn_table_policy[i].type == BLOBMSG_TYPE_INT32) {
+			blobmsg_add_u32(buf, key, n);
+			continue;
+		}
+
+		if (n > 1)
+			return -EINVAL;
+
+		blobmsg_add_u8(buf, key, n);
+	}
+
+	return 0;
+}
+
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
 	struct settings *usettings = NULL;
@@ -4192,7 +4380,7 @@ static void patch_members_add(struct blob_buf *patch, const char *name,
 static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 			  struct blob_buf *unset, const char **name)
 {
-	static struct blob_buf vols, envs;
+	static struct blob_buf vols, envs, respawn;
 	int c, ret = 0;
 
 	if (argc < 2 || argv[1][0] == '-')
@@ -4204,6 +4392,7 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 
 	blob_buf_init(&vols, 0);
 	blob_buf_init(&envs, 0);
+	blob_buf_init(&respawn, 0);
 	while (!ret && (c = getopt_long(argc, argv, "+", set_opts, NULL)) != -1) {
 		switch (c) {
 		case OPT_AUTOSTART:
@@ -4233,6 +4422,9 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 		case OPT_ENV:
 			ret = env_arg_add(&envs, optarg);
 			break;
+		case OPT_RESPAWN:
+			ret = respawn_arg_add(&respawn, optarg);
+			break;
 		case OPT_UNSET:
 			blobmsg_add_string(unset, NULL, optarg);
 			break;
@@ -4248,10 +4440,12 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 	if (!ret) {
 		patch_members_add(patch, "data-volumes", vols.head, BLOBMSG_TYPE_ARRAY);
 		patch_members_add(patch, "env", envs.head, BLOBMSG_TYPE_TABLE);
+		patch_members_add(patch, "respawn", respawn.head, BLOBMSG_TYPE_TABLE);
 	}
 
 	blob_buf_free(&vols);
 	blob_buf_free(&envs);
+	blob_buf_free(&respawn);
 
 	return ret;
 }
