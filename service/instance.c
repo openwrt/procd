@@ -159,6 +159,7 @@ enum {
 	JAIL_ATTR_CONSOLESOCKET,
 	JAIL_ATTR_SYSTEMDCGROUP,
 	JAIL_ATTR_ENVFILE,
+	JAIL_ATTR_STOP_TIMEOUT,
 	__JAIL_ATTR_MAX,
 };
 
@@ -184,6 +185,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_CONSOLESOCKET] = { "consolesocket", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_SYSTEMDCGROUP] = { "systemdcgroup", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_ENVFILE] = { "envfile", BLOBMSG_TYPE_STRING },
+	[JAIL_ATTR_STOP_TIMEOUT] = { "stop_timeout", BLOBMSG_TYPE_INT32 },
 };
 
 enum {
@@ -333,11 +335,12 @@ instance_gen_setns_argstr(struct blob_attr *attr)
 static inline int
 jail_run(struct service_instance *in, char **argv)
 {
+	static char stop_timeout_str[12];
 	static char incarnation_str[21];
 	static char notify_fd_str[12];
-	char *term_timeout_str;
 	struct blobmsg_list_node *var;
 	struct jail *jail = &in->jail;
+	char *term_timeout_str;
 	int argc = 0;
 
 	argv[argc++] = UJAIL_BIN_PATH;
@@ -456,6 +459,13 @@ jail_run(struct service_instance *in, char **argv)
 	if (jail->envfile) {
 		argv[argc++] = "-x";
 		argv[argc++] = jail->envfile;
+	}
+
+	if (jail->stop_timeout) {
+		snprintf(stop_timeout_str, sizeof(stop_timeout_str), "%u",
+			 jail->stop_timeout);
+		argv[argc++] = "-q";
+		argv[argc++] = stop_timeout_str;
 	}
 
 	if (in->notify_fd > -1) {
@@ -1512,6 +1522,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->jail.envfile, in_new->jail.envfile))
 		return true;
 
+	if (in->jail.stop_timeout != in_new->jail.stop_timeout)
+		return true;
+
 	if (in->jail.flags != in_new->jail.flags)
 		return true;
 
@@ -1701,6 +1714,12 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	if (tb[JAIL_ATTR_ENVFILE]) {
 		jail->envfile = strdup(blobmsg_get_string(tb[JAIL_ATTR_ENVFILE]));
 		jail->argc += 2;
+	}
+
+	if (tb[JAIL_ATTR_STOP_TIMEOUT]) {
+		jail->stop_timeout = blobmsg_get_u32(tb[JAIL_ATTR_STOP_TIMEOUT]);
+		if (jail->stop_timeout)
+			jail->argc += 2;
 	}
 
 	if (tb[JAIL_ATTR_SETNS]) {
@@ -2100,6 +2119,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 
 	in->has_jail = in_src->has_jail;
 	in->jail.flags = in_src->jail.flags;
+	in->jail.stop_timeout = in_src->jail.stop_timeout;
 	in->jail.argc = in_src->jail.argc;
 	in->vrf_ifindex = in_src->vrf_ifindex;
 
@@ -2424,6 +2444,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		} else {
 			if (in->jail.pidfile)
 				blobmsg_add_string(b, "pidfile", in->jail.pidfile);
+
+			if (in->jail.stop_timeout)
+				blobmsg_add_u32(b, "stop_timeout", in->jail.stop_timeout);
 
 			blobmsg_add_u8(b, "immediately", in->immediately);
 		}

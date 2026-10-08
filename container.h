@@ -23,6 +23,8 @@
 #define PROCD_NOAFILE_DIR "/tmp/.ujail"
 #define PROCD_NOAFILE PROCD_NOAFILE_DIR "/noafile"
 
+#define UXC_STOP_TIMEOUT 120
+
 static inline bool is_container() {
 	struct stat s;
 	int r = stat("/.dockerenv", &s);

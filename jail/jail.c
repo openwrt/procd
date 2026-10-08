@@ -103,7 +103,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"a:A:b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:r:R:sS:uU:V:w:x:t:T:yY:Z"
+#define OPT_ARGS	"a:A:b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:q:r:R:sS:uU:V:w:x:t:T:yY:Z"
 
 #define JAIL_MAX_CREDENTIALS	16
 static const char *cred_targets[JAIL_MAX_CREDENTIALS];
@@ -209,6 +209,7 @@ static struct {
 	struct blob_attr *annotations;
 	struct blob_attr *netdevices;
 	int term_timeout;
+	int stop_timeout;
 	struct {
 		bool set;
 		uint32_t policy;
@@ -2447,6 +2448,8 @@ static void usage(void)
 	fprintf(stderr, "  -e <var>\timport environment variable\n");
 	fprintf(stderr, "  -x <file>\tappend KEY=VALUE lines from <file> to the container env\n");
 	fprintf(stderr, "  -t <secs>\tseconds from SIGTERM to SIGKILL (default 5)\n");
+	fprintf(stderr, "  -q <secs>\tSIGTERM to SIGKILL window on container stop (default %d)\n",
+		UXC_STOP_TIMEOUT);
 	fprintf(stderr, "namespace jail options:\n");
 	fprintf(stderr, "  -h <hostname>\tchange the hostname of the jail\n");
 	fprintf(stderr, "  -N\t\tjail has network namespace\n");
@@ -5618,7 +5621,13 @@ static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
-#define UXC_STOP_TIMEOUT 120
+static int jail_stop_timeout_ms(void)
+{
+	if (opts.stop_timeout > 0 && opts.stop_timeout <= INT_MAX / 1000)
+		return opts.stop_timeout * 1000;
+
+	return UXC_STOP_TIMEOUT * 1000;
+}
 
 enum {
 	CONTAINER_KILL_ATTR_SIGNAL,
@@ -5682,7 +5691,7 @@ container_handle_kill(struct ubus_context *ctx, struct ubus_object *obj,
 
 	if (jail_pidfd_send_signal(sig) == 0) {
 		if (escalate)
-			uloop_timeout_set(&jail_process_timeout, UXC_STOP_TIMEOUT * 1000);
+			uloop_timeout_set(&jail_process_timeout, jail_stop_timeout_ms());
 		return 0;
 	}
 
@@ -6830,6 +6839,9 @@ int main(int argc, char **argv)
 		case 't':
 			opts.term_timeout = atoi(optarg);
 			break;
+		case 'q':
+			opts.stop_timeout = atoi(optarg);
+			break;
 		case 'T':
 			opts.tmpoverlaysize = optarg;
 			break;
@@ -7228,7 +7240,7 @@ static void netifd_restart_cb(struct ubus_context *ctx, struct ubus_event_handle
 		netifd_restart_pending = false;
 		return;
 	}
-	uloop_timeout_set(&jail_process_timeout, UXC_STOP_TIMEOUT * 1000);
+	uloop_timeout_set(&jail_process_timeout, jail_stop_timeout_ms());
 }
 
 static void netifd_restart_watch(void)

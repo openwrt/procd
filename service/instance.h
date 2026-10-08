@@ -48,6 +48,7 @@ struct jail {
 	char *envfile;
 	struct blobmsg_list mount;
 	struct blobmsg_list setns;
+	uint32_t stop_timeout;
 	int argc;
 };
 
