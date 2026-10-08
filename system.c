@@ -251,6 +251,22 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 	if (rootfs_type)
 		blobmsg_add_string(&b, "rootfs_type", rootfs_type);
 
+	if ((f = fopen("/tmp/sysinfo/image_type", "r")) != NULL)
+	{
+		/* Strictly optional, don't try to guess if it is
+		 * not explicit.
+		 */
+		if (fgets(line, sizeof(line), f))
+		{
+			val = strtok(line, "\t\n");
+
+			if (val)
+				blobmsg_add_string(&b, "image_type", val);
+		}
+
+		fclose(f);
+	}
+
 	if ((f = fopen("/usr/lib/os-release", "r")) != NULL)
 	{
 		c = blobmsg_open_table(&b, "release");
