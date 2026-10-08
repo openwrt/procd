@@ -14,6 +14,13 @@
 #ifndef _JAIL_CGROUPS_BPF_H
 #define _JAIL_CGROUPS_BPF_H
 
+#include <stdbool.h>
+
+void cgroups_devices_seal(void);
+void cgroups_devices_update_begin(void);
+void cgroups_devices_update_rollback(void);
+bool cgroups_devices_differ(void);
+void cgroups_devices_free(void);
 int parseOCIlinuxcgroups_devices(struct blob_attr *msg);
 int attach_cgroups_ebpf(int cgroup_dirfd);
 

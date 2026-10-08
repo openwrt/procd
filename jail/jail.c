@@ -5174,6 +5174,8 @@ static int parseOCI(const char *jsonfile)
 		goto errout;
 	}
 
+	cgroups_seal();
+
 errout:
 	jail_oci_root_restore(prev_root);
 	blob_buf_free(&ocibuf);
@@ -5810,6 +5812,25 @@ container_handle_reclaim(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_UNKNOWN_ERROR;
 }
 
+static int container_update_status(int rc)
+{
+	switch (rc) {
+	case EPERM:
+		return UBUS_STATUS_PERMISSION_DENIED;
+	case ENOTSUP:
+		return UBUS_STATUS_NOT_SUPPORTED;
+	case EBUSY:
+	case EINVAL:
+	case ENODATA:
+	case ERANGE:
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	case EIO:
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	default:
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	}
+}
+
 static int
 container_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 			struct ubus_request_data *req, const char *method,
@@ -5818,6 +5839,8 @@ container_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 	const struct blob_attr *prev_root = jail_oci_root_get();
 	const char *prev_reason = jail_reason;
 	int prev_errno = jail_reason_errno;
+	static struct blob_buf reply;
+	const char *refused;
 	int rc;
 
 	if (!jail_oci_live())
@@ -5826,24 +5849,26 @@ container_handle_update(struct ubus_context *ctx, struct ubus_object *obj,
 	if (!msg)
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
+	if (!cgroups_initialized())
+		return UBUS_STATUS_NOT_SUPPORTED;
+
+	cgroups_update_begin();
 	jail_oci_root_restore(msg);
 	rc = parseOCIlinuxcgroups(msg, true);
 	jail_oci_root_restore(prev_root);
 	jail_reason_restore(prev_reason, prev_errno);
 	if (rc) {
-		switch (rc) {
-		case ENOTSUP:
-			return UBUS_STATUS_NOT_SUPPORTED;
-		case EBUSY:
-		case EINVAL:
-		case ENODATA:
-		case ERANGE:
-			return UBUS_STATUS_INVALID_ARGUMENT;
-		case EIO:
-			return UBUS_STATUS_UNKNOWN_ERROR;
-		default:
-			return UBUS_STATUS_UNKNOWN_ERROR;
-		}
+		cgroups_update_rollback();
+		return container_update_status(rc);
+	}
+
+	rc = cgroups_update_check(&refused);
+	if (rc) {
+		blob_buf_init(&reply, 0);
+		blobmsg_add_string(&reply, "reason", refused);
+		blobmsg_add_u32(&reply, "errno", rc);
+		ubus_send_reply(ctx, req, reply.head);
+		return container_update_status(rc);
 	}
 
 	rc = cgroups_apply(jail_process.pid);

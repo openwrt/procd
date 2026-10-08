@@ -49,16 +49,26 @@
 #define CGROUP_ROOT "/sys/fs/cgroup/"
 #define CGROUP_IO_WEIGHT_MAX 10000
 #define CGROUP_DRAIN_TIMEOUT_MSEC 1000
+#define CGROUP_CPU_PERIOD_DEFAULT 100000
 
 struct cgval {
 	struct avl_node avl;
 	char *val;
 };
 
+struct cpu_max {
+	uint64_t quota;
+	uint64_t period;
+	bool unlimited;
+};
+
 struct avl_tree cgvals;
+static struct avl_tree cgceil, cgprev;
+static char cg_refused[NAME_MAX + 1];
 static char *cgroup_path;
 static bool initialized;
 static bool destroyed;
+static bool cg_sealed;
 
 void cgroups_prepare(void) {
 	initialized = false;
@@ -67,8 +77,291 @@ void cgroups_prepare(void) {
 
 void cgroups_init(const char *p) {
 	avl_init(&cgvals, avl_strcmp, false, NULL);
+	avl_init(&cgceil, avl_strcmp, false, NULL);
+	avl_init(&cgprev, avl_strcmp, false, NULL);
 	cgroup_path = strdup(p);
 	initialized = true;
+	cg_sealed = false;
+}
+
+bool cgroups_initialized(void)
+{
+	return initialized;
+}
+
+static void cgroups_tree_free(struct avl_tree *tree)
+{
+	struct cgval *valp, *tmp;
+
+	avl_remove_all_elements(tree, valp, avl, tmp) {
+		free((void *)(valp->avl.key));
+		free(valp->val);
+		free(valp);
+	}
+}
+
+static void cgroups_tree_copy(struct avl_tree *dst, struct avl_tree *src)
+{
+	struct cgval *valp, *copy;
+
+	cgroups_tree_free(dst);
+	avl_for_each_element(src, valp, avl) {
+		copy = malloc(sizeof(*copy));
+		if (!copy)
+			exit(ENOMEM);
+
+		copy->avl.key = strdup((const char *)valp->avl.key);
+		copy->val = strdup(valp->val);
+		avl_insert(dst, &copy->avl);
+	}
+}
+
+static const char *cgroups_tree_get(struct avl_tree *tree, const char *key)
+{
+	struct cgval *valp;
+
+	valp = avl_find_element(tree, key, valp, avl);
+	return valp ? valp->val : NULL;
+}
+
+void cgroups_seal(void)
+{
+	if (!initialized)
+		return;
+
+	cgroups_tree_copy(&cgceil, &cgvals);
+	cgroups_devices_seal();
+	cg_sealed = true;
+}
+
+void cgroups_update_begin(void)
+{
+	cgroups_tree_copy(&cgprev, &cgvals);
+	cgroups_devices_update_begin();
+}
+
+void cgroups_update_rollback(void)
+{
+	cgroups_tree_copy(&cgvals, &cgprev);
+	cgroups_devices_update_rollback();
+}
+
+static void cgroups_val_restore(struct cgval *valp, const char *ceil)
+{
+	free(valp->val);
+	valp->val = strdup(ceil);
+}
+
+static bool cgroups_u64_parse(const char *s, uint64_t *v)
+{
+	char *end;
+
+	if (*s < '0' || *s > '9')
+		return false;
+
+	errno = 0;
+	*v = strtoull(s, &end, 10);
+	return !errno && *end == '\0';
+}
+
+static bool cgroups_cpu_max_parse(const char *s, struct cpu_max *cm)
+{
+	char *end;
+
+	cm->period = 0;
+	cm->unlimited = !strncmp(s, "max", 3);
+	if (cm->unlimited) {
+		cm->quota = 0;
+		end = (char *)s + 3;
+	} else {
+		if (*s < '0' || *s > '9')
+			return false;
+
+		errno = 0;
+		cm->quota = strtoull(s, &end, 10);
+		if (errno)
+			return false;
+	}
+
+	if (*end == '\0')
+		return true;
+
+	if (*end != ' ')
+		return false;
+
+	return cgroups_u64_parse(end + 1, &cm->period);
+}
+
+static bool cgroups_key_bounded(const char *key)
+{
+	return !strcmp(key, "memory.max") || !strcmp(key, "memory.swap.max") ||
+	       !strcmp(key, "pids.max") || !strcmp(key, "cpu.max.burst");
+}
+
+static int cgroups_check_bounded(struct cgval *valp, const char *ceil)
+{
+	uint64_t req, lim;
+
+	if (!strcmp(valp->val, "max")) {
+		if (ceil)
+			cgroups_val_restore(valp, ceil);
+		return 0;
+	}
+
+	if (!ceil || !strcmp(ceil, "max") || !strcmp(ceil, valp->val))
+		return 0;
+
+	if (!cgroups_u64_parse(valp->val, &req) ||
+	    !cgroups_u64_parse(ceil, &lim))
+		return EPERM;
+
+	return req <= lim ? 0 : EPERM;
+}
+
+static void cgroups_cpu_max_store(struct cgval *valp, const struct cpu_max *cm)
+{
+	char buf[48];
+
+	snprintf(buf, sizeof(buf), "%" PRIu64 " %" PRIu64, cm->quota, cm->period);
+	cgroups_val_restore(valp, buf);
+}
+
+static uint64_t cgroups_cpu_period_current(uint64_t ceil_period)
+{
+	struct cpu_max prev;
+	const char *cur;
+
+	cur = cgroups_tree_get(&cgprev, "cpu.max");
+	if (cur && cgroups_cpu_max_parse(cur, &prev) && prev.period)
+		return prev.period;
+
+	return ceil_period;
+}
+
+static int cgroups_check_cpu_max_raw(struct cgval *valp, const char *ceil)
+{
+	struct cpu_max req;
+
+	if (!strcmp(valp->val, ceil))
+		return 0;
+
+	if (!cgroups_cpu_max_parse(valp->val, &req) || !req.unlimited)
+		return EPERM;
+
+	cgroups_val_restore(valp, ceil);
+	return 0;
+}
+
+static int cgroups_check_cpu_max(struct cgval *valp, const char *ceil)
+{
+	struct cpu_max req, lim;
+	bool pin = false;
+
+	if (!ceil)
+		return 0;
+
+	if (!cgroups_cpu_max_parse(ceil, &lim))
+		return cgroups_check_cpu_max_raw(valp, ceil);
+
+	if (lim.unlimited)
+		return 0;
+
+	if (!cgroups_cpu_max_parse(valp->val, &req))
+		return EPERM;
+
+	if (!lim.period)
+		lim.period = CGROUP_CPU_PERIOD_DEFAULT;
+
+	if (req.unlimited) {
+		cgroups_cpu_max_store(valp, &lim);
+		return 0;
+	}
+
+	if (!req.period) {
+		req.period = cgroups_cpu_period_current(lim.period);
+		pin = true;
+	}
+
+	if (req.quota > UINT32_MAX || req.period > UINT32_MAX ||
+	    lim.quota > UINT32_MAX || lim.period > UINT32_MAX)
+		return ERANGE;
+
+	if (req.quota * lim.period > lim.quota * req.period)
+		return EPERM;
+
+	if (pin)
+		cgroups_cpu_max_store(valp, &req);
+
+	return 0;
+}
+
+static const char *cgroups_oci_name(const char *key)
+{
+	if (!strcmp(key, "memory.max"))
+		return "linux.resources.memory.limit";
+
+	if (!strcmp(key, "memory.swap.max"))
+		return "linux.resources.memory.swap";
+
+	if (!strcmp(key, "pids.max"))
+		return "linux.resources.pids.limit";
+
+	if (!strcmp(key, "cpu.max"))
+		return "linux.resources.cpu.quota";
+
+	if (!strcmp(key, "cpu.max.burst"))
+		return "linux.resources.cpu.burst";
+
+	return key;
+}
+
+static int cgroups_check_attrs(const char **key)
+{
+	struct cgval *valp;
+	const char *ceil;
+	int ret = 0;
+
+	avl_for_each_element(&cgvals, valp, avl) {
+		*key = (const char *)valp->avl.key;
+		ceil = cgroups_tree_get(&cgceil, *key);
+		if (!strcmp(*key, "cpu.max"))
+			ret = cgroups_check_cpu_max(valp, ceil);
+		else if (cgroups_key_bounded(*key))
+			ret = cgroups_check_bounded(valp, ceil);
+		else if (ceil && strcmp(ceil, valp->val))
+			ret = ENOTSUP;
+
+		if (ret)
+			break;
+	}
+
+	return ret;
+}
+
+int cgroups_update_check(const char **refused)
+{
+	const char *key = NULL;
+	int ret;
+
+	if (!cg_sealed)
+		return 0;
+
+	ret = cgroups_check_attrs(&key);
+	if (ret) {
+		snprintf(cg_refused, sizeof(cg_refused), "%s",
+			 cgroups_oci_name(key));
+		*refused = cg_refused;
+	} else if (cgroups_devices_differ()) {
+		*refused = "linux.resources.devices";
+		ret = ENOTSUP;
+	}
+
+	if (!ret)
+		return 0;
+
+	cgroups_update_rollback();
+
+	return ret;
 }
 
 static void cgroups_set(const char *key, const char *val)
@@ -104,14 +397,12 @@ static int64_t cgroups_memory_max_staged(void)
 
 void cgroups_free(void)
 {
-	struct cgval *valp, *tmp;
-
 	if (initialized) {
-		avl_remove_all_elements(&cgvals, valp, avl, tmp) {
-			free((void *)(valp->avl.key));
-			free(valp->val);
-			free(valp);
-		}
+		cgroups_tree_free(&cgvals);
+		cgroups_tree_free(&cgceil);
+		cgroups_tree_free(&cgprev);
+		cgroups_devices_free();
+		cg_sealed = false;
 		free(cgroup_path);
 		cgroup_path = NULL;
 		initialized = false;

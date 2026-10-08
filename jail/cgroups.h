@@ -34,5 +34,10 @@ int cgroups_open_dir(void);
 void cgroups_free(void);
 void cgroups_prepare(void);
 void cgroups_set_memory_limit(int64_t bytes);
+bool cgroups_initialized(void);
+void cgroups_seal(void);
+void cgroups_update_begin(void);
+void cgroups_update_rollback(void);
+int cgroups_update_check(const char **refused);
 
 #endif

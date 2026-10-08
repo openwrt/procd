@@ -36,12 +36,78 @@
 
 static struct bpf_insn *program = NULL;
 static int bpf_total_insn = 0;
+static struct bpf_insn *program_sealed;
+static int sealed_total_insn;
+static struct bpf_insn *program_prev;
+static int prev_total_insn;
 static const char *license = "GPL";
 
 static int
 syscall_bpf (int cmd, union bpf_attr *attr, unsigned int size)
 {
 	return (int) syscall (__NR_bpf, cmd, attr, size);
+}
+
+static struct bpf_insn *program_dup(const struct bpf_insn *src, int count)
+{
+	struct bpf_insn *copy;
+
+	if (!src)
+		return NULL;
+
+	copy = malloc(count * sizeof(*copy));
+	if (!copy)
+		exit(ENOMEM);
+
+	memcpy(copy, src, count * sizeof(*copy));
+
+	return copy;
+}
+
+void cgroups_devices_seal(void)
+{
+	free(program_sealed);
+	program_sealed = program_dup(program, bpf_total_insn);
+	sealed_total_insn = bpf_total_insn;
+}
+
+void cgroups_devices_update_begin(void)
+{
+	free(program_prev);
+	program_prev = program_dup(program, bpf_total_insn);
+	prev_total_insn = bpf_total_insn;
+}
+
+void cgroups_devices_update_rollback(void)
+{
+	free(program);
+	program = program_dup(program_prev, prev_total_insn);
+	bpf_total_insn = prev_total_insn;
+}
+
+bool cgroups_devices_differ(void)
+{
+	if (!program != !program_sealed || bpf_total_insn != sealed_total_insn)
+		return true;
+
+	if (!program)
+		return false;
+
+	return memcmp(program, program_sealed,
+		      bpf_total_insn * sizeof(*program)) != 0;
+}
+
+void cgroups_devices_free(void)
+{
+	free(program);
+	free(program_sealed);
+	free(program_prev);
+	program = NULL;
+	program_sealed = NULL;
+	program_prev = NULL;
+	bpf_total_insn = 0;
+	sealed_total_insn = 0;
+	prev_total_insn = 0;
 }
 
 /* from crun/src/libcrun/ebpf.c */
