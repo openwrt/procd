@@ -48,6 +48,7 @@
 
 #include "container.h"
 #include "log.h"
+#include "state-file.h"
 #include "stdio-fds.h"
 
 #define UXC_VERSION "0.3"

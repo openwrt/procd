@@ -74,6 +74,7 @@
 #include "seccomp-trace.h"
 #include "cgroups.h"
 #include "netifd.h"
+#include "../state-file.h"
 #include "../stdio-fds.h"
 
 #include <libubox/blobmsg.h>
@@ -1651,37 +1652,18 @@ static bool pidfile_sibling(const char *pidfile, const char *name, char *path, s
 
 static void jail_write_exit_status(const char *pidfile, int status)
 {
-	char path[PATH_MAX], tmp[PATH_MAX];
+	char path[PATH_MAX];
 	char buf[12];
-	int fd, len;
+	int len;
 
 	if (!pidfile_sibling(pidfile, "/exit_status", path, sizeof(path)))
-		return;
-
-	if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
 		return;
 
 	len = snprintf(buf, sizeof(buf), "%d", status);
 	if (len < 0 || len >= (int)sizeof(buf))
 		return;
 
-	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-	if (fd < 0)
-		return;
-
-	if (write(fd, buf, len) != len) {
-		close(fd);
-		unlink(tmp);
-		return;
-	}
-
-	if (close(fd)) {
-		unlink(tmp);
-		return;
-	}
-
-	if (rename(tmp, path))
-		unlink(tmp);
+	file_write_atomic(path, buf, len, 0644);
 }
 
 static void jail_clear_exit_status(const char *pidfile)
