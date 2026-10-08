@@ -90,6 +90,7 @@ enum {
 	OPT_WRITE_OVERLAY_PATH,
 	OPT_MOUNTS,
 	OPT_MODULE_VERSION,
+	OPT_DATA_VOLUME,
 	OPT_UNSET,
 };
 
@@ -148,6 +149,7 @@ static const struct option update_opts[] = {
 
 static const struct option set_opts[] = {
 	{"autostart",		required_argument,	0,	OPT_AUTOSTART		},
+	{"data-volume",		required_argument,	0,	OPT_DATA_VOLUME		},
 	{"module-version",	required_argument,	0,	OPT_MODULE_VERSION	},
 	{"mounts",		required_argument,	0,	OPT_MOUNTS		},
 	{"pid-file",		required_argument,	0,	OPT_PID_FILE		},
@@ -460,9 +462,11 @@ static void usage(void) {
 	printf("\tset <conf> [--autostart 0|1] [--pid-file <path>]\n");
 	printf("\t\t[--temp-overlay-size <size>] [--write-overlay-path <path>]\n");
 	printf("\t\t[--mounts <v1>,<v2>,...,<vN>] [--module-version <string>]\n");
+	printf("\t\t[--data-volume <vol>:<mnt>[:<size>]]...\n");
 	printf("\t\t[--unset <key>]...\t\t\tedit the settings of <conf> in one rewrite\n");
 	printf("\t\t\t\t\t\t--unset keys: autostart pidfile temp-overlay-size\n");
 	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
+	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol>\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
@@ -727,6 +731,24 @@ static struct blob_attr *blob_key_find(struct blob_attr *root, const char *name)
 static bool blob_has_key(struct blob_attr *root, const char *name)
 {
 	return !!blob_key_find(root, name);
+}
+
+static void blob_table_overlay(struct blob_buf *out, struct blob_attr *base,
+			       struct blob_attr *over)
+{
+	struct blob_attr *cur;
+	void *t;
+	int rem;
+
+	t = blobmsg_open_table(out, NULL);
+	blobmsg_for_each_attr(cur, base, rem)
+		if (!blob_has_key(over, blobmsg_name(cur)))
+			blobmsg_add_blob(out, cur);
+
+	blobmsg_for_each_attr(cur, over, rem)
+		blobmsg_add_blob(out, cur);
+
+	blobmsg_close_table(out, t);
 }
 
 enum {
@@ -1497,6 +1519,13 @@ static int provision_rw_uvol(const char *volname, const char *size)
 	return 0;
 }
 
+#define DATA_VOLUME_SIZE_DEFAULT	"64m"
+
+static void data_volume_name(const char *container, const char *vol, char *buf, size_t len)
+{
+	snprintf(buf, len, "%s.%s", container, vol);
+}
+
 static int provision_data_volumes(const char *container, struct blob_attr *vols,
 				  struct blob_buf *req)
 {
@@ -1512,9 +1541,9 @@ static int provision_data_volumes(const char *container, struct blob_attr *vols,
 
 		vname = blobmsg_get_string(vt[VOL_NAME]);
 		vmount = blobmsg_get_string(vt[VOL_MOUNTPOINT]);
-		vsize = vt[VOL_SIZE] ? blobmsg_get_string(vt[VOL_SIZE]) : "64m";
+		vsize = vt[VOL_SIZE] ? blobmsg_get_string(vt[VOL_SIZE]) : DATA_VOLUME_SIZE_DEFAULT;
 
-		snprintf(volname, sizeof(volname), "%s.%s", container, vname);
+		data_volume_name(container, vname, volname, sizeof(volname));
 		if (provision_rw_uvol(volname, vsize))
 			return -EIO;
 
@@ -1525,20 +1554,26 @@ static int provision_data_volumes(const char *container, struct blob_attr *vols,
 	return 0;
 }
 
+static void data_volume_remove(const char *container, const char *vol)
+{
+	char volname[256];
+
+	data_volume_name(container, vol, volname, sizeof(volname));
+	if (run_uvol("remove", volname))
+		fprintf(stderr, "uxc: warning: could not remove volume %s\n", volname);
+}
+
 static void reap_data_volumes(const char *container, struct blob_attr *vols)
 {
 	struct blob_attr *vcur, *vt[__VOL_MAX];
-	char volname[256];
 	int vrem;
 
 	blobmsg_for_each_attr(vcur, vols, vrem) {
 		blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(vcur), blobmsg_len(vcur));
 		if (!vt[VOL_NAME])
 			continue;
-		snprintf(volname, sizeof(volname), "%s.%s", container,
-			 blobmsg_get_string(vt[VOL_NAME]));
-		if (run_uvol("remove", volname))
-			fprintf(stderr, "uxc: warning: could not remove volume %s\n", volname);
+
+		data_volume_remove(container, blobmsg_get_string(vt[VOL_NAME]));
 	}
 }
 
@@ -2021,12 +2056,46 @@ static int uxc_invoker_pidfd(void)
 struct settings_key {
 	const char *name;
 	const char *excludes;
+	const char *entry;
+	const char *entry_key;
 	int type;
 	int (*validate)(const struct settings_key *key, struct blob_attr *value,
 			struct blob_attr **reg_tb, struct settings *us, const char *name);
+	int (*unset)(const struct settings_key *key, const char *id,
+		     struct blob_attr **reg_tb, struct settings *us, const char *name);
 	int (*commit)(const struct settings_key *key, struct blob_attr *value,
 		      struct blob_attr **reg_tb, struct settings *us, const char *name);
 };
+
+static const char *settings_entry_id(struct blob_attr *entry, const char *field)
+{
+	struct blob_attr *id;
+
+	if (blobmsg_type(entry) != BLOBMSG_TYPE_TABLE)
+		return NULL;
+
+	id = blob_key_find(entry, field);
+	if (!id || blobmsg_type(id) != BLOBMSG_TYPE_STRING)
+		return NULL;
+
+	return blobmsg_get_string(id);
+}
+
+static struct blob_attr *settings_array_find(struct blob_attr *array, const char *field,
+					     const char *val)
+{
+	struct blob_attr *cur;
+	const char *id;
+	int rem;
+
+	blobmsg_for_each_attr(cur, array, rem) {
+		id = settings_entry_id(cur, field);
+		if (id && !strcmp(id, val))
+			return cur;
+	}
+
+	return NULL;
+}
 
 static int abspath_validate(const struct settings_key *key, struct blob_attr *value,
 			    struct blob_attr **reg_tb, struct settings *us, const char *name)
@@ -2074,6 +2143,170 @@ static int ascii_validate(const struct settings_key *key, struct blob_attr *valu
 	return 0;
 }
 
+static long long data_volume_size(struct blob_attr *set, struct blob_attr *reg)
+{
+	if (set)
+		return parse_size_bytes(blobmsg_get_string(set));
+
+	if (reg)
+		return parse_size_bytes(blobmsg_get_string(reg));
+
+	return parse_size_bytes(DATA_VOLUME_SIZE_DEFAULT);
+}
+
+static struct blob_attr *data_volume_find(struct blob_attr *vols, const char *vname,
+					  struct blob_attr **vt)
+{
+	struct blob_attr *entry;
+
+	entry = settings_array_find(vols, "name", vname);
+	if (!entry)
+		return NULL;
+
+	blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(entry), blobmsg_len(entry));
+
+	return entry;
+}
+
+static int data_volume_entry_validate(const char *name, struct blob_attr *entry,
+				      struct blob_attr *patch, struct blob_attr *reg_vols,
+				      struct blob_attr *set_vols)
+{
+	struct blob_attr *vt[__VOL_MAX], *rt[__VOL_MAX], *st[__VOL_MAX];
+	struct blob_attr *reg, *set;
+	char volname[256];
+	const char *vname;
+	long long size;
+
+	if (blobmsg_type(entry) != BLOBMSG_TYPE_TABLE)
+		return -EINVAL;
+
+	blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(entry), blobmsg_len(entry));
+	if (!vt[VOL_NAME] || !vt[VOL_MOUNTPOINT])
+		return -EINVAL;
+
+	vname = blobmsg_get_string(vt[VOL_NAME]);
+	data_volume_name(name, vname, volname, sizeof(volname));
+	if (!uvol_name_valid(volname) || blobmsg_get_string(vt[VOL_MOUNTPOINT])[0] != '/')
+		return -EINVAL;
+
+	if (vt[VOL_SIZE] && parse_size_bytes(blobmsg_get_string(vt[VOL_SIZE])) <= 0)
+		return -EINVAL;
+
+	if (settings_array_find(patch, "name", vname) != entry)
+		return -EINVAL;
+
+	reg = data_volume_find(reg_vols, vname, rt);
+	set = data_volume_find(set_vols, vname, st);
+	size = data_volume_size(vt[VOL_SIZE], reg ? rt[VOL_SIZE] : NULL);
+
+	if (reg && (!rt[VOL_MOUNTPOINT] ||
+		    strcmp(blobmsg_get_string(vt[VOL_MOUNTPOINT]),
+			   blobmsg_get_string(rt[VOL_MOUNTPOINT]))))
+		return -EINVAL;
+
+	if (reg && size < data_volume_size(NULL, rt[VOL_SIZE]))
+		return -EINVAL;
+
+	if (set && size < data_volume_size(st[VOL_SIZE], reg ? rt[VOL_SIZE] : NULL))
+		return -EINVAL;
+
+	return 0;
+}
+
+static int data_volumes_validate(const struct settings_key *key, struct blob_attr *value,
+				 struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	struct blob_attr *set_vols = us ? us->tb[CONF_DATA_VOLUMES] : NULL;
+	struct blob_attr *cur;
+	int rem, ret;
+
+	blobmsg_for_each_attr(cur, value, rem) {
+		ret = data_volume_entry_validate(name, cur, value, reg_tb[CONF_DATA_VOLUMES],
+						 set_vols);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int data_volumes_effective(struct blob_attr *reg, struct blob_attr *set,
+				  struct blob_buf *out)
+{
+	struct blob_attr *cur, *over;
+	const char *vname;
+	int rem, n = 0;
+	void *a;
+
+	blob_buf_init(out, 0);
+	a = blobmsg_open_array(out, "data-volumes");
+
+	blobmsg_for_each_attr(cur, reg, rem) {
+		vname = settings_entry_id(cur, "name");
+		over = vname ? settings_array_find(set, "name", vname) : NULL;
+		if (over)
+			blob_table_overlay(out, cur, over);
+		else
+			blobmsg_add_blob(out, cur);
+
+		n++;
+	}
+
+	blobmsg_for_each_attr(cur, set, rem) {
+		vname = settings_entry_id(cur, "name");
+		if (vname && settings_array_find(reg, "name", vname))
+			continue;
+
+		blobmsg_add_blob(out, cur);
+		n++;
+	}
+
+	blobmsg_close_array(out, a);
+
+	return n;
+}
+
+static bool data_volume_settings_only(struct blob_attr **reg_tb, struct settings *us,
+				      const char *id)
+{
+	if (!id || !us || !settings_array_find(us->tb[CONF_DATA_VOLUMES], "name", id))
+		return false;
+
+	return !settings_array_find(reg_tb[CONF_DATA_VOLUMES], "name", id);
+}
+
+static int data_volumes_unset_check(const struct settings_key *key, const char *id,
+				    struct blob_attr **reg_tb, struct settings *us,
+				    const char *name)
+{
+	struct runtime_state *rs = NULL;
+
+	if (!data_volume_settings_only(reg_tb, us, id))
+		return 0;
+
+	rs = avl_find_element(&runtime, name, rs, avl);
+
+	return runtime_live(rs) ? -EBUSY : 0;
+}
+
+static int data_volumes_commit(const struct settings_key *key, struct blob_attr *value,
+			       struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	const char *id;
+
+	if (blobmsg_type(value) != BLOBMSG_TYPE_STRING)
+		return 0;
+
+	id = strchr(blobmsg_get_string(value), '=');
+	if (!id || !data_volume_settings_only(reg_tb, us, id + 1))
+		return 0;
+
+	data_volume_remove(name, id + 1);
+
+	return 0;
+}
+
 static const struct settings_key settings_keys[] = {
 	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
@@ -2083,6 +2316,9 @@ static const struct settings_key settings_keys[] = {
 	  .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
 	{ .name = "volumes", .type = BLOBMSG_TYPE_ARRAY, .validate = string_array_validate },
 	{ .name = "module-version", .type = BLOBMSG_TYPE_STRING, .validate = ascii_validate },
+	{ .name = "data-volumes", .entry = "data-volume", .entry_key = "name",
+	  .type = BLOBMSG_TYPE_ARRAY, .validate = data_volumes_validate,
+	  .unset = data_volumes_unset_check, .commit = data_volumes_commit },
 };
 
 static const struct settings_key *settings_key_find(const char *name)
@@ -2094,6 +2330,45 @@ static const struct settings_key *settings_key_find(const char *name)
 			return &settings_keys[i];
 
 	return NULL;
+}
+
+static const struct settings_key *settings_unset_find(const char *spec, const char **id)
+{
+	const char *eq = strchr(spec, '=');
+	size_t i, n;
+
+	*id = NULL;
+	if (!eq)
+		return settings_key_find(spec);
+
+	n = eq - spec;
+	for (i = 0; i < ARRAY_SIZE(settings_keys); i++) {
+		if (!settings_keys[i].entry || strlen(settings_keys[i].entry) != n ||
+		    strncmp(settings_keys[i].entry, spec, n))
+			continue;
+
+		*id = eq + 1;
+		return &settings_keys[i];
+	}
+
+	return NULL;
+}
+
+static struct blob_attr *settings_unset_first(struct blob_attr *unset, const char *spec)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, unset, rem)
+		if (!strcmp(blobmsg_get_string(cur), spec))
+			return cur;
+
+	return NULL;
+}
+
+static bool settings_unset_has(struct blob_attr *unset, const char *name)
+{
+	return !!settings_unset_first(unset, name);
 }
 
 static int settings_patch_check(struct blob_attr *patch, struct blob_attr **reg_tb,
@@ -2125,29 +2400,136 @@ static int settings_patch_check(struct blob_attr *patch, struct blob_attr **reg_
 	return 0;
 }
 
-static int settings_unset_check(struct blob_attr *unset)
+static int settings_unset_check(struct blob_attr *unset, struct blob_attr *patch,
+				struct blob_attr **reg_tb, struct settings *us,
+				const char *name)
 {
-	struct blob_attr *cur;
-	int rem;
+	struct blob_attr *cur, *old, *add;
+	const struct settings_key *key;
+	const char *id;
+	int rem, ret;
 
-	blobmsg_for_each_attr(cur, unset, rem)
-		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING ||
-		    !settings_key_find(blobmsg_get_string(cur)))
+	blobmsg_for_each_attr(cur, unset, rem) {
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING)
 			return -EINVAL;
+
+		key = settings_unset_find(blobmsg_get_string(cur), &id);
+		if (!key)
+			return -EINVAL;
+
+		if (id && settings_unset_first(unset, blobmsg_get_string(cur)) != cur)
+			return -EINVAL;
+
+		old = blob_key_find(us ? us->file : NULL, key->name);
+		if (id && !settings_array_find(old, key->entry_key, id))
+			return -ENOENT;
+
+		add = blob_key_find(patch, key->name);
+		if (id && settings_array_find(add, key->entry_key, id))
+			return -EINVAL;
+
+		if (!key->unset)
+			continue;
+
+		ret = key->unset(key, id, reg_tb, us, name);
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
 
-static bool settings_unset_has(struct blob_attr *unset, const char *name)
+static bool settings_unset_matches(struct blob_attr *unset, const struct settings_key *key,
+				   const char *id)
 {
+	const struct settings_key *ukey;
 	struct blob_attr *cur;
+	const char *uid;
 	int rem;
 
-	blobmsg_for_each_attr(cur, unset, rem)
-		if (!strcmp(blobmsg_get_string(cur), name))
+	blobmsg_for_each_attr(cur, unset, rem) {
+		ukey = settings_unset_find(blobmsg_get_string(cur), &uid);
+		if (ukey != key)
+			continue;
+
+		if (!uid || (id && !strcmp(uid, id)))
 			return true;
+	}
 
 	return false;
+}
+
+static bool settings_entry_kept(const struct settings_key *key, struct blob_attr *old,
+				struct blob_attr *unset, const char *id)
+{
+	if (!id || !settings_array_find(old, key->entry_key, id))
+		return false;
+
+	return !settings_unset_matches(unset, key, id);
+}
+
+static int settings_array_merge_count(const struct settings_key *key, struct blob_attr *old,
+				      struct blob_attr *patch, struct blob_attr *unset)
+{
+	struct blob_attr *cur;
+	int rem, n = 0;
+
+	blobmsg_for_each_attr(cur, old, rem)
+		if (!settings_unset_matches(unset, key, settings_entry_id(cur, key->entry_key)))
+			n++;
+
+	blobmsg_for_each_attr(cur, patch, rem)
+		if (!settings_entry_kept(key, old, unset, settings_entry_id(cur, key->entry_key)))
+			n++;
+
+	return n;
+}
+
+static bool settings_array_merge(struct blob_buf *out, const struct settings_key *key,
+				 struct blob_attr *old, struct blob_attr *patch,
+				 struct blob_attr *unset)
+{
+	struct blob_attr *cur, *rep;
+	bool changed = false;
+	const char *id;
+	void *a;
+	int rem;
+
+	if (!settings_array_merge_count(key, old, patch, unset))
+		return true;
+
+	a = blobmsg_open_array(out, key->name);
+
+	blobmsg_for_each_attr(cur, old, rem) {
+		id = settings_entry_id(cur, key->entry_key);
+		if (settings_unset_matches(unset, key, id)) {
+			changed = true;
+			continue;
+		}
+
+		rep = id ? settings_array_find(patch, key->entry_key, id) : NULL;
+		if (!rep) {
+			blobmsg_add_blob(out, cur);
+			continue;
+		}
+
+		if (!blob_attr_equal(cur, rep))
+			changed = true;
+
+		blobmsg_add_blob(out, rep);
+	}
+
+	blobmsg_for_each_attr(cur, patch, rem) {
+		if (settings_entry_kept(key, old, unset, settings_entry_id(cur, key->entry_key)))
+			continue;
+
+		blobmsg_add_blob(out, cur);
+		changed = true;
+	}
+
+	blobmsg_close_array(out, a);
+
+	return changed;
 }
 
 static bool settings_kept_copy(struct blob_buf *out, struct blob_attr *file,
@@ -2155,29 +2537,59 @@ static bool settings_kept_copy(struct blob_buf *out, struct blob_attr *file,
 {
 	const struct settings_key *key;
 	struct blob_attr *cur;
-	bool dropped = false;
+	bool changed = false;
 	int rem;
 
 	blobmsg_for_each_attr(cur, file, rem) {
 		if (!strcmp(blobmsg_name(cur), "name"))
 			continue;
 
-		if (blob_has_key(patch, blobmsg_name(cur)))
-			continue;
-
 		key = settings_key_find(blobmsg_name(cur));
 		if (key && key->excludes && blob_has_key(patch, key->excludes))
 			continue;
 
+		if (key && key->entry_key) {
+			if (settings_array_merge(out, key, cur,
+						 blob_key_find(patch, key->name), unset))
+				changed = true;
+			continue;
+		}
+
+		if (blob_has_key(patch, blobmsg_name(cur)))
+			continue;
+
 		if (settings_unset_has(unset, blobmsg_name(cur))) {
-			dropped = true;
+			changed = true;
 			continue;
 		}
 
 		blobmsg_add_blob(out, cur);
 	}
 
-	return dropped;
+	return changed;
+}
+
+static bool settings_patch_add(struct blob_buf *out, struct blob_attr *file,
+			       struct blob_attr *patch)
+{
+	const struct settings_key *key;
+	struct blob_attr *cur, *old;
+	bool changed = false;
+	int rem;
+
+	blobmsg_for_each_attr(cur, patch, rem) {
+		key = settings_key_find(blobmsg_name(cur));
+		old = blob_key_find(file, blobmsg_name(cur));
+		if (old && key->entry_key)
+			continue;
+
+		if (!blob_attr_equal(old, cur))
+			changed = true;
+
+		blobmsg_add_blob(out, cur);
+	}
+
+	return changed;
 }
 
 static int settings_commit_run(struct blob_attr *patch, struct blob_attr *unset,
@@ -2185,6 +2597,7 @@ static int settings_commit_run(struct blob_attr *patch, struct blob_attr *unset,
 {
 	const struct settings_key *key;
 	struct blob_attr *cur;
+	const char *id;
 	int rem, ret;
 
 	blobmsg_for_each_attr(cur, patch, rem) {
@@ -2198,7 +2611,7 @@ static int settings_commit_run(struct blob_attr *patch, struct blob_attr *unset,
 	}
 
 	blobmsg_for_each_attr(cur, unset, rem) {
-		key = settings_key_find(blobmsg_get_string(cur));
+		key = settings_unset_find(blobmsg_get_string(cur), &id);
 		if (!key->commit)
 			continue;
 
@@ -2233,13 +2646,13 @@ static int json_file_write(const char *path, struct blob_attr *root, mode_t mode
 static int settings_edit(const char *name, struct blob_attr *patch, struct blob_attr *unset)
 {
 	struct blob_attr *reg_tb[__CONF_MAX];
-	struct blob_attr *reg, *cur;
 	struct settings *us = NULL;
 	static struct blob_buf out;
+	struct blob_attr *reg;
 	char path[PATH_MAX];
 	const char *fpath;
 	bool changed;
-	int rem, ret;
+	int ret;
 
 	reg = registration_find(name, reg_tb);
 	if (!reg)
@@ -2251,20 +2664,15 @@ static int settings_edit(const char *name, struct blob_attr *patch, struct blob_
 	if (ret)
 		return ret;
 
-	ret = settings_unset_check(unset);
+	ret = settings_unset_check(unset, patch, reg_tb, us, name);
 	if (ret)
 		return ret;
 
 	blob_buf_init(&out, 0);
 	blobmsg_add_string(&out, "name", name);
 	changed = settings_kept_copy(&out, us ? us->file : NULL, patch, unset);
-
-	blobmsg_for_each_attr(cur, patch, rem) {
-		if (!blob_attr_equal(blob_key_find(us ? us->file : NULL, blobmsg_name(cur)), cur))
-			changed = true;
-
-		blobmsg_add_blob(&out, cur);
-	}
+	if (settings_patch_add(&out, us ? us->file : NULL, patch))
+		changed = true;
 
 	if (!changed) {
 		blob_buf_free(&out);
@@ -2292,6 +2700,7 @@ static int settings_edit(const char *name, struct blob_attr *patch, struct blob_
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode)
 {
+	static struct blob_buf vols;
 	static struct blob_buf req;
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	int rem, ret = 0;
@@ -2389,13 +2798,14 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	}
 
 	m = blobmsg_open_table(&req, "mount");
-	if (tb[CONF_DATA_VOLUMES]) {
-		ret = provision_data_volumes(name, tb[CONF_DATA_VOLUMES], &req);
-		if (ret) {
-			blobmsg_close_table(&req, m);
-			blob_buf_free(&req);
-			return ret;
-		}
+	data_volumes_effective(tb[CONF_DATA_VOLUMES],
+			       usettings ? usettings->tb[CONF_DATA_VOLUMES] : NULL, &vols);
+	ret = provision_data_volumes(name, blob_data(vols.head), &req);
+	blob_buf_free(&vols);
+	if (ret) {
+		blobmsg_close_table(&req, m);
+		blob_buf_free(&req);
+		return ret;
 	}
 	if (tb[CONF_HOSTS_FILE]) {
 		snprintf(hostsbind, sizeof(hostsbind), "%s:/etc/hosts",
@@ -3027,6 +3437,34 @@ static void volumes_array_add(struct blob_buf *buf, char *list)
 	blobmsg_close_array(buf, arr);
 }
 
+static int data_volume_arg_add(struct blob_buf *buf, char *arg)
+{
+	char *mnt, *size;
+	void *t;
+
+	mnt = strchr(arg, ':');
+	if (!mnt || mnt == arg)
+		return -EINVAL;
+
+	*mnt++ = '\0';
+	size = strchr(mnt, ':');
+	if (size)
+		*size++ = '\0';
+
+	if (!*mnt || (size && !*size))
+		return -EINVAL;
+
+	t = blobmsg_open_table(buf, NULL);
+	blobmsg_add_string(buf, "name", arg);
+	blobmsg_add_string(buf, "mountpoint", mnt);
+	if (size)
+		blobmsg_add_string(buf, "size", size);
+
+	blobmsg_close_table(buf, t);
+
+	return 0;
+}
+
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
 	struct settings *usettings = NULL;
@@ -3203,12 +3641,12 @@ static int uxc_boot(const char *mountpoint)
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
-	static struct blob_buf req;
-	int rem, ret = 0;
-	char *name;
+	static struct blob_buf req, vols;
+	int rem, nvols, ret = 0;
 	const char *imgvol;
 	unsigned int id;
 	bool autostart;
+	char *name;
 
 	ret = ubus_lookup_id(ctx, "block", &id);
 	if (ret)
@@ -3262,7 +3700,11 @@ static int uxc_boot(const char *mountpoint)
 			if (checkvolumes(usettings->volumes))
 				continue;
 
-		if ((tb[CONF_DATA_VOLUMES] || tb[CONF_OVERLAY_SIZE]) && uvol_meta_pending())
+		nvols = data_volumes_effective(tb[CONF_DATA_VOLUMES],
+					       usettings ? usettings->tb[CONF_DATA_VOLUMES] : NULL,
+					       &vols);
+		blob_buf_free(&vols);
+		if ((nvols || tb[CONF_OVERLAY_SIZE]) && uvol_meta_pending())
 			continue;
 
 		name = strdup(blobmsg_get_string(tb[CONF_NAME]));
@@ -3388,9 +3830,9 @@ static int uxc_delete(char *name, bool force, bool volumes)
 {
 	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
+	static struct blob_buf req, vols;
 	struct blob_attr *tb[__CONF_MAX];
 	const char *statevol = NULL;
-	static struct blob_buf req;
 	const char *sfname = NULL;
 	struct blob_attr *found;
 	const char *cfname;
@@ -3451,6 +3893,9 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	if (usettings)
 		sfname = usettings->fname;
 
+	data_volumes_effective(tb[CONF_DATA_VOLUMES],
+			       usettings ? usettings->tb[CONF_DATA_VOLUMES] : NULL, &vols);
+
 	if (usettings && usettings->writepath)
 		statevol = uvol_volume_name(usettings->writepath);
 	else if (tb[CONF_WRITE_OVERLAY_PATH])
@@ -3476,10 +3921,11 @@ static int uxc_delete(char *name, bool force, bool volumes)
 			fprintf(stderr, "uxc: warning: could not remove state volume %s\n", statevol);
 	}
 
-	if (!ret && volumes && tb[CONF_DATA_VOLUMES])
-		reap_data_volumes(name, tb[CONF_DATA_VOLUMES]);
+	if (!ret && volumes)
+		reap_data_volumes(name, blob_data(vols.head));
 
 errout:
+	blob_buf_free(&vols);
 	return ret;
 }
 
@@ -3518,7 +3964,10 @@ static int get_signum(const char *name)
 static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 			  struct blob_buf *unset, const char **name)
 {
-	int c;
+	static struct blob_buf vols;
+	struct blob_attr *cur;
+	int c, rem, ret = 0;
+	void *a;
 
 	if (argc < 2 || argv[1][0] == '-')
 		return -EINVAL;
@@ -3527,12 +3976,14 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 	argc--;
 	argv++;
 
-	while ((c = getopt_long(argc, argv, "+", set_opts, NULL)) != -1) {
+	blob_buf_init(&vols, 0);
+	while (!ret && (c = getopt_long(argc, argv, "+", set_opts, NULL)) != -1) {
 		switch (c) {
 		case OPT_AUTOSTART:
 			if (strcmp(optarg, "0") && strcmp(optarg, "1"))
-				return -EINVAL;
-			blobmsg_add_u8(patch, "autostart", optarg[0] == '1');
+				ret = -EINVAL;
+			else
+				blobmsg_add_u8(patch, "autostart", optarg[0] == '1');
 			break;
 		case OPT_PID_FILE:
 			blobmsg_add_string(patch, "pidfile", optarg);
@@ -3549,18 +4000,32 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 		case OPT_MODULE_VERSION:
 			blobmsg_add_string(patch, "module-version", optarg);
 			break;
+		case OPT_DATA_VOLUME:
+			ret = data_volume_arg_add(&vols, optarg);
+			break;
 		case OPT_UNSET:
 			blobmsg_add_string(unset, NULL, optarg);
 			break;
 		default:
-			return -EINVAL;
+			ret = -EINVAL;
+			break;
 		}
 	}
 
-	if (optind != argc)
-		return -EINVAL;
+	if (!ret && optind != argc)
+		ret = -EINVAL;
 
-	return 0;
+	if (!ret && blob_len(vols.head)) {
+		a = blobmsg_open_array(patch, "data-volumes");
+		blobmsg_for_each_attr(cur, vols.head, rem)
+			blobmsg_add_blob(patch, cur);
+
+		blobmsg_close_array(patch, a);
+	}
+
+	blob_buf_free(&vols);
+
+	return ret;
 }
 
 int main(int argc, char **argv)
