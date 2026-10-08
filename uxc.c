@@ -508,6 +508,7 @@ static void usage(void) {
 	printf("\tcomplain <conf>\t\t\t\trun <conf> permitting but logging seccomp denials\n");
 	printf("\tstate <conf>\t\t\t\tget state of container <conf>\n");
 	printf("\tkill [--signal <sig>] [--all] <conf> [<sig>]\tsignal <conf> (no signal: graceful stop); --all+KILL: whole cgroup\n");
+	printf("\trestart <conf>\t\t\t\tstop <conf> if running, then re-create and start it\n");
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
 	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
 	printf("\tset <conf> [--autostart 0|1] [--pid-file <path>]\n");
@@ -3545,6 +3546,7 @@ static int uxc_start(const char *name, bool console)
 	wait_state.service = name;
 	wait_state.instance = name;
 	wait_state.success_event = "instance.running";
+	wait_state.since_incarnation = uxc_instance_incarnation(name, name);
 
 	if (uxc_wait_arm(&wait_state))
 		fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
@@ -3783,6 +3785,39 @@ out:
 	return ret;
 }
 
+static int uxc_restart(char *name, bool systemd_cgroup)
+{
+	struct runtime_state *rsstate = NULL;
+	struct blob_attr *tb[__CONF_MAX];
+	int ret;
+
+	if (!registration_find(name, tb))
+		return -ENOENT;
+
+	rsstate = avl_find_element(&runtime, name, rsstate, avl);
+	if (runtime_live(rsstate)) {
+		ret = uxc_kill(name, -1, false);
+		if (ret)
+			return ret;
+	}
+
+	runtime_free();
+	ret = runtime_load();
+	if (ret)
+		return ret;
+
+	rsstate = avl_find_element(&runtime, name, rsstate, avl);
+	if (runtime_live(rsstate)) {
+		fprintf(stderr, "uxc: %s did not stop\n", name);
+		return -EBUSY;
+	}
+
+	ret = uxc_create(name, false, NULL, systemd_cgroup, NULL);
+	if (ret)
+		return ret;
+
+	return uxc_start(name, false);
+}
 
 static int registration_write(const char *name, struct blob_attr *root)
 {
@@ -4731,6 +4766,10 @@ next_global:
 			goto runtime_out;
 		}
 		ret = uxc_kill(verb_argv[optind], signal, all);
+	} else if (!strcmp(verb, "restart")) {
+		if (verb_argc != 2)
+			goto usage_out;
+		ret = uxc_restart(verb_argv[1], systemd_cgroup);
 	} else if (!strcmp(verb, "enable")) {
 		if (verb_argc != 2)
 			goto usage_out;
