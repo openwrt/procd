@@ -55,6 +55,7 @@
 #define UXC_ETC_CONFDIR "/etc/uxc"
 #define UXC_VOL_CONFDIR "/tmp/run/uvol/.meta/uxc"
 #define UXC_VOL_SECRETDIR "/tmp/run/uvol/.meta/secrets"
+#define UXC_RUN_DIR "/tmp/run/uxc"
 
 static bool verbose = false;
 static bool json_output = false;
@@ -91,6 +92,7 @@ enum {
 	OPT_MOUNTS,
 	OPT_MODULE_VERSION,
 	OPT_DATA_VOLUME,
+	OPT_ENV,
 	OPT_UNSET,
 };
 
@@ -150,6 +152,7 @@ static const struct option update_opts[] = {
 static const struct option set_opts[] = {
 	{"autostart",		required_argument,	0,	OPT_AUTOSTART		},
 	{"data-volume",		required_argument,	0,	OPT_DATA_VOLUME		},
+	{"env",			required_argument,	0,	OPT_ENV			},
 	{"module-version",	required_argument,	0,	OPT_MODULE_VERSION	},
 	{"mounts",		required_argument,	0,	OPT_MOUNTS		},
 	{"pid-file",		required_argument,	0,	OPT_PID_FILE		},
@@ -462,11 +465,11 @@ static void usage(void) {
 	printf("\tset <conf> [--autostart 0|1] [--pid-file <path>]\n");
 	printf("\t\t[--temp-overlay-size <size>] [--write-overlay-path <path>]\n");
 	printf("\t\t[--mounts <v1>,<v2>,...,<vN>] [--module-version <string>]\n");
-	printf("\t\t[--data-volume <vol>:<mnt>[:<size>]]...\n");
+	printf("\t\t[--data-volume <vol>:<mnt>[:<size>]]... [--env <KEY>=<value>]...\n");
 	printf("\t\t[--unset <key>]...\t\t\tedit the settings of <conf> in one rewrite\n");
 	printf("\t\t\t\t\t\t--unset keys: autostart pidfile temp-overlay-size\n");
 	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
-	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol>\n");
+	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol> env env=<KEY>\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
@@ -493,6 +496,7 @@ enum {
 	CONF_PROVISION,
 	CONF_ORIGIN,
 	CONF_MODULE_VERSION,
+	CONF_ENV,
 	__CONF_MAX,
 };
 
@@ -513,6 +517,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_PROVISION] = { .name = "provision", .type = BLOBMSG_TYPE_ARRAY },
 	[CONF_ORIGIN] = { .name = "origin", .type = BLOBMSG_TYPE_STRING },
 	[CONF_MODULE_VERSION] = { .name = "module-version", .type = BLOBMSG_TYPE_STRING },
+	[CONF_ENV] = { .name = "env", .type = BLOBMSG_TYPE_TABLE },
 };
 
 struct settings {
@@ -751,6 +756,14 @@ static void blob_table_overlay(struct blob_buf *out, struct blob_attr *base,
 	blobmsg_close_table(out, t);
 }
 
+static void *blob_container_open(struct blob_buf *out, const char *name, int type)
+{
+	if (type == BLOBMSG_TYPE_TABLE)
+		return blobmsg_open_table(out, name);
+
+	return blobmsg_open_array(out, name);
+}
+
 enum {
 	STORE_STATE,
 	STORE_SECRETS,
@@ -813,6 +826,39 @@ static int store_dir(const char *name, int store, char *out, size_t len)
 		return -ENAMETOOLONG;
 
 	return 0;
+}
+
+static int rundir_path(const char *name, const char *file, char *out, size_t len)
+{
+	int ret;
+
+	if (file)
+		ret = snprintf(out, len, "%s/%s/%s", UXC_RUN_DIR, name, file);
+	else
+		ret = snprintf(out, len, "%s/%s", UXC_RUN_DIR, name);
+
+	if (ret < 0 || (size_t)ret >= len)
+		return -ENAMETOOLONG;
+
+	return 0;
+}
+
+static int rundir_prepare(const char *name, const char *file, char *out, size_t len)
+{
+	char dir[PATH_MAX];
+	int ret;
+
+	ret = rundir_path(name, NULL, dir, sizeof(dir));
+	if (ret)
+		return ret;
+
+	if (mkdir(UXC_RUN_DIR, 0700) && errno != EEXIST)
+		return -errno;
+
+	if (mkdir(dir, 0700) && errno != EEXIST)
+		return -errno;
+
+	return rundir_path(name, file, out, len);
 }
 
 enum {
@@ -1925,6 +1971,83 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 	}
 }
 
+static void env_run_add_store(FILE *out, const char *path, struct blob_attr *env)
+{
+	char *line = NULL, *eq;
+	size_t cap = 0;
+	ssize_t n;
+	FILE *f;
+
+	f = fopen(path, "r");
+	if (!f)
+		return;
+
+	while ((n = getline(&line, &cap, f)) > 0) {
+		eq = strchr(line, '=');
+		if (eq) {
+			*eq = '\0';
+			if (blob_has_key(env, line))
+				continue;
+
+			*eq = '=';
+		}
+
+		fputs(line, out);
+		if (line[n - 1] != '\n')
+			fputc('\n', out);
+	}
+
+	free(line);
+	fclose(f);
+}
+
+static int env_run_write(const char *name, struct blob_attr *env)
+{
+	char dir[PATH_MAX], path[PATH_MAX], store[PATH_MAX];
+	struct blob_attr *cur;
+	char *buf = NULL;
+	size_t len = 0;
+	int rem, ret;
+	FILE *out;
+
+	ret = store_dir(name, STORE_STATE, dir, sizeof(dir));
+	if (ret)
+		return ret;
+
+	snprintf(store, sizeof(store), "%s/env", dir);
+	ret = rundir_path(name, "env.run", path, sizeof(path));
+	if (ret)
+		return ret;
+
+	out = open_memstream(&buf, &len);
+	if (!out)
+		return -errno;
+
+	blobmsg_for_each_attr(cur, env, rem)
+		if (blobmsg_type(cur) == BLOBMSG_TYPE_STRING)
+			fprintf(out, "%s=%s\n", blobmsg_name(cur), blobmsg_get_string(cur));
+
+	env_run_add_store(out, store, env);
+	fclose(out);
+
+	if (!buf || !len) {
+		free(buf);
+		unlink(path);
+		return 1;
+	}
+
+	ret = rundir_prepare(name, "env.run", path, sizeof(path));
+	if (ret < 0) {
+		free(buf);
+		return ret;
+	}
+
+	ret = file_write_atomic(path, buf, len, 0600);
+	free(buf);
+
+	return ret;
+}
+
 static const char *uxc_delete_path;
 static bool uxc_delete_replied;
 
@@ -2095,6 +2218,23 @@ static struct blob_attr *settings_array_find(struct blob_attr *array, const char
 	}
 
 	return NULL;
+}
+
+static const char *settings_member_id(const struct settings_key *key, struct blob_attr *member)
+{
+	if (key->type == BLOBMSG_TYPE_TABLE)
+		return blobmsg_name(member);
+
+	return settings_entry_id(member, key->entry_key);
+}
+
+static struct blob_attr *settings_member_find(const struct settings_key *key,
+					      struct blob_attr *container, const char *id)
+{
+	if (key->type == BLOBMSG_TYPE_TABLE)
+		return blob_key_find(container, id);
+
+	return settings_array_find(container, key->entry_key, id);
 }
 
 static int abspath_validate(const struct settings_key *key, struct blob_attr *value,
@@ -2307,6 +2447,40 @@ static int data_volumes_commit(const struct settings_key *key, struct blob_attr 
 	return 0;
 }
 
+static bool env_key_valid(const char *key)
+{
+	const char *p;
+
+	if (!isalpha((unsigned char)*key) && *key != '_')
+		return false;
+
+	for (p = key + 1; *p; p++)
+		if (!isalnum((unsigned char)*p) && *p != '_')
+			return false;
+
+	return true;
+}
+
+static int env_validate(const struct settings_key *key, struct blob_attr *value,
+			struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, value, rem) {
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING)
+			return -EINVAL;
+
+		if (!env_key_valid(blobmsg_name(cur)) || strchr(blobmsg_get_string(cur), '\n'))
+			return -EINVAL;
+
+		if (blob_key_find(value, blobmsg_name(cur)) != cur)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 static const struct settings_key settings_keys[] = {
 	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
@@ -2319,6 +2493,7 @@ static const struct settings_key settings_keys[] = {
 	{ .name = "data-volumes", .entry = "data-volume", .entry_key = "name",
 	  .type = BLOBMSG_TYPE_ARRAY, .validate = data_volumes_validate,
 	  .unset = data_volumes_unset_check, .commit = data_volumes_commit },
+	{ .name = "env", .entry = "env", .type = BLOBMSG_TYPE_TABLE, .validate = env_validate },
 };
 
 static const struct settings_key *settings_key_find(const char *name)
@@ -2421,11 +2596,11 @@ static int settings_unset_check(struct blob_attr *unset, struct blob_attr *patch
 			return -EINVAL;
 
 		old = blob_key_find(us ? us->file : NULL, key->name);
-		if (id && !settings_array_find(old, key->entry_key, id))
+		if (id && !settings_member_find(key, old, id))
 			return -ENOENT;
 
 		add = blob_key_find(patch, key->name);
-		if (id && settings_array_find(add, key->entry_key, id))
+		if (id && settings_member_find(key, add, id))
 			return -EINVAL;
 
 		if (!key->unset)
@@ -2462,52 +2637,52 @@ static bool settings_unset_matches(struct blob_attr *unset, const struct setting
 static bool settings_entry_kept(const struct settings_key *key, struct blob_attr *old,
 				struct blob_attr *unset, const char *id)
 {
-	if (!id || !settings_array_find(old, key->entry_key, id))
+	if (!id || !settings_member_find(key, old, id))
 		return false;
 
 	return !settings_unset_matches(unset, key, id);
 }
 
-static int settings_array_merge_count(const struct settings_key *key, struct blob_attr *old,
-				      struct blob_attr *patch, struct blob_attr *unset)
+static int settings_member_merge_count(const struct settings_key *key, struct blob_attr *old,
+				       struct blob_attr *patch, struct blob_attr *unset)
 {
 	struct blob_attr *cur;
 	int rem, n = 0;
 
 	blobmsg_for_each_attr(cur, old, rem)
-		if (!settings_unset_matches(unset, key, settings_entry_id(cur, key->entry_key)))
+		if (!settings_unset_matches(unset, key, settings_member_id(key, cur)))
 			n++;
 
 	blobmsg_for_each_attr(cur, patch, rem)
-		if (!settings_entry_kept(key, old, unset, settings_entry_id(cur, key->entry_key)))
+		if (!settings_entry_kept(key, old, unset, settings_member_id(key, cur)))
 			n++;
 
 	return n;
 }
 
-static bool settings_array_merge(struct blob_buf *out, const struct settings_key *key,
-				 struct blob_attr *old, struct blob_attr *patch,
-				 struct blob_attr *unset)
+static bool settings_member_merge(struct blob_buf *out, const struct settings_key *key,
+				  struct blob_attr *old, struct blob_attr *patch,
+				  struct blob_attr *unset)
 {
 	struct blob_attr *cur, *rep;
 	bool changed = false;
 	const char *id;
-	void *a;
+	void *c;
 	int rem;
 
-	if (!settings_array_merge_count(key, old, patch, unset))
+	if (!settings_member_merge_count(key, old, patch, unset))
 		return true;
 
-	a = blobmsg_open_array(out, key->name);
+	c = blob_container_open(out, key->name, key->type);
 
 	blobmsg_for_each_attr(cur, old, rem) {
-		id = settings_entry_id(cur, key->entry_key);
+		id = settings_member_id(key, cur);
 		if (settings_unset_matches(unset, key, id)) {
 			changed = true;
 			continue;
 		}
 
-		rep = id ? settings_array_find(patch, key->entry_key, id) : NULL;
+		rep = id ? settings_member_find(key, patch, id) : NULL;
 		if (!rep) {
 			blobmsg_add_blob(out, cur);
 			continue;
@@ -2520,14 +2695,14 @@ static bool settings_array_merge(struct blob_buf *out, const struct settings_key
 	}
 
 	blobmsg_for_each_attr(cur, patch, rem) {
-		if (settings_entry_kept(key, old, unset, settings_entry_id(cur, key->entry_key)))
+		if (settings_entry_kept(key, old, unset, settings_member_id(key, cur)))
 			continue;
 
 		blobmsg_add_blob(out, cur);
 		changed = true;
 	}
 
-	blobmsg_close_array(out, a);
+	blob_nest_end(out, c);
 
 	return changed;
 }
@@ -2548,9 +2723,9 @@ static bool settings_kept_copy(struct blob_buf *out, struct blob_attr *file,
 		if (key && key->excludes && blob_has_key(patch, key->excludes))
 			continue;
 
-		if (key && key->entry_key) {
-			if (settings_array_merge(out, key, cur,
-						 blob_key_find(patch, key->name), unset))
+		if (key && key->entry) {
+			if (settings_member_merge(out, key, cur,
+						  blob_key_find(patch, key->name), unset))
 				changed = true;
 			continue;
 		}
@@ -2580,7 +2755,7 @@ static bool settings_patch_add(struct blob_buf *out, struct blob_attr *file,
 	blobmsg_for_each_attr(cur, patch, rem) {
 		key = settings_key_find(blobmsg_name(cur));
 		old = blob_key_find(file, blobmsg_name(cur));
-		if (old && key->entry_key)
+		if (old && key->entry)
 			continue;
 
 		if (!blob_attr_equal(old, cur))
@@ -2791,11 +2966,16 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (tb[CONF_INITENV])
 		materialise_initenv(name, tb[CONF_INITENV]);
 
-	if (!store_dir(name, STORE_STATE, envpath, sizeof(envpath) - strlen("/env"))) {
-		strcat(envpath, "/env");
-		if (!access(envpath, R_OK))
-			blobmsg_add_string(&req, "envfile", envpath);
+	ret = env_run_write(name, usettings ? usettings->tb[CONF_ENV] : NULL);
+	if (ret < 0) {
+		fprintf(stderr, "uxc: failed to write the environment of %s: %s\n",
+			name, strerror(-ret));
+		blob_buf_free(&req);
+		return ret;
 	}
+
+	if (!ret && !rundir_path(name, "env.run", envpath, sizeof(envpath)))
+		blobmsg_add_string(&req, "envfile", envpath);
 
 	m = blobmsg_open_table(&req, "mount");
 	data_volumes_effective(tb[CONF_DATA_VOLUMES],
@@ -3465,6 +3645,20 @@ static int data_volume_arg_add(struct blob_buf *buf, char *arg)
 	return 0;
 }
 
+static int env_arg_add(struct blob_buf *buf, char *arg)
+{
+	char *val;
+
+	val = strchr(arg, '=');
+	if (!val || val == arg)
+		return -EINVAL;
+
+	*val++ = '\0';
+	blobmsg_add_string(buf, arg, val);
+
+	return 0;
+}
+
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
 	struct settings *usettings = NULL;
@@ -3757,6 +3951,16 @@ static int purge_cb(const char *path, const struct stat *sb, int typeflag,
 	return remove(path);
 }
 
+static int tree_purge(const char *path)
+{
+	struct stat sb;
+
+	if (lstat(path, &sb) || !S_ISDIR(sb.st_mode))
+		return 0;
+
+	return nftw(path, purge_cb, 16, FTW_DEPTH | FTW_PHYS) ? -EIO : 0;
+}
+
 static int reconcile_purge(const char *base, const char *name, const char *statedir)
 {
 	char path[PATH_MAX];
@@ -3835,6 +4039,7 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	const char *statevol = NULL;
 	const char *sfname = NULL;
 	struct blob_attr *found;
+	char rundir[PATH_MAX];
 	const char *cfname;
 	struct stat sb;
 	uint32_t id;
@@ -3846,6 +4051,10 @@ static int uxc_delete(char *name, bool force, bool volumes)
 		return -ENOENT;
 
 	cfname = blobmsg_name(found);
+
+	ret = rundir_path(name, NULL, rundir, sizeof(rundir));
+	if (ret)
+		return ret;
 
 	if (tb[CONF_ORIGIN] && !strcmp(blobmsg_get_string(tb[CONF_ORIGIN]), "package")) {
 		fprintf(stderr, "uxc: %s is provided by a package; use 'apk del' to remove it\n", name);
@@ -3915,6 +4124,8 @@ static int uxc_delete(char *name, bool force, bool volumes)
 
 	if (unlink(cfname) == -1)
 		ret = -errno;
+	else if (tree_purge(rundir))
+		fprintf(stderr, "uxc: could not remove the run-time state of %s\n", name);
 
 	if (!ret && volumes && statevol) {
 		if (run_uvol("remove", statevol))
@@ -3961,13 +4172,28 @@ static int get_signum(const char *name)
 	return -1;
 }
 
+static void patch_members_add(struct blob_buf *patch, const char *name,
+			      struct blob_attr *members, int type)
+{
+	struct blob_attr *cur;
+	void *c;
+	int rem;
+
+	if (!blob_len(members))
+		return;
+
+	c = blob_container_open(patch, name, type);
+	blobmsg_for_each_attr(cur, members, rem)
+		blobmsg_add_blob(patch, cur);
+
+	blob_nest_end(patch, c);
+}
+
 static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 			  struct blob_buf *unset, const char **name)
 {
-	static struct blob_buf vols;
-	struct blob_attr *cur;
-	int c, rem, ret = 0;
-	void *a;
+	static struct blob_buf vols, envs;
+	int c, ret = 0;
 
 	if (argc < 2 || argv[1][0] == '-')
 		return -EINVAL;
@@ -3977,6 +4203,7 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 	argv++;
 
 	blob_buf_init(&vols, 0);
+	blob_buf_init(&envs, 0);
 	while (!ret && (c = getopt_long(argc, argv, "+", set_opts, NULL)) != -1) {
 		switch (c) {
 		case OPT_AUTOSTART:
@@ -4003,6 +4230,9 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 		case OPT_DATA_VOLUME:
 			ret = data_volume_arg_add(&vols, optarg);
 			break;
+		case OPT_ENV:
+			ret = env_arg_add(&envs, optarg);
+			break;
 		case OPT_UNSET:
 			blobmsg_add_string(unset, NULL, optarg);
 			break;
@@ -4015,15 +4245,13 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 	if (!ret && optind != argc)
 		ret = -EINVAL;
 
-	if (!ret && blob_len(vols.head)) {
-		a = blobmsg_open_array(patch, "data-volumes");
-		blobmsg_for_each_attr(cur, vols.head, rem)
-			blobmsg_add_blob(patch, cur);
-
-		blobmsg_close_array(patch, a);
+	if (!ret) {
+		patch_members_add(patch, "data-volumes", vols.head, BLOBMSG_TYPE_ARRAY);
+		patch_members_add(patch, "env", envs.head, BLOBMSG_TYPE_TABLE);
 	}
 
 	blob_buf_free(&vols);
+	blob_buf_free(&envs);
 
 	return ret;
 }
