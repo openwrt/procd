@@ -663,6 +663,23 @@ static int settings_path_new(const char *cfname, const char *name, char *out, si
 	return 0;
 }
 
+static struct blob_attr *registration_find(const char *name, struct blob_attr **tb)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
+		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+		if (!tb[CONF_NAME] || !tb[CONF_PATH])
+			continue;
+
+		if (!strcmp(name, blobmsg_get_string(tb[CONF_NAME])))
+			return cur;
+	}
+
+	return NULL;
+}
+
 enum {
 	LIST_INSTANCES,
 	__LIST_MAX,
@@ -1134,13 +1151,12 @@ static int uxc_state(char *name)
 {
 	struct runtime_state *rsstate = avl_find_element(&runtime, name, rsstate, avl);
 	struct blob_attr *ocistate = NULL;
-	struct blob_attr *cur, *tb[__CONF_MAX];
-	int rem;
-	char *bundle = NULL;
+	struct blob_attr *tb[__CONF_MAX];
+	static struct blob_buf buf;
 	char *jail_name = NULL;
+	char *bundle = NULL;
 	char *state = NULL;
 	char *tmp;
-	static struct blob_buf buf;
 
 	if (rsstate)
 		ocistate = rsstate->ocistate;
@@ -1155,24 +1171,15 @@ static int uxc_state(char *name)
 		return 0;
 	}
 
-	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
-		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
-		if (!tb[CONF_NAME] || !tb[CONF_PATH])
-			continue;
-
-		if (!strcmp(name, blobmsg_get_string(tb[CONF_NAME]))) {
-			if (tb[CONF_JAIL])
-				jail_name = blobmsg_get_string(tb[CONF_JAIL]);
-			else
-				jail_name = name;
-
-			bundle = blobmsg_get_string(tb[CONF_PATH]);
-			break;
-		}
-	}
-
-	if (!bundle)
+	if (!registration_find(name, tb))
 		return -ENOENT;
+
+	if (tb[CONF_JAIL])
+		jail_name = blobmsg_get_string(tb[CONF_JAIL]);
+	else
+		jail_name = name;
+
+	bundle = blobmsg_get_string(tb[CONF_PATH]);
 
 	blob_buf_init(&buf, 0);
 	blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
@@ -1718,21 +1725,8 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	struct uxc_wait_state wait_state;
 
 	void *in, *ins, *j, *m;
-	bool found = false;
 
-	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
-		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
-		if (!tb[CONF_NAME] || !tb[CONF_PATH])
-			continue;
-
-		if (strcmp(name, blobmsg_get_string(tb[CONF_NAME])))
-			continue;
-
-		found = true;
-		break;
-	}
-
-	if (!found)
+	if (!registration_find(name, tb))
 		return -ENOENT;
 
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
@@ -2105,29 +2099,16 @@ static int uxc_update(const char *name, const char *resources_file)
 
 static int uxc_kill(char *name, int signal, bool all)
 {
-	static struct blob_buf req;
-	struct blob_attr *cur, *tb[__CONF_MAX];
-	struct uxc_wait_state wait_state;
-	int rem, ret;
-	char *objname;
-	unsigned int id;
 	struct runtime_state *rsstate = NULL;
-	bool found = false;
+	struct uxc_wait_state wait_state;
+	struct blob_attr *tb[__CONF_MAX];
 	bool wait_stop = (signal < 0);
+	static struct blob_buf req;
+	unsigned int id;
+	char *objname;
+	int ret;
 
-	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
-		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
-		if (!tb[CONF_NAME] || !tb[CONF_PATH])
-			continue;
-
-		if (strcmp(name, blobmsg_get_string(tb[CONF_NAME])))
-			continue;
-
-		found = true;
-		break;
-	}
-
-	if (!found)
+	if (!registration_find(name, tb))
 		return -ENOENT;
 
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
@@ -2188,34 +2169,27 @@ static int uxc_kill(char *name, int signal, bool all)
 
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
-	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct settings *usettings = NULL;
+	struct blob_attr *tb[__CONF_MAX];
 	char *curvol, *tmp, *mnttok;
 	static struct blob_buf req;
 	const char *cfname = NULL;
 	const char *sfname = NULL;
+	struct blob_attr *found;
 	char sfpath[PATH_MAX];
 	char *fname = NULL;
 	struct stat sb;
 	void *mntarr;
-	int rem, ret;
+	int ret;
 	int f;
 
 	/* nothing to do */
 	if (!path && (autostart<0) && !pidfile && !tmprwsize && !writepath && !requiredmounts)
 		return 0;
 
-	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
-		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
-		if (!tb[CONF_NAME] || !tb[CONF_PATH])
-			continue;
-
-		if (strcmp(name, blobmsg_get_string(tb[CONF_NAME])))
-			continue;
-
-		cfname = blobmsg_name(cur);
-		break;
-	}
+	found = registration_find(name, tb);
+	if (found)
+		cfname = blobmsg_name(found);
 
 	if (cfname && path)
 		return -EEXIST;
@@ -3040,32 +3014,24 @@ static int uxc_reconcile(void)
 
 static int uxc_delete(char *name, bool force, bool volumes)
 {
-	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
-	static struct blob_buf req;
-	uint32_t id;
-	int rem, ret = 0;
-	const char *cfname = NULL;
-	const char *sfname = NULL;
-	struct stat sb;
+	struct blob_attr *tb[__CONF_MAX];
 	const char *statevol = NULL;
+	static struct blob_buf req;
+	const char *sfname = NULL;
+	struct blob_attr *found;
+	const char *cfname;
+	struct stat sb;
+	uint32_t id;
+	int ret = 0;
 	bool live;
 
-	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
-		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
-		if (!tb[CONF_NAME] || !tb[CONF_PATH])
-			continue;
-
-		if (strcmp(name, blobmsg_get_string(tb[CONF_NAME])))
-			continue;
-
-		cfname = blobmsg_name(cur);
-		break;
-	}
-
-	if (!cfname)
+	found = registration_find(name, tb);
+	if (!found)
 		return -ENOENT;
+
+	cfname = blobmsg_name(found);
 
 	if (tb[CONF_ORIGIN] && !strcmp(blobmsg_get_string(tb[CONF_ORIGIN]), "package")) {
 		fprintf(stderr, "uxc: %s is provided by a package; use 'apk del' to remove it\n", name);
