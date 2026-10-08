@@ -2446,6 +2446,7 @@ static void usage(void)
 	fprintf(stderr, "  -n <name>\tthe name of the jail\n");
 	fprintf(stderr, "  -e <var>\timport environment variable\n");
 	fprintf(stderr, "  -x <file>\tappend KEY=VALUE lines from <file> to the container env\n");
+	fprintf(stderr, "  -t <secs>\tseconds from SIGTERM to SIGKILL (default 5)\n");
 	fprintf(stderr, "namespace jail options:\n");
 	fprintf(stderr, "  -h <hostname>\tchange the hostname of the jail\n");
 	fprintf(stderr, "  -N\t\tjail has network namespace\n");
