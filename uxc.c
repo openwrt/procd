@@ -85,6 +85,7 @@ struct settings {
 	char *writepath;
 	signed char autostart;
 	struct blob_attr *volumes;
+	struct blob_attr *file;
 };
 
 enum {
@@ -569,6 +570,7 @@ settings_alloc(const char *container_name)
 	s->tmprwsize = NULL;
 	s->writepath = NULL;
 	s->volumes = NULL;
+	s->file = NULL;
 	return s;
 }
 
@@ -601,6 +603,7 @@ static int settings_add(void)
 
 		s->volumes = tb[CONF_VOLUMES];
 		s->fname = blobmsg_name(cur);
+		s->file = cur;
 
 		err = avl_insert(&settings, &s->avl);
 		if (err) {
@@ -679,6 +682,18 @@ static struct blob_attr *registration_find(const char *name, struct blob_attr **
 	}
 
 	return NULL;
+}
+
+static bool blob_has_key(struct blob_attr *root, const char *name)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blob_for_each_attr(cur, root, rem)
+		if (!strcmp(blobmsg_name(cur), name))
+			return true;
+
+	return false;
 }
 
 enum {
@@ -2683,10 +2698,12 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 	const char *sfname = NULL;
 	struct blob_attr *found;
 	char sfpath[PATH_MAX];
+	struct blob_attr *cur;
 	char *fname = NULL;
 	struct stat sb;
 	void *mntarr;
 	int ret;
+	int rem;
 	int f;
 
 	/* nothing to do */
@@ -2776,9 +2793,6 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 	if (writepath)
 		blobmsg_add_string(&req, "write-overlay-path", writepath);
 
-	if (!requiredmounts && usettings && usettings->volumes)
-		blobmsg_add_blob(&req, usettings->volumes);
-
 	if (requiredmounts) {
 		mntarr = blobmsg_open_array(&req, "volumes");
 		for (mnttok = requiredmounts; ; mnttok = NULL) {
@@ -2789,6 +2803,21 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 			blobmsg_add_string(&req, NULL, curvol);
 		}
 		blobmsg_close_array(&req, mntarr);
+	}
+
+	if (usettings) {
+		blobmsg_for_each_attr(cur, usettings->file, rem) {
+			if (blob_has_key(req.head, blobmsg_name(cur)))
+				continue;
+
+			if (tmprwsize && !strcmp(blobmsg_name(cur), "write-overlay-path"))
+				continue;
+
+			if (writepath && !strcmp(blobmsg_name(cur), "temp-overlay-size"))
+				continue;
+
+			blobmsg_add_blob(&req, cur);
+		}
 	}
 
 	tmp = blobmsg_format_json_indent(req.head, true, 0);
