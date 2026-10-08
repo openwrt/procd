@@ -623,6 +623,46 @@ static void settings_free(void)
 	return;
 }
 
+static int registration_dir(const char *cfname, char *out, size_t len)
+{
+	const char *slash;
+	int ret;
+
+	slash = strrchr(cfname, '/');
+	if (!slash)
+		return -EINVAL;
+
+	ret = snprintf(out, len, "%.*s", (int)(slash - cfname), cfname);
+	if (ret < 0 || (size_t)ret >= len)
+		return -ENAMETOOLONG;
+
+	return 0;
+}
+
+static int settings_path_new(const char *cfname, const char *name, char *out, size_t len)
+{
+	char conf_dir[PATH_MAX];
+	char dir[PATH_MAX];
+	int ret;
+
+	ret = registration_dir(cfname, conf_dir, sizeof(conf_dir));
+	if (ret)
+		return ret;
+
+	ret = snprintf(dir, sizeof(dir), "%s/settings", conf_dir);
+	if (ret < 0 || (size_t)ret >= sizeof(dir))
+		return -ENAMETOOLONG;
+
+	if (mkdir(dir, 0755) && errno != EEXIST)
+		return -errno;
+
+	ret = snprintf(out, len, "%s/%s.json", dir, name);
+	if (ret < 0 || (size_t)ret >= len)
+		return -ENAMETOOLONG;
+
+	return 0;
+}
+
 enum {
 	LIST_INSTANCES,
 	__LIST_MAX,
@@ -2148,17 +2188,18 @@ static int uxc_kill(char *name, int signal, bool all)
 
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
-	static struct blob_buf req;
-	struct settings *usettings = NULL;
 	struct blob_attr *cur, *tb[__CONF_MAX];
-	int rem, ret;
+	struct settings *usettings = NULL;
+	char *curvol, *tmp, *mnttok;
+	static struct blob_buf req;
 	const char *cfname = NULL;
 	const char *sfname = NULL;
+	char sfpath[PATH_MAX];
 	char *fname = NULL;
-	char *curvol, *tmp, *mnttok;
-	void *mntarr;
-	int f;
 	struct stat sb;
+	void *mntarr;
+	int rem, ret;
+	int f;
 
 	/* nothing to do */
 	if (!path && (autostart<0) && !pidfile && !tmprwsize && !writepath && !requiredmounts)
@@ -2228,28 +2269,11 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 		if (sfname) {
 			f = open(sfname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		} else {
-			char *t1, *t2;
-			t1 = strdup(cfname);
-			t2 = strrchr(t1, '/');
-			if (!t2)
-				return -EINVAL;
+			ret = settings_path_new(cfname, name, sfpath, sizeof(sfpath));
+			if (ret)
+				return ret;
 
-			*t2 = '\0';
-
-			if (asprintf(&t2, "%s/settings", t1) == -1)
-				return -ENOMEM;
-
-			ret = mkdir(t2, 0755);
-			if (ret && ret != EEXIST)
-				return -ret;
-
-			free(t2);
-			if (asprintf(&t2, "%s/settings/%s.json", t1, name) == -1)
-				return -ENOMEM;
-
-			free(t1);
-			f = open(t2, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-			free(t2);
+			f = open(sfpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		}
 		if (f < 0)
 			return -errno;
