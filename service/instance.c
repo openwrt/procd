@@ -47,6 +47,7 @@
 
 enum {
 	INSTANCE_ATTR_COMMAND,
+	INSTANCE_ATTR_WORKDIR,
 	INSTANCE_ATTR_ENV,
 	INSTANCE_ATTR_DATA,
 	INSTANCE_ATTR_NETDEV,
@@ -83,6 +84,7 @@ enum {
 
 static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_COMMAND] = { "command", BLOBMSG_TYPE_ARRAY },
+	[INSTANCE_ATTR_WORKDIR] = { "workdir", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_ENV] = { "env", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_DATA] = { "data", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_NETDEV] = { "netdev", BLOBMSG_TYPE_ARRAY },
@@ -362,6 +364,11 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = in->group;
 	}
 
+	if (in->workdir) {
+		argv[argc++] = "-W";
+		argv[argc++] = in->workdir;
+	}
+
 	if (in->capabilities) {
 		argv[argc++] = "-C";
 		argv[argc++] = in->capabilities;
@@ -632,6 +639,12 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	}
 	if (!in->has_jail && in->uid && setuid(in->uid)) {
 		ERROR("failed to set user id %d: %m\n", in->uid);
+		exit(127);
+	}
+
+	if (!in->has_jail && in->workdir && chdir(in->workdir)) {
+		ERROR("failed to change directory to %s for %s::%s: %m\n",
+		      in->workdir, in->srv->name, in->name);
 		exit(127);
 	}
 
@@ -1327,6 +1340,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (!blob_attr_equal(in->command, in_new->command))
 		return true;
 
+	if (string_changed(in->workdir, in_new->workdir))
+		return true;
+
 	if (string_changed(in->bundle, in_new->bundle))
 		return true;
 
@@ -1677,6 +1693,9 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 	if (in->group)
 		jail->argc += 2;
 
+	if (in->workdir)
+		jail->argc += 2;
+
 	if (in->extroot)
 		jail->argc += 2;
 
@@ -1789,6 +1808,12 @@ instance_config_parse(struct service_instance *in)
 			in->group = strdup(group);
 			in->gr_gid = p->gr_gid;
 		}
+	}
+
+	if (tb[INSTANCE_ATTR_WORKDIR]) {
+		in->workdir = strdup(blobmsg_get_string(tb[INSTANCE_ATTR_WORKDIR]));
+		if (!in->workdir)
+			return false;
 	}
 
 	if (tb[INSTANCE_ATTR_TRACE])
@@ -2007,6 +2032,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	instance_config_move_strdup(&in->tmpoverlaysize, in_src->tmpoverlaysize);
 	instance_config_move_strdup(&in->user, in_src->user);
 	instance_config_move_strdup(&in->group, in_src->group);
+	instance_config_move_strdup(&in->workdir, in_src->workdir);
 	instance_config_move_strdup(&in->jail.name, in_src->jail.name);
 	instance_config_move_strdup(&in->jail.hostname, in_src->jail.hostname);
 	instance_config_move_strdup(&in->jail.pidfile, in_src->jail.pidfile);
@@ -2114,6 +2140,7 @@ instance_free(struct service_instance *in)
 	free(in->data_blob);
 	free(in->user);
 	free(in->group);
+	free(in->workdir);
 	free(in->extroot);
 	free(in->overlaydir);
 	free(in->tmpoverlaysize);
@@ -2200,6 +2227,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_add_u64(b, "incarnation", in->incarnation);
 	if (in->command)
 		blobmsg_add_blob(b, in->command);
+	if (in->workdir)
+		blobmsg_add_string(b, "workdir", in->workdir);
 	if (in->bundle)
 		blobmsg_add_string(b, "bundle", in->bundle);
 	blobmsg_add_u32(b, "term_timeout", in->term_timeout);

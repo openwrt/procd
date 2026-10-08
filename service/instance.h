@@ -101,6 +101,7 @@ struct service_instance {
 	char *vrf;
 	unsigned int vrf_ifindex;
 	char *pidfile;
+	char *workdir;
 	char *extroot;
 	char *overlaydir;
 	char *tmpoverlaysize;
