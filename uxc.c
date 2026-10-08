@@ -159,6 +159,7 @@ static const struct option set_opts[] = {
 	{"module-version",	required_argument,	0,	OPT_MODULE_VERSION	},
 	{"mounts",		required_argument,	0,	OPT_MOUNTS		},
 	{"pid-file",		required_argument,	0,	OPT_PID_FILE		},
+	{"resources",		required_argument,	0,	OPT_RESOURCES		},
 	{"respawn",		required_argument,	0,	OPT_RESPAWN		},
 	{"stop-timeout",	required_argument,	0,	OPT_STOP_TIMEOUT	},
 	{"temp-overlay-size",	required_argument,	0,	OPT_TEMP_OVERLAY_SIZE	},
@@ -520,12 +521,12 @@ static void usage(void) {
 	printf("\t\t[--data-volume <vol>:<mnt>[:<size>]]... [--env <KEY>=<value>]...\n");
 	printf("\t\t[--respawn enable=0|1[,min=N,max=N,multiplier=N,"
 	       "max-retries=N,reset-period=N]]\n");
-	printf("\t\t[--stop-timeout <seconds>]\n");
+	printf("\t\t[--stop-timeout <seconds>] [--resources <file>]\n");
 	printf("\t\t[--unset <key>]...\t\t\tedit the settings of <conf> in one rewrite\n");
 	printf("\t\t\t\t\t\t--unset keys: autostart pidfile temp-overlay-size\n");
 	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
 	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol> env env=<KEY> respawn\n");
-	printf("\t\t\t\t\t\tstop-timeout\n");
+	printf("\t\t\t\t\t\tstop-timeout resources\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
@@ -555,6 +556,7 @@ enum {
 	CONF_ENV,
 	CONF_RESPAWN,
 	CONF_STOP_TIMEOUT,
+	CONF_RESOURCES,
 	__CONF_MAX,
 };
 
@@ -578,6 +580,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_ENV] = { .name = "env", .type = BLOBMSG_TYPE_TABLE },
 	[CONF_RESPAWN] = { .name = "respawn", .type = BLOBMSG_TYPE_TABLE },
 	[CONF_STOP_TIMEOUT] = { .name = "stop-timeout", .type = BLOBMSG_TYPE_INT32 },
+	[CONF_RESOURCES] = { .name = "resources", .type = BLOBMSG_TYPE_TABLE },
 };
 
 struct settings {
@@ -2216,6 +2219,95 @@ static void uxc_runtime_diagnose(const char *name)
 		fprintf(stderr, "uxc: the runtime of %s is gone\n", name);
 }
 
+enum {
+	UPDATE_REPLY_REASON,
+	UPDATE_REPLY_ERRNO,
+	__UPDATE_REPLY_MAX,
+};
+
+static const struct blobmsg_policy update_reply_policy[__UPDATE_REPLY_MAX] = {
+	[UPDATE_REPLY_REASON] = { .name = "reason", .type = BLOBMSG_TYPE_STRING },
+	[UPDATE_REPLY_ERRNO] = { .name = "errno", .type = BLOBMSG_TYPE_INT32 },
+};
+
+struct uxc_update_reply {
+	char *reason;
+	size_t rlen;
+	int err;
+};
+
+static void uxc_update_reply_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	struct uxc_update_reply *reply = req->priv;
+	struct blob_attr *tb[__UPDATE_REPLY_MAX];
+
+	blobmsg_parse(update_reply_policy, __UPDATE_REPLY_MAX, tb, blobmsg_data(msg),
+		      blobmsg_len(msg));
+	if (tb[UPDATE_REPLY_REASON])
+		snprintf(reply->reason, reply->rlen, "%s",
+			 blobmsg_get_string(tb[UPDATE_REPLY_REASON]));
+
+	if (tb[UPDATE_REPLY_ERRNO])
+		reply->err = blobmsg_get_u32(tb[UPDATE_REPLY_ERRNO]);
+}
+
+static int uxc_update_blob(const char *name, struct blob_attr *table, char *reason,
+			   size_t rlen, int *err)
+{
+	struct uxc_update_reply reply = { reason, rlen, 0 };
+	static struct blob_buf req;
+	struct blob_attr *cur;
+	char *objname;
+	int rem, ret;
+	uint32_t id;
+
+	snprintf(reason, rlen, "linux.resources");
+	*err = 0;
+
+	if (asprintf(&objname, "container.%s", name) == -1)
+		return -ENOMEM;
+
+	ret = ubus_lookup_id(ctx, objname, &id);
+	free(objname);
+	if (ret) {
+		uxc_runtime_diagnose(name);
+		*err = ENOENT;
+		return -ENOENT;
+	}
+
+	blob_buf_init(&req, 0);
+	blobmsg_for_each_attr(cur, table, rem)
+		blobmsg_add_blob(&req, cur);
+
+	ret = ubus_invoke(ctx, id, "update", req.head, uxc_update_reply_cb,
+			  &reply, 3000);
+	blob_buf_free(&req);
+
+	switch (ret) {
+	case UBUS_STATUS_OK:
+		return 0;
+	case UBUS_STATUS_PERMISSION_DENIED:
+		ret = -EPERM;
+		break;
+	case UBUS_STATUS_NOT_SUPPORTED:
+		ret = -ENOTSUP;
+		break;
+	case UBUS_STATUS_INVALID_ARGUMENT:
+		ret = -EINVAL;
+		break;
+	case UBUS_STATUS_NOT_FOUND:
+		ret = -ENOENT;
+		break;
+	default:
+		ret = -EIO;
+		break;
+	}
+
+	*err = reply.err ?: -ret;
+
+	return ret;
+}
+
 static int uxc_invoker_pidfd(void)
 {
 	pid_t ppid;
@@ -2248,6 +2340,10 @@ struct settings_key {
 	int (*unset)(const struct settings_key *key, const char *id,
 		     struct blob_attr **reg_tb, struct settings *us, const char *name);
 	int (*check)(struct blob_attr *value, struct blob_attr **reg_tb);
+	bool (*merge)(struct blob_buf *out, struct blob_attr *old,
+		      struct blob_attr *patch);
+	int (*apply)(const struct settings_key *key, struct blob_attr *value,
+		     struct blob_attr **reg_tb, struct settings *us, const char *name);
 	int (*commit)(const struct settings_key *key, struct blob_attr *value,
 		      struct blob_attr **reg_tb, struct settings *us, const char *name);
 };
@@ -2662,6 +2758,250 @@ static int stop_timeout_commit(const struct settings_key *key, struct blob_attr 
 	return 0;
 }
 
+struct resources_leaf {
+	const char *table;
+	const char *leaf;
+};
+
+static const struct resources_leaf resources_leaves[] = {
+	{ "memory", "limit" },
+	{ "memory", "swap" },
+	{ "cpu", "quota" },
+	{ "cpu", "period" },
+	{ "cpu", "burst" },
+	{ "pids", "limit" },
+};
+
+static bool resources_leaf_known(const char *table, const char *leaf)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(resources_leaves); i++) {
+		if (strcmp(resources_leaves[i].table, table))
+			continue;
+
+		if (!leaf || !strcmp(resources_leaves[i].leaf, leaf))
+			return true;
+	}
+
+	return false;
+}
+
+static long long resources_leaf_value(struct blob_attr *leaf)
+{
+	switch (blobmsg_type(leaf)) {
+	case BLOBMSG_TYPE_INT32:
+		return (int32_t)blobmsg_get_u32(leaf);
+	case BLOBMSG_TYPE_INT64:
+		return (int64_t)blobmsg_get_u64(leaf);
+	}
+
+	return 0;
+}
+
+static int resources_table_validate(const char *table, struct blob_attr *value)
+{
+	struct blob_attr *cur;
+	long long v;
+	int rem;
+
+	blobmsg_for_each_attr(cur, value, rem) {
+		if (!resources_leaf_known(table, blobmsg_name(cur)) ||
+		    blob_key_find(value, blobmsg_name(cur)) != cur)
+			return -EINVAL;
+
+		v = resources_leaf_value(cur);
+		if (v != -1 && v <= 0)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int resources_validate(const struct settings_key *key, struct blob_attr *value,
+			      struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	struct blob_attr *cur;
+	int rem, ret;
+
+	blobmsg_for_each_attr(cur, value, rem) {
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_TABLE ||
+		    !resources_leaf_known(blobmsg_name(cur), NULL) ||
+		    blob_key_find(value, blobmsg_name(cur)) != cur)
+			return -EINVAL;
+
+		ret = resources_table_validate(blobmsg_name(cur), cur);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static bool resources_leaf_dropped(struct blob_attr *leaf)
+{
+	return leaf && resources_leaf_value(leaf) == -1;
+}
+
+static int resources_leaves_kept(struct blob_attr *old, struct blob_attr *patch)
+{
+	struct blob_attr *cur;
+	int rem, n = 0;
+
+	blobmsg_for_each_attr(cur, old, rem)
+		if (!resources_leaf_dropped(blob_key_find(patch, blobmsg_name(cur))))
+			n++;
+
+	blobmsg_for_each_attr(cur, patch, rem)
+		if (!blob_key_find(old, blobmsg_name(cur)) && !resources_leaf_dropped(cur))
+			n++;
+
+	return n;
+}
+
+static bool resources_table_merge(struct blob_buf *out, const char *name,
+				  struct blob_attr *old, struct blob_attr *patch)
+{
+	struct blob_attr *cur, *rep;
+	bool changed = false;
+	void *c;
+	int rem;
+
+	if (!resources_leaves_kept(old, patch))
+		return old != NULL;
+
+	c = blobmsg_open_table(out, name);
+
+	blobmsg_for_each_attr(cur, old, rem) {
+		rep = blob_key_find(patch, blobmsg_name(cur));
+		if (resources_leaf_dropped(rep)) {
+			changed = true;
+			continue;
+		}
+
+		if (!rep) {
+			blobmsg_add_blob(out, cur);
+			continue;
+		}
+
+		if (!blob_attr_equal(cur, rep))
+			changed = true;
+
+		blobmsg_add_blob(out, rep);
+	}
+
+	blobmsg_for_each_attr(cur, patch, rem) {
+		if (blob_key_find(old, blobmsg_name(cur)) || resources_leaf_dropped(cur))
+			continue;
+
+		blobmsg_add_blob(out, cur);
+		changed = true;
+	}
+
+	blobmsg_close_table(out, c);
+
+	return changed;
+}
+
+static bool resources_merge(struct blob_buf *out, struct blob_attr *old,
+			    struct blob_attr *patch)
+{
+	struct blob_attr *cur;
+	bool changed = false;
+	int rem, n = 0;
+	void *c;
+
+	blobmsg_for_each_attr(cur, old, rem)
+		n += resources_leaves_kept(cur, blob_key_find(patch, blobmsg_name(cur)));
+
+	blobmsg_for_each_attr(cur, patch, rem)
+		if (!blob_key_find(old, blobmsg_name(cur)))
+			n += resources_leaves_kept(NULL, cur);
+
+	if (!n)
+		return old != NULL;
+
+	c = blobmsg_open_table(out, "resources");
+
+	blobmsg_for_each_attr(cur, old, rem)
+		if (resources_table_merge(out, blobmsg_name(cur), cur,
+					  blob_key_find(patch, blobmsg_name(cur))))
+			changed = true;
+
+	blobmsg_for_each_attr(cur, patch, rem)
+		if (!blob_key_find(old, blobmsg_name(cur)) &&
+		    resources_table_merge(out, blobmsg_name(cur), NULL, cur))
+			changed = true;
+
+	blobmsg_close_table(out, c);
+
+	return changed;
+}
+
+static void resources_leaf_live(struct blob_buf *out, const char *table,
+				struct blob_attr *leaf, bool negate)
+{
+	const char *name = blobmsg_name(leaf);
+
+	if (!negate && !resources_leaf_dropped(leaf)) {
+		blobmsg_add_blob(out, leaf);
+		return;
+	}
+
+	if (strcmp(table, "cpu") || !strcmp(name, "quota")) {
+		blobmsg_add_u32(out, name, (uint32_t)-1);
+		return;
+	}
+
+	if (!strcmp(name, "burst"))
+		blobmsg_add_u32(out, name, 0);
+}
+
+static void resources_live(struct blob_buf *out, struct blob_attr *table, bool negate)
+{
+	struct blob_attr *sub, *leaf;
+	int rem, lrem;
+	void *c;
+
+	blob_buf_init(out, 0);
+	blobmsg_for_each_attr(sub, table, rem) {
+		c = blobmsg_open_table(out, blobmsg_name(sub));
+		blobmsg_for_each_attr(leaf, sub, lrem)
+			resources_leaf_live(out, blobmsg_name(sub), leaf, negate);
+		blobmsg_close_table(out, c);
+	}
+}
+
+static int resources_apply(const struct settings_key *key, struct blob_attr *value,
+			   struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	bool negate = blobmsg_type(value) == BLOBMSG_TYPE_STRING;
+	struct runtime_state *rs = NULL;
+	struct blob_attr *table = value;
+	static struct blob_buf live;
+	char reason[128];
+	int ret, err;
+
+	rs = avl_find_element(&runtime, name, rs, avl);
+	if (!runtime_live(rs))
+		return 0;
+
+	if (negate) {
+		table = us ? us->tb[CONF_RESOURCES] : NULL;
+		if (!table)
+			return 0;
+	}
+
+	resources_live(&live, table, negate);
+	ret = uxc_update_blob(name, live.head, reason, sizeof(reason), &err);
+	blob_buf_free(&live);
+
+	if (ret)
+		fprintf(stderr, "uxc: resources rejected: %s: %s\n", reason, strerror(err));
+
+	return ret;
+}
+
 static const struct settings_key settings_keys[] = {
 	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
@@ -2679,6 +3019,9 @@ static const struct settings_key settings_keys[] = {
 	  .validate = respawn_validate, .check = respawn_check },
 	{ .name = "stop-timeout", .type = BLOBMSG_TYPE_INT32,
 	  .validate = stop_timeout_validate, .commit = stop_timeout_commit },
+	{ .name = "resources", .type = BLOBMSG_TYPE_TABLE,
+	  .validate = resources_validate, .merge = resources_merge,
+	  .apply = resources_apply },
 };
 
 static const struct settings_key *settings_key_find(const char *name)
@@ -2918,6 +3261,12 @@ static bool settings_kept_copy(struct blob_buf *out, struct blob_attr *file,
 			continue;
 		}
 
+		if (key && key->merge && blob_has_key(patch, key->name)) {
+			if (key->merge(out, cur, blob_key_find(patch, key->name)))
+				changed = true;
+			continue;
+		}
+
 		if (blob_has_key(patch, blobmsg_name(cur)))
 			continue;
 
@@ -2943,8 +3292,14 @@ static bool settings_patch_add(struct blob_buf *out, struct blob_attr *file,
 	blobmsg_for_each_attr(cur, patch, rem) {
 		key = settings_key_find(blobmsg_name(cur));
 		old = blob_key_find(file, blobmsg_name(cur));
-		if (old && key->entry)
+		if (old && (key->entry || key->merge))
 			continue;
+
+		if (key->merge) {
+			if (key->merge(out, NULL, cur))
+				changed = true;
+			continue;
+		}
 
 		if (!blob_attr_equal(old, cur))
 			changed = true;
@@ -2953,6 +3308,37 @@ static bool settings_patch_add(struct blob_buf *out, struct blob_attr *file,
 	}
 
 	return changed;
+}
+
+static int settings_apply_run(struct blob_attr *patch, struct blob_attr *unset,
+			      struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	const struct settings_key *key;
+	struct blob_attr *cur;
+	const char *id;
+	int rem, ret;
+
+	blobmsg_for_each_attr(cur, patch, rem) {
+		key = settings_key_find(blobmsg_name(cur));
+		if (!key->apply)
+			continue;
+
+		ret = key->apply(key, cur, reg_tb, us, name);
+		if (ret)
+			return ret;
+	}
+
+	blobmsg_for_each_attr(cur, unset, rem) {
+		key = settings_unset_find(blobmsg_get_string(cur), &id);
+		if (!key->apply)
+			continue;
+
+		ret = key->apply(key, cur, reg_tb, us, name);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int settings_commit_run(struct blob_attr *patch, struct blob_attr *unset,
@@ -3075,6 +3461,9 @@ static int settings_edit(const char *name, struct blob_attr *patch, struct blob_
 		changed = true;
 
 	ret = settings_result_check(out.head, patch, unset, reg_tb);
+	if (!ret)
+		ret = settings_apply_run(patch, unset, reg_tb, us, name);
+
 	if (ret) {
 		blob_buf_free(&out);
 		return ret;
@@ -3120,9 +3509,11 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	char envpath[PATH_MAX];
 	char hostsbind[PATH_MAX];
 	char provbind[2 * PATH_MAX];
+	char reason[128];
 	struct blob_attr *ptb[__PROV_MAX];
 	struct runtime_state *rsstate = NULL;
 	struct uxc_wait_state wait_state;
+	int err;
 
 	void *in, *ins, *j, *m;
 
@@ -3320,6 +3711,23 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		uxc_instance_drop(name);
 		return -ETIMEDOUT;
 	}
+
+	if (!usettings || !usettings->tb[CONF_RESOURCES])
+		return 0;
+
+	ret = uxc_update_blob(name, usettings->tb[CONF_RESOURCES], reason,
+			      sizeof(reason), &err);
+	if (!ret)
+		return 0;
+
+	if (immediately) {
+		fprintf(stderr, "uxc: warning: resources of %s rejected: %s: %s\n",
+			name, reason, strerror(err));
+		return 0;
+	}
+
+	fprintf(stderr, "uxc: resources rejected: %s: %s\n", reason, strerror(err));
+	uxc_instance_drop(name);
 
 	return ret;
 }
@@ -3714,9 +4122,8 @@ static int uxc_exec(const char *name, const char *process_file,
 static int uxc_update(const char *name, const char *resources_file)
 {
 	static struct blob_buf req;
-	char *objname;
-	uint32_t id;
-	int ret;
+	char reason[128];
+	int ret, err;
 
 	if (!resources_file) {
 		fprintf(stderr, "uxc: update requires --resources <file>\n");
@@ -3730,22 +4137,12 @@ static int uxc_update(const char *name, const char *resources_file)
 		return -EINVAL;
 	}
 
-	if (asprintf(&objname, "container.%s", name) == -1) {
-		blob_buf_free(&req);
-		return -ENOMEM;
-	}
-
-	ret = ubus_lookup_id(ctx, objname, &id);
-	free(objname);
-	if (ret) {
-		blob_buf_free(&req);
-		uxc_runtime_diagnose(name);
-		return -ENOENT;
-	}
-
-	ret = ubus_invoke(ctx, id, "update", req.head, NULL, NULL, 3000);
+	ret = uxc_update_blob(name, req.head, reason, sizeof(reason), &err);
 	blob_buf_free(&req);
-	return ret ? -EIO : 0;
+	if (ret)
+		fprintf(stderr, "uxc: resources rejected: %s: %s\n", reason, strerror(err));
+
+	return ret;
 }
 
 static int uxc_kill(char *name, int signal, bool all)
@@ -4531,7 +4928,7 @@ static void patch_members_add(struct blob_buf *patch, const char *name,
 static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 			  struct blob_buf *unset, const char **name)
 {
-	static struct blob_buf vols, envs, respawn;
+	static struct blob_buf vols, envs, respawn, resources;
 	int c, ret = 0;
 
 	if (argc < 2 || argv[1][0] == '-')
@@ -4544,6 +4941,7 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 	blob_buf_init(&vols, 0);
 	blob_buf_init(&envs, 0);
 	blob_buf_init(&respawn, 0);
+	blob_buf_init(&resources, 0);
 	while (!ret && (c = getopt_long(argc, argv, "+", set_opts, NULL)) != -1) {
 		switch (c) {
 		case OPT_AUTOSTART:
@@ -4579,6 +4977,10 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 		case OPT_STOP_TIMEOUT:
 			ret = stop_timeout_arg_add(patch, optarg);
 			break;
+		case OPT_RESOURCES:
+			if (!blobmsg_add_json_from_file(&resources, optarg))
+				ret = -EINVAL;
+			break;
 		case OPT_UNSET:
 			blobmsg_add_string(unset, NULL, optarg);
 			break;
@@ -4595,11 +4997,13 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 		patch_members_add(patch, "data-volumes", vols.head, BLOBMSG_TYPE_ARRAY);
 		patch_members_add(patch, "env", envs.head, BLOBMSG_TYPE_TABLE);
 		patch_members_add(patch, "respawn", respawn.head, BLOBMSG_TYPE_TABLE);
+		patch_members_add(patch, "resources", resources.head, BLOBMSG_TYPE_TABLE);
 	}
 
 	blob_buf_free(&vols);
 	blob_buf_free(&envs);
 	blob_buf_free(&respawn);
+	blob_buf_free(&resources);
 
 	return ret;
 }
