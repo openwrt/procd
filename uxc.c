@@ -77,17 +77,6 @@ struct runtime_state {
 	struct blob_attr *ocistate;
 };
 
-struct settings {
-	struct avl_node avl;
-	char *container_name;
-	const char *fname;
-	char *tmprwsize;
-	char *writepath;
-	signed char autostart;
-	struct blob_attr *volumes;
-	struct blob_attr *file;
-};
-
 enum {
 	OPT_CONSOLE_SOCKET	= 0x100,
 	OPT_NO_PIVOT,
@@ -496,6 +485,18 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_ORIGIN] = { .name = "origin", .type = BLOBMSG_TYPE_STRING },
 };
 
+struct settings {
+	struct avl_node avl;
+	char *container_name;
+	const char *fname;
+	char *tmprwsize;
+	char *writepath;
+	signed char autostart;
+	struct blob_attr *volumes;
+	struct blob_attr *file;
+	struct blob_attr *tb[__CONF_MAX];
+};
+
 enum {
 	PROV_SOURCE,
 	PROV_DESTINATION,
@@ -604,6 +605,7 @@ static int settings_add(void)
 		s->volumes = tb[CONF_VOLUMES];
 		s->fname = blobmsg_name(cur);
 		s->file = cur;
+		memcpy(s->tb, tb, sizeof(s->tb));
 
 		err = avl_insert(&settings, &s->avl);
 		if (err) {
@@ -684,16 +686,21 @@ static struct blob_attr *registration_find(const char *name, struct blob_attr **
 	return NULL;
 }
 
-static bool blob_has_key(struct blob_attr *root, const char *name)
+static struct blob_attr *blob_key_find(struct blob_attr *root, const char *name)
 {
 	struct blob_attr *cur;
 	int rem;
 
-	blob_for_each_attr(cur, root, rem)
+	blobmsg_for_each_attr(cur, root, rem)
 		if (!strcmp(blobmsg_name(cur), name))
-			return true;
+			return cur;
 
-	return false;
+	return NULL;
+}
+
+static bool blob_has_key(struct blob_attr *root, const char *name)
+{
+	return !!blob_key_find(root, name);
 }
 
 enum {
@@ -1985,6 +1992,258 @@ static int uxc_invoker_pidfd(void)
 	return fd;
 }
 
+struct settings_key {
+	const char *name;
+	const char *excludes;
+	int type;
+	int (*validate)(const struct settings_key *key, struct blob_attr *value,
+			struct blob_attr **reg_tb, struct settings *us, const char *name);
+	int (*commit)(const struct settings_key *key, struct blob_attr *value,
+		      struct blob_attr **reg_tb, struct settings *us, const char *name);
+};
+
+static int abspath_validate(const struct settings_key *key, struct blob_attr *value,
+			    struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	if (blobmsg_get_string(value)[0] != '/')
+		return -EINVAL;
+
+	return 0;
+}
+
+static int size_validate(const struct settings_key *key, struct blob_attr *value,
+			 struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	if (parse_size_bytes(blobmsg_get_string(value)) <= 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int string_array_validate(const struct settings_key *key, struct blob_attr *value,
+				 struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, value, rem)
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING)
+			return -EINVAL;
+
+	return 0;
+}
+
+static const struct settings_key settings_keys[] = {
+	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
+	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
+	{ .name = "temp-overlay-size", .excludes = "write-overlay-path",
+	  .type = BLOBMSG_TYPE_STRING, .validate = size_validate },
+	{ .name = "write-overlay-path", .excludes = "temp-overlay-size",
+	  .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
+	{ .name = "volumes", .type = BLOBMSG_TYPE_ARRAY, .validate = string_array_validate },
+};
+
+static const struct settings_key *settings_key_find(const char *name)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(settings_keys); i++)
+		if (!strcmp(settings_keys[i].name, name))
+			return &settings_keys[i];
+
+	return NULL;
+}
+
+static int settings_patch_check(struct blob_attr *patch, struct blob_attr **reg_tb,
+				struct settings *us, const char *name)
+{
+	const struct settings_key *key;
+	struct blob_attr *cur;
+	int rem, ret;
+
+	blobmsg_for_each_attr(cur, patch, rem) {
+		key = settings_key_find(blobmsg_name(cur));
+		if (!key || blobmsg_type(cur) != key->type)
+			return -EINVAL;
+
+		if (key->excludes && blob_has_key(patch, key->excludes))
+			return -EINVAL;
+
+		if (!key->validate)
+			continue;
+
+		ret = key->validate(key, cur, reg_tb, us, name);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int settings_unset_check(struct blob_attr *unset)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, unset, rem)
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING ||
+		    !settings_key_find(blobmsg_get_string(cur)))
+			return -EINVAL;
+
+	return 0;
+}
+
+static bool settings_unset_has(struct blob_attr *unset, const char *name)
+{
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, unset, rem)
+		if (!strcmp(blobmsg_get_string(cur), name))
+			return true;
+
+	return false;
+}
+
+static bool settings_kept_copy(struct blob_buf *out, struct blob_attr *file,
+			       struct blob_attr *patch, struct blob_attr *unset)
+{
+	const struct settings_key *key;
+	struct blob_attr *cur;
+	bool dropped = false;
+	int rem;
+
+	blobmsg_for_each_attr(cur, file, rem) {
+		if (!strcmp(blobmsg_name(cur), "name"))
+			continue;
+
+		if (blob_has_key(patch, blobmsg_name(cur)))
+			continue;
+
+		key = settings_key_find(blobmsg_name(cur));
+		if (key && key->excludes && blob_has_key(patch, key->excludes))
+			continue;
+
+		if (settings_unset_has(unset, blobmsg_name(cur))) {
+			dropped = true;
+			continue;
+		}
+
+		blobmsg_add_blob(out, cur);
+	}
+
+	return dropped;
+}
+
+static int settings_commit_run(struct blob_attr *patch, struct blob_attr *unset,
+			       struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	const struct settings_key *key;
+	struct blob_attr *cur;
+	int rem, ret;
+
+	blobmsg_for_each_attr(cur, patch, rem) {
+		key = settings_key_find(blobmsg_name(cur));
+		if (!key->commit)
+			continue;
+
+		ret = key->commit(key, cur, reg_tb, us, name);
+		if (ret)
+			return ret;
+	}
+
+	blobmsg_for_each_attr(cur, unset, rem) {
+		key = settings_key_find(blobmsg_get_string(cur));
+		if (!key->commit)
+			continue;
+
+		ret = key->commit(key, cur, reg_tb, us, name);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int json_file_write(const char *path, struct blob_attr *root, mode_t mode)
+{
+	char *json, *buf;
+	int len, ret;
+
+	json = blobmsg_format_json_indent(root, true, 0);
+	if (!json)
+		return -ENOMEM;
+
+	len = asprintf(&buf, "%s\n", json);
+	free(json);
+	if (len < 0)
+		return -ENOMEM;
+
+	ret = file_write_atomic(path, buf, len, mode);
+	free(buf);
+
+	return ret;
+}
+
+static int settings_edit(const char *name, struct blob_attr *patch, struct blob_attr *unset)
+{
+	struct blob_attr *reg_tb[__CONF_MAX];
+	struct blob_attr *reg, *cur;
+	struct settings *us = NULL;
+	static struct blob_buf out;
+	char path[PATH_MAX];
+	const char *fpath;
+	bool changed;
+	int rem, ret;
+
+	reg = registration_find(name, reg_tb);
+	if (!reg)
+		return -ENOENT;
+
+	us = avl_find_element(&settings, name, us, avl);
+
+	ret = settings_patch_check(patch, reg_tb, us, name);
+	if (ret)
+		return ret;
+
+	ret = settings_unset_check(unset);
+	if (ret)
+		return ret;
+
+	blob_buf_init(&out, 0);
+	blobmsg_add_string(&out, "name", name);
+	changed = settings_kept_copy(&out, us ? us->file : NULL, patch, unset);
+
+	blobmsg_for_each_attr(cur, patch, rem) {
+		if (!blob_attr_equal(blob_key_find(us ? us->file : NULL, blobmsg_name(cur)), cur))
+			changed = true;
+
+		blobmsg_add_blob(&out, cur);
+	}
+
+	if (!changed) {
+		blob_buf_free(&out);
+		return 0;
+	}
+
+	fpath = us ? us->fname : path;
+	if (!us)
+		ret = settings_path_new(blobmsg_name(reg), name, path, sizeof(path));
+
+	if (!ret)
+		ret = json_file_write(fpath, out.head, 0600);
+
+	blob_buf_free(&out);
+	if (ret)
+		return ret;
+
+	ret = settings_commit_run(patch, unset, reg_tb, us, name);
+	if (ret)
+		return ret;
+
+	return 1;
+}
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode)
 {
@@ -2688,36 +2947,45 @@ static int uxc_kill(char *name, int signal, bool all)
 }
 
 
+static int registration_write(const char *name, struct blob_attr *root)
+{
+	char *fname;
+	int ret;
+
+	if (mkdir(confdir, 0755) && errno != EEXIST)
+		return -errno;
+
+	if (asprintf(&fname, "%s/%s.json", confdir, name) == -1)
+		return -ENOMEM;
+
+	ret = json_file_write(fname, root, 0644);
+	free(fname);
+	if (ret)
+		return ret;
+
+	return 1;
+}
+
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
 	struct settings *usettings = NULL;
 	struct blob_attr *tb[__CONF_MAX];
 	char *curvol, *tmp, *mnttok;
 	static struct blob_buf req;
-	const char *cfname = NULL;
-	const char *sfname = NULL;
 	struct blob_attr *found;
-	char sfpath[PATH_MAX];
-	struct blob_attr *cur;
-	char *fname = NULL;
 	struct stat sb;
 	void *mntarr;
 	int ret;
-	int rem;
-	int f;
 
 	/* nothing to do */
 	if (!path && (autostart<0) && !pidfile && !tmprwsize && !writepath && !requiredmounts)
 		return 0;
 
 	found = registration_find(name, tb);
-	if (found)
-		cfname = blobmsg_name(found);
-
-	if (cfname && path)
+	if (found && path)
 		return -EEXIST;
 
-	if (!cfname && !path)
+	if (!found && !path)
 		return -ENOENT;
 
 	if (path) {
@@ -2726,60 +2994,17 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 
 		if ((sb.st_mode & S_IFMT) != S_IFDIR)
 			return -ENOTDIR;
-	}
 
-	usettings = avl_find_element(&settings, name, usettings, avl);
-	if (path && usettings)
-		return -EIO;
-
-	if (usettings) {
-		sfname = usettings->fname;
-		if (!tmprwsize && !writepath) {
-			if (usettings->tmprwsize) {
-				tmprwsize = usettings->tmprwsize;
-				writepath = NULL;
-			}
-			if (usettings->writepath) {
-				writepath = usettings->writepath;
-				tmprwsize = NULL;
-			}
-		}
-		if (usettings->autostart >= 0 && autostart < 0)
-			autostart = !!(usettings->autostart);
-	}
-
-	if (path) {
-		ret = mkdir(confdir, 0755);
-
-		if (ret && errno != EEXIST)
-			return -errno;
-
-		if (asprintf(&fname, "%s/%s.json", confdir, name) == -1)
-			return -ENOMEM;
-
-		f = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-		if (f < 0)
-			return -errno;
-
-		free(fname);
-	} else {
-		if (sfname) {
-			f = open(sfname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-		} else {
-			ret = settings_path_new(cfname, name, sfpath, sizeof(sfpath));
-			if (ret)
-				return ret;
-
-			f = open(sfpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-		}
-		if (f < 0)
-			return -errno;
+		usettings = avl_find_element(&settings, name, usettings, avl);
+		if (usettings)
+			return -EIO;
 	}
 
 	blob_buf_init(&req, 0);
-	blobmsg_add_string(&req, "name", name);
-	if (path)
+	if (path) {
+		blobmsg_add_string(&req, "name", name);
 		blobmsg_add_string(&req, "path", path);
+	}
 
 	if (autostart >= 0)
 		blobmsg_add_u8(&req, "autostart", !!autostart);
@@ -2805,31 +3030,14 @@ static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
 		blobmsg_close_array(&req, mntarr);
 	}
 
-	if (usettings) {
-		blobmsg_for_each_attr(cur, usettings->file, rem) {
-			if (blob_has_key(req.head, blobmsg_name(cur)))
-				continue;
-
-			if (tmprwsize && !strcmp(blobmsg_name(cur), "write-overlay-path"))
-				continue;
-
-			if (writepath && !strcmp(blobmsg_name(cur), "temp-overlay-size"))
-				continue;
-
-			blobmsg_add_blob(&req, cur);
-		}
-	}
-
-	tmp = blobmsg_format_json_indent(req.head, true, 0);
-	if (tmp) {
-		dprintf(f, "%s\n", tmp);
-		free(tmp);
-	}
+	if (path)
+		ret = registration_write(name, req.head);
+	else
+		ret = settings_edit(name, req.head, NULL);
 
 	blob_buf_free(&req);
-	close(f);
 
-	return 1;
+	return ret;
 }
 
 enum {
