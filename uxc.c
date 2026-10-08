@@ -298,12 +298,14 @@ static struct ubus_context *ctx;
 #define UXC_WAIT_OK		1
 #define UXC_WAIT_STOPPED	2
 #define UXC_WAIT_FAILED		3
+#define UXC_WAIT_GONE		4
 
 struct uxc_wait_state {
 	const char *service;
 	const char *instance;
 	const char *success_event;
 	const char *fail_event;
+	const char *object;
 	char reason[96];
 	uint64_t since_incarnation;
 	int result;
@@ -376,6 +378,41 @@ static void uxc_wait_event_cb(struct ubus_context *uctx,
 	uloop_end();
 }
 
+static const char *uxc_object_remove_path(struct blob_attr *msg)
+{
+	static const struct blobmsg_policy pol = {
+		.name = "path", .type = BLOBMSG_TYPE_STRING
+	};
+	struct blob_attr *tb;
+
+	if (!msg)
+		return NULL;
+
+	blobmsg_parse(&pol, 1, &tb, blob_data(msg), blob_len(msg));
+	if (!tb)
+		return NULL;
+
+	return blobmsg_get_string(tb);
+}
+
+static void uxc_wait_gone_cb(struct ubus_context *uctx,
+			     struct ubus_event_handler *ev,
+			     const char *type, struct blob_attr *msg)
+{
+	struct uxc_wait_state *w = active_wait;
+	const char *path;
+
+	if (!w || !w->object)
+		return;
+
+	path = uxc_object_remove_path(msg);
+	if (!path || strcmp(path, w->object))
+		return;
+
+	w->result = UXC_WAIT_GONE;
+	uloop_end();
+}
+
 static const char *uxc_wait_why(struct uxc_wait_state *w)
 {
 	static char buf[160];
@@ -393,6 +430,7 @@ static const char *uxc_wait_why(struct uxc_wait_state *w)
 }
 
 static struct ubus_event_handler uxc_wait_ev;
+static struct ubus_event_handler uxc_wait_gone_ev;
 static bool uxc_wait_armed;
 static bool uxc_uloop_ready;
 
@@ -414,6 +452,12 @@ static int uxc_wait_arm(struct uxc_wait_state *w)
 		uxc_wait_ev.cb = uxc_wait_event_cb;
 		if (ubus_register_event_handler(ctx, &uxc_wait_ev, "instance.*"))
 			return -EIO;
+		uxc_wait_gone_ev.cb = uxc_wait_gone_cb;
+		if (ubus_register_event_handler(ctx, &uxc_wait_gone_ev,
+						"ubus.object.remove")) {
+			ubus_unregister_event_handler(ctx, &uxc_wait_ev);
+			return -EIO;
+		}
 		uxc_wait_armed = true;
 	}
 	active_wait = w;
@@ -424,12 +468,14 @@ static int uxc_wait_run(struct uxc_wait_state *w, unsigned int timeout_ms)
 {
 	struct uloop_timeout t = { .cb = uxc_wait_timeout_cb };
 
-	uloop_timeout_set(&t, timeout_ms);
+	if (timeout_ms)
+		uloop_timeout_set(&t, timeout_ms);
 	if (w->result == UXC_WAIT_UNSET)
 		uloop_run();
-	uloop_timeout_cancel(&t);
+	if (timeout_ms)
+		uloop_timeout_cancel(&t);
 	if (w->result == UXC_WAIT_UNSET)
-		return -ETIMEDOUT;
+		return timeout_ms ? -ETIMEDOUT : -EINTR;
 	return 0;
 }
 
@@ -2067,16 +2113,13 @@ static void uxc_object_remove_cb(struct ubus_context *uctx,
 				 struct ubus_event_handler *ev,
 				 const char *type, struct blob_attr *msg)
 {
-	static const struct blobmsg_policy pol = {
-		.name = "path", .type = BLOBMSG_TYPE_STRING
-	};
-	struct blob_attr *tb;
+	const char *path;
 
-	if (!msg || !uxc_delete_path)
+	if (!uxc_delete_path)
 		return;
 
-	blobmsg_parse(&pol, 1, &tb, blob_data(msg), blob_len(msg));
-	if (!tb || strcmp(blobmsg_get_string(tb), uxc_delete_path))
+	path = uxc_object_remove_path(msg);
+	if (!path || strcmp(path, uxc_delete_path))
 		return;
 
 	uloop_end();
@@ -3694,38 +3737,50 @@ static int uxc_kill(char *name, int signal, bool all)
 	if (asprintf(&objname, "container.%s", name) == -1)
 		return -ENOMEM;
 
-	ret = ubus_lookup_id(ctx, objname, &id);
-	free(objname);
-	if (ret) {
+	if (ubus_lookup_id(ctx, objname, &id)) {
 		uxc_runtime_diagnose(name);
-		return -ENOENT;
+		ret = -ENOENT;
+		goto out;
 	}
 
 	if (wait_stop) {
 		memset(&wait_state, 0, sizeof(wait_state));
 		wait_state.service = name;
 		wait_state.instance = name;
+		wait_state.object = objname;
 		wait_state.success_event = "instance.stopped";
 		wait_state.since_incarnation = rsstate->incarnation;
-		if (uxc_wait_arm(&wait_state))
-			fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
+		ret = uxc_wait_arm(&wait_state);
+		if (ret) {
+			fprintf(stderr, "uxc: cannot watch for %s to stop\n", name);
+			goto out;
+		}
 	}
 
 	ret = ubus_invoke(ctx, id, "kill", req.head, NULL, NULL, 3000);
 	if (ret) {
 		if (wait_stop)
 			uxc_wait_disarm();
-		return (ret == UBUS_STATUS_NOT_FOUND) ? -ENOENT : -EIO;
+		ret = (ret == UBUS_STATUS_NOT_FOUND) ? -ENOENT : -EIO;
+		goto out;
 	}
 
 	if (wait_stop) {
-		uxc_wait_run(&wait_state, 150000);
+		uxc_wait_run(&wait_state, 0);
 		uxc_wait_disarm();
-		if (wait_state.result == UXC_WAIT_UNSET)
-			fprintf(stderr, "uxc: warning: timed out waiting for %s to stop\n", name);
+		if (wait_state.result == UXC_WAIT_GONE) {
+			fprintf(stderr, "uxc: the runtime of %s exited before reporting a stop\n",
+				name);
+			ret = -EIO;
+		} else if (wait_state.result == UXC_WAIT_UNSET) {
+			fprintf(stderr, "uxc: interrupted while waiting for %s to stop\n", name);
+			ret = -EINTR;
+		}
 	}
 
-	return 0;
+out:
+	free(objname);
+	return ret;
 }
 
 
