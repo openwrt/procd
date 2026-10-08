@@ -973,6 +973,462 @@ static void runtime_free(void)
 	return;
 }
 
+enum {
+	VOL_NAME,
+	VOL_MOUNTPOINT,
+	VOL_SIZE,
+	__VOL_MAX,
+};
+
+static const struct blobmsg_policy vol_policy[__VOL_MAX] = {
+	[VOL_NAME] = { .name = "name", .type = BLOBMSG_TYPE_STRING },
+	[VOL_MOUNTPOINT] = { .name = "mountpoint", .type = BLOBMSG_TYPE_STRING },
+	[VOL_SIZE] = { .name = "size", .type = BLOBMSG_TYPE_STRING },
+};
+
+#define UVOL_EXEC_TIMEOUT_DEFAULT	120
+#define UVOL_TIMEOUT_MARGIN_MS		10000
+
+enum {
+	UVOL_CODE,
+	UVOL_READY,
+	UVOL_META,
+	__UVOL_MAX,
+};
+
+static const struct blobmsg_policy uvol_policy[__UVOL_MAX] = {
+	[UVOL_CODE] = { .name = "code", .type = BLOBMSG_TYPE_INT32 },
+	[UVOL_READY] = { .name = "ready", .type = BLOBMSG_TYPE_BOOL },
+	[UVOL_META] = { .name = "meta", .type = BLOBMSG_TYPE_BOOL },
+};
+
+struct uvol_reply {
+	int code;
+	bool answered;
+	bool ready;
+	bool meta;
+};
+
+static void uvol_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	struct blob_attr *tb[__UVOL_MAX];
+	struct uvol_reply *reply = req->priv;
+
+	if (!msg)
+		return;
+
+	blobmsg_parse(uvol_policy, __UVOL_MAX, tb, blob_data(msg), blob_len(msg));
+
+	reply->answered = true;
+
+	if (tb[UVOL_CODE])
+		reply->code = blobmsg_get_u32(tb[UVOL_CODE]);
+
+	if (tb[UVOL_READY])
+		reply->ready = blobmsg_get_bool(tb[UVOL_READY]);
+
+	if (tb[UVOL_META])
+		reply->meta = blobmsg_get_bool(tb[UVOL_META]);
+}
+
+static void uci_value_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	static const struct blobmsg_policy pol = {
+		.name = "value", .type = BLOBMSG_TYPE_STRING
+	};
+	struct blob_attr *tb;
+
+	if (!msg)
+		return;
+
+	blobmsg_parse(&pol, 1, &tb, blob_data(msg), blob_len(msg));
+	if (tb)
+		*(int *)req->priv = atoi(blobmsg_get_string(tb));
+}
+
+static uint32_t uvol_ubus_id(void)
+{
+	static bool looked_up;
+	static uint32_t id;
+
+	if (!looked_up) {
+		if (ubus_lookup_id(ctx, "uvol", &id))
+			id = 0;
+
+		looked_up = true;
+	}
+
+	return id;
+}
+
+static bool uvol_ubus_available(void)
+{
+	return uvol_ubus_id() != 0;
+}
+
+static int uvol_timeout(void)
+{
+	static struct blob_buf req;
+	static int timeout_ms;
+	int secs = UVOL_EXEC_TIMEOUT_DEFAULT;
+	uint32_t id;
+
+	if (timeout_ms)
+		return timeout_ms;
+
+	if (!ubus_lookup_id(ctx, "uci", &id)) {
+		blob_buf_init(&req, 0);
+		blobmsg_add_string(&req, "config", "rpcd");
+		blobmsg_add_string(&req, "section", "@rpcd[0]");
+		blobmsg_add_string(&req, "option", "timeout");
+		ubus_invoke(ctx, id, "get", req.head, uci_value_cb, &secs, 3000);
+	}
+
+	if (secs < 1 || secs > 600)
+		secs = UVOL_EXEC_TIMEOUT_DEFAULT;
+
+	timeout_ms = secs * 1000 + UVOL_TIMEOUT_MARGIN_MS;
+
+	return timeout_ms;
+}
+
+static int uvol_call(const char *method, struct blob_attr *args,
+		     struct uvol_reply *reply)
+{
+	static struct blob_buf empty;
+
+	memset(reply, 0, sizeof(*reply));
+
+	if (!args) {
+		blob_buf_init(&empty, 0);
+		args = empty.head;
+	}
+
+	if (ubus_invoke(ctx, uvol_ubus_id(), method, args, uvol_cb, reply,
+			uvol_timeout()))
+		return -EIO;
+
+	if (!reply->answered)
+		return -EIO;
+
+	return 0;
+}
+
+static int uvol_call_volume(const char *method, const char *vol)
+{
+	static struct blob_buf req;
+	struct uvol_reply reply;
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "name", vol);
+
+	if (uvol_call(method, req.head, &reply))
+		return -EIO;
+
+	return reply.code;
+}
+
+static bool uvol_name_valid(const char *vol)
+{
+	size_t i;
+
+	if (!vol || !*vol || strlen(vol) > 127)
+		return false;
+
+	if (!isalnum((unsigned char)vol[0]) && vol[0] != '_' && vol[0] != '.')
+		return false;
+
+	for (i = 0; vol[i]; i++)
+		if (!isalnum((unsigned char)vol[i]) && vol[i] != '.' &&
+		    vol[i] != '_' && vol[i] != '-')
+			return false;
+
+	return true;
+}
+
+static int uvol_name_check(const char *vol)
+{
+	if (uvol_name_valid(vol))
+		return 0;
+
+	fprintf(stderr, "uxc: refusing volume name '%s'\n", vol ? vol : "");
+
+	return -EINVAL;
+}
+
+static const char *uvol_volume_name(const char *path)
+{
+	const char prefix[] = "/tmp/run/uvol/";
+	const size_t plen = sizeof(prefix) - 1;
+
+	if (!path || strncmp(path, prefix, plen))
+		return NULL;
+
+	if (!path[plen] || strchr(path + plen, '/'))
+		return NULL;
+
+	if (!uvol_name_valid(path + plen))
+		return NULL;
+
+	return path + plen;
+}
+
+static int run_uvol_argv(char *const argv[])
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	if (pid == 0) {
+		execv(argv[0], argv);
+		_exit(127);
+	} else if (pid < 0) {
+		return -errno;
+	}
+
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
+
+	if (!WIFEXITED(status))
+		return -EIO;
+
+	return WEXITSTATUS(status);
+}
+
+static int run_uvol(const char *action, const char *vol)
+{
+	char *argv[] = { "/usr/sbin/uvol", (char *)action, (char *)vol, NULL };
+
+	if (uvol_name_check(vol))
+		return -EINVAL;
+
+	if (uvol_ubus_available())
+		return uvol_call_volume(action, vol);
+
+	return run_uvol_argv(argv);
+}
+
+static int run_uvol_create(const char *vol, long long size, const char *mode)
+{
+	char sizebytes[32];
+	char *argv[] = { "/usr/sbin/uvol", "create", (char *)vol,
+			 sizebytes, (char *)mode, NULL };
+	static struct blob_buf req;
+	struct uvol_reply reply;
+
+	if (uvol_name_check(vol))
+		return -EINVAL;
+
+	snprintf(sizebytes, sizeof(sizebytes), "%lld", size);
+
+	if (!uvol_ubus_available())
+		return run_uvol_argv(argv);
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "name", vol);
+	blobmsg_add_u64(&req, "size", size);
+	blobmsg_add_string(&req, "mode", mode);
+
+	if (uvol_call("create", req.head, &reply))
+		return -EIO;
+
+	return reply.code;
+}
+
+static int run_uvol_resize(const char *vol, long long size)
+{
+	char sizebytes[32];
+	char *argv[] = { "/usr/sbin/uvol", "resize", (char *)vol, sizebytes, NULL };
+	static struct blob_buf req;
+	struct uvol_reply reply;
+
+	if (uvol_name_check(vol))
+		return -EINVAL;
+
+	snprintf(sizebytes, sizeof(sizebytes), "%lld", size);
+
+	if (!uvol_ubus_available())
+		return run_uvol_argv(argv);
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "name", vol);
+	blobmsg_add_u64(&req, "size", size);
+
+	if (uvol_call("resize", req.head, &reply))
+		return -EIO;
+
+	return reply.code;
+}
+
+static int uvol_status(const char *vol)
+{
+	char *argv[] = { "/usr/sbin/uvol", "status", (char *)vol, NULL };
+
+	if (uvol_name_check(vol))
+		return -EINVAL;
+
+	if (uvol_ubus_available())
+		return uvol_call_volume("status", vol);
+
+	return run_uvol_argv(argv);
+}
+
+static bool uvol_meta_pending(void)
+{
+	struct uvol_reply reply;
+
+	if (!uvol_ubus_available())
+		return uvol_status(".meta") != 0;
+
+	if (uvol_call("ready", NULL, &reply))
+		return true;
+
+	return !reply.meta;
+}
+
+static bool uvol_backend_pending(void)
+{
+	struct uvol_reply reply;
+
+	if (!uvol_ubus_available())
+		return false;
+
+	if (uvol_call("ready", NULL, &reply))
+		return true;
+
+	return !reply.ready;
+}
+
+static long long parse_size_bytes(const char *s)
+{
+	char *end;
+	long long v;
+
+	if (!s)
+		return -1;
+
+	v = strtoll(s, &end, 10);
+	if (end == s || v < 0)
+		return -1;
+
+	switch (*end) {
+	case 'g':
+	case 'G':
+		v *= 1024;
+	case 'm':
+	case 'M':
+		v *= 1024;
+	case 'k':
+	case 'K':
+		v *= 1024;
+		++end;
+		break;
+	case '\0':
+		break;
+	default:
+		return -1;
+	}
+
+	if (*end)
+		return -1;
+
+	return v;
+}
+
+static int create_rw_uvol(const char *volname, long long bytes)
+{
+	int ret, st;
+
+	ret = run_uvol_create(volname, bytes, "rw");
+	if (ret != -EIO)
+		return ret;
+
+	st = uvol_status(volname);
+	if (st != 16 && st != 22)
+		return ret;
+
+	return run_uvol_create(volname, bytes, "rw");
+}
+
+static int provision_rw_uvol(const char *volname, const char *size)
+{
+	long long bytes;
+	int st, rr;
+
+	bytes = parse_size_bytes(size);
+	if (bytes <= 0) {
+		fprintf(stderr, "uxc: invalid size '%s' for volume %s\n", size, volname);
+		return -EINVAL;
+	}
+
+	st = uvol_status(volname);
+	if (st == 2) {
+		if (create_rw_uvol(volname, bytes)) {
+			fprintf(stderr, "uxc: failed to create volume %s\n", volname);
+			return -EIO;
+		}
+	} else {
+		rr = run_uvol_resize(volname, bytes);
+		if (rr == 22)
+			fprintf(stderr, "uxc: volume %s larger than requested, kept\n", volname);
+		else if (rr) {
+			fprintf(stderr, "uxc: failed to resize volume %s\n", volname);
+			return -EIO;
+		}
+	}
+
+	if (run_uvol("up", volname)) {
+		fprintf(stderr, "uxc: failed to activate volume %s\n", volname);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int provision_data_volumes(const char *container, struct blob_attr *vols,
+				  struct blob_buf *req)
+{
+	struct blob_attr *vcur, *vt[__VOL_MAX];
+	char volname[256], bindspec[PATH_MAX];
+	const char *vname, *vmount, *vsize;
+	int vrem;
+
+	blobmsg_for_each_attr(vcur, vols, vrem) {
+		blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(vcur), blobmsg_len(vcur));
+		if (!vt[VOL_NAME] || !vt[VOL_MOUNTPOINT])
+			continue;
+
+		vname = blobmsg_get_string(vt[VOL_NAME]);
+		vmount = blobmsg_get_string(vt[VOL_MOUNTPOINT]);
+		vsize = vt[VOL_SIZE] ? blobmsg_get_string(vt[VOL_SIZE]) : "64m";
+
+		snprintf(volname, sizeof(volname), "%s.%s", container, vname);
+		if (provision_rw_uvol(volname, vsize))
+			return -EIO;
+
+		snprintf(bindspec, sizeof(bindspec), "/tmp/run/uvol/%s:%s", volname, vmount);
+		blobmsg_add_string(req, bindspec, "2");
+	}
+
+	return 0;
+}
+
+static void reap_data_volumes(const char *container, struct blob_attr *vols)
+{
+	struct blob_attr *vcur, *vt[__VOL_MAX];
+	char volname[256];
+	int vrem;
+
+	blobmsg_for_each_attr(vcur, vols, vrem) {
+		blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(vcur), blobmsg_len(vcur));
+		if (!vt[VOL_NAME])
+			continue;
+		snprintf(volname, sizeof(volname), "%s.%s", container,
+			 blobmsg_get_string(vt[VOL_NAME]));
+		if (run_uvol("remove", volname))
+			fprintf(stderr, "uxc: warning: could not remove volume %s\n", volname);
+	}
+}
+
 static inline int setup_tios(int fd, struct termios *oldtios)
 {
 	struct termios newtios;
@@ -1147,244 +1603,6 @@ out:
 	return rc;
 }
 
-static int uxc_state(char *name)
-{
-	struct runtime_state *rsstate = avl_find_element(&runtime, name, rsstate, avl);
-	struct blob_attr *ocistate = NULL;
-	struct blob_attr *tb[__CONF_MAX];
-	static struct blob_buf buf;
-	char *jail_name = NULL;
-	char *bundle = NULL;
-	char *state = NULL;
-	char *tmp;
-
-	if (rsstate)
-		ocistate = rsstate->ocistate;
-
-	if (ocistate) {
-		state = blobmsg_format_json_indent(ocistate, true, 0);
-		if (!state)
-			return -ENOMEM;
-
-		printf("%s\n", state);
-		free(state);
-		return 0;
-	}
-
-	if (!registration_find(name, tb))
-		return -ENOENT;
-
-	if (tb[CONF_JAIL])
-		jail_name = blobmsg_get_string(tb[CONF_JAIL]);
-	else
-		jail_name = name;
-
-	bundle = blobmsg_get_string(tb[CONF_PATH]);
-
-	blob_buf_init(&buf, 0);
-	blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
-	blobmsg_add_string(&buf, "id", jail_name);
-	blobmsg_add_string(&buf, "status", rsstate?"stopped":"uninitialized");
-	blobmsg_add_string(&buf, "bundle", bundle);
-	blobmsg_close_table(&buf, blobmsg_open_table(&buf, "annotations"));
-
-	tmp = blobmsg_format_json_indent(buf.head, true, 0);
-	if (!tmp) {
-		blob_buf_free(&buf);
-		return -ENOMEM;
-	}
-
-	printf("%s\n", tmp);
-	free(tmp);
-
-	blob_buf_free(&buf);
-
-	return 0;
-}
-
-static void netinfo_str(struct blob_attr *netinfo, char *out, size_t outlen)
-{
-	struct blob_attr *tn[__NET_MAX], *ti[__NET_IF_MAX];
-	struct blob_attr *curif, *curaddr;
-	const char *ifname;
-	size_t len = 0;
-	int remif, remaddr;
-	int ifcount = 0;
-
-	snprintf(out, outlen, "-");
-	if (!netinfo)
-		return;
-
-	blobmsg_parse(net_policy, __NET_MAX, tn,
-		      blobmsg_data(netinfo), blobmsg_len(netinfo));
-	if (tn[NET_NAMESPACE] &&
-	    !strcmp(blobmsg_get_string(tn[NET_NAMESPACE]), "host")) {
-		snprintf(out, outlen, "host");
-		return;
-	}
-	if (!tn[NET_INTERFACES])
-		return;
-
-	blobmsg_for_each_attr(curif, tn[NET_INTERFACES], remif)
-		ifcount++;
-
-	blobmsg_for_each_attr(curif, tn[NET_INTERFACES], remif) {
-		blobmsg_parse(net_if_policy, __NET_IF_MAX, ti,
-			      blobmsg_data(curif), blobmsg_len(curif));
-		if (!ti[NET_IF_ADDRESSES])
-			continue;
-
-		ifname = ti[NET_IF_NAME] ?
-			blobmsg_get_string(ti[NET_IF_NAME]) : "?";
-		blobmsg_for_each_attr(curaddr, ti[NET_IF_ADDRESSES], remaddr) {
-			if (blobmsg_type(curaddr) != BLOBMSG_TYPE_STRING)
-				continue;
-
-			len += snprintf(out + len, outlen - len, "%s%s%s%s",
-					len ? "," : "",
-					ifcount > 1 ? ifname : "",
-					ifcount > 1 ? "=" : "",
-					blobmsg_get_string(curaddr));
-			if (len >= outlen)
-				len = outlen - 1;
-		}
-	}
-}
-
-static int uxc_list(void)
-{
-	struct blob_attr *cur, *tb[__CONF_MAX], *ts[__STATE_MAX], *netinfo;
-	int rem, pass;
-	struct runtime_state *rsstate = NULL;
-	char *name, *bundle, *ocistatus, *status, *created, *rootfs, *tmp;
-	int container_pid;
-	static struct blob_buf buf;
-	void *arr, *obj, *ann;
-	size_t id_w = 2, pid_w = 3, status_w = 6, bundle_w = 6, created_w = 7, owner_w = 5;
-	char pidstr[12];
-	char netstr[512];
-
-	if (quiet_output) {
-		blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
-			blobmsg_parse(conf_policy, __CONF_MAX, tb,
-				      blobmsg_data(cur), blobmsg_len(cur));
-			if (!tb[CONF_NAME] || !tb[CONF_PATH])
-				continue;
-
-			printf("%s\n", blobmsg_get_string(tb[CONF_NAME]));
-		}
-		return 0;
-	}
-
-	if (json_output) {
-		blob_buf_init(&buf, 0);
-		arr = blobmsg_open_array(&buf, "");
-	}
-
-	for (pass = json_output ? 1 : 0; pass < 2; pass++) {
-		if (pass == 1 && !json_output)
-			printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n",
-			       (int)id_w, "ID", (int)pid_w, "PID",
-			       (int)status_w, "STATUS", (int)bundle_w, "BUNDLE",
-			       (int)created_w, "CREATED", (int)owner_w, "OWNER",
-			       "NET");
-
-		blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
-			blobmsg_parse(conf_policy, __CONF_MAX, tb,
-				      blobmsg_data(cur), blobmsg_len(cur));
-			if (!tb[CONF_NAME] || !tb[CONF_PATH])
-				continue;
-
-			name = blobmsg_get_string(tb[CONF_NAME]);
-			bundle = blobmsg_get_string(tb[CONF_PATH]);
-
-			ocistatus = NULL;
-			container_pid = 0;
-			created = "-";
-			rootfs = NULL;
-			netinfo = NULL;
-			rsstate = avl_find_element(&runtime, name, rsstate, avl);
-			if (rsstate && rsstate->ocistate) {
-				blobmsg_parse(state_policy, __STATE_MAX, ts,
-					      blobmsg_data(rsstate->ocistate),
-					      blobmsg_len(rsstate->ocistate));
-				if (ts[STATE_STATUS])
-					ocistatus = blobmsg_get_string(ts[STATE_STATUS]);
-				if (ts[STATE_PID])
-					container_pid = blobmsg_get_u32(ts[STATE_PID]);
-				if (ts[STATE_BUNDLE])
-					bundle = blobmsg_get_string(ts[STATE_BUNDLE]);
-				if (ts[STATE_CREATED])
-					created = blobmsg_get_string(ts[STATE_CREATED]);
-				rootfs = ts[STATE_ROOTFS] ? blobmsg_get_string(ts[STATE_ROOTFS]) : NULL;
-				netinfo = ts[STATE_NETWORK];
-			}
-			status = ocistatus?:(rsstate && rsstate->running)?"creating":(rsstate?"stopped":"uninitialized");
-
-			if (container_pid > 0)
-				snprintf(pidstr, sizeof(pidstr), "%d", container_pid);
-			else
-				snprintf(pidstr, sizeof(pidstr), "%s", "-");
-
-			if (pass == 0) {
-				if (strlen(name) > id_w) id_w = strlen(name);
-				if (strlen(pidstr) > pid_w) pid_w = strlen(pidstr);
-				if (strlen(status) > status_w) status_w = strlen(status);
-				if (strlen(bundle) > bundle_w) bundle_w = strlen(bundle);
-				if (strlen(created) > created_w) created_w = strlen(created);
-				continue;
-			}
-
-			if (json_output) {
-				obj = blobmsg_open_table(&buf, "");
-				blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
-				blobmsg_add_string(&buf, "id", name);
-				if (container_pid > 0)
-					blobmsg_add_u32(&buf, "pid", container_pid);
-				blobmsg_add_string(&buf, "status", status);
-				blobmsg_add_string(&buf, "bundle", bundle);
-				if (rsstate && rsstate->ocistate && ts[STATE_ANNOTATIONS]) {
-					blobmsg_add_blob(&buf, ts[STATE_ANNOTATIONS]);
-				} else {
-					ann = blobmsg_open_table(&buf, "annotations");
-					blobmsg_close_table(&buf, ann);
-				}
-				if (rsstate && rsstate->ocistate && ts[STATE_NETWORK])
-					blobmsg_add_blob(&buf, ts[STATE_NETWORK]);
-				if (rootfs)
-					blobmsg_add_string(&buf, "rootfs", rootfs);
-
-				if (strcmp(created, "-"))
-					blobmsg_add_string(&buf, "created", created);
-
-				blobmsg_add_string(&buf, "owner", "root");
-				blobmsg_close_table(&buf, obj);
-			} else {
-				netinfo_str(netinfo, netstr, sizeof(netstr));
-				printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n",
-				       (int)id_w, name, (int)pid_w, pidstr,
-				       (int)status_w, status, (int)bundle_w, bundle,
-				       (int)created_w, created, (int)owner_w, "root",
-				       netstr);
-			}
-		}
-	}
-
-	if (json_output) {
-		blobmsg_close_array(&buf, arr);
-		tmp = blobmsg_format_json_indent(buf.head, true, 0);
-		if (!tmp) {
-			blob_buf_free(&buf);
-			return -ENOMEM;
-		}
-		printf("%s\n", tmp);
-		free(tmp);
-		blob_buf_free(&buf);
-	}
-
-	return 0;
-}
-
 static int uxc_exists(char *name)
 {
 	struct runtime_state *rsstate = NULL;
@@ -1395,28 +1613,6 @@ static int uxc_exists(char *name)
 
 	return 0;
 }
-
-enum {
-	VOL_NAME,
-	VOL_MOUNTPOINT,
-	VOL_SIZE,
-	__VOL_MAX,
-};
-
-static const struct blobmsg_policy vol_policy[__VOL_MAX] = {
-	[VOL_NAME] = { .name = "name", .type = BLOBMSG_TYPE_STRING },
-	[VOL_MOUNTPOINT] = { .name = "mountpoint", .type = BLOBMSG_TYPE_STRING },
-	[VOL_SIZE] = { .name = "size", .type = BLOBMSG_TYPE_STRING },
-};
-
-static int uvol_status(const char *vol);
-static const char *uvol_volume_name(const char *path);
-static int run_uvol(const char *action, const char *vol);
-static int provision_rw_uvol(const char *volname, const char *size);
-static bool uvol_meta_pending(void);
-static bool uvol_backend_pending(void);
-static int provision_data_volumes(const char *container, struct blob_attr *vols,
-				  struct blob_buf *req);
 
 static void gen_secret(char *out, size_t outlen)
 {
@@ -1910,6 +2106,244 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	}
 
 	return ret;
+}
+
+static int uxc_state(char *name)
+{
+	struct runtime_state *rsstate = avl_find_element(&runtime, name, rsstate, avl);
+	struct blob_attr *ocistate = NULL;
+	struct blob_attr *tb[__CONF_MAX];
+	static struct blob_buf buf;
+	char *jail_name = NULL;
+	char *bundle = NULL;
+	char *state = NULL;
+	char *tmp;
+
+	if (rsstate)
+		ocistate = rsstate->ocistate;
+
+	if (ocistate) {
+		state = blobmsg_format_json_indent(ocistate, true, 0);
+		if (!state)
+			return -ENOMEM;
+
+		printf("%s\n", state);
+		free(state);
+		return 0;
+	}
+
+	if (!registration_find(name, tb))
+		return -ENOENT;
+
+	if (tb[CONF_JAIL])
+		jail_name = blobmsg_get_string(tb[CONF_JAIL]);
+	else
+		jail_name = name;
+
+	bundle = blobmsg_get_string(tb[CONF_PATH]);
+
+	blob_buf_init(&buf, 0);
+	blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
+	blobmsg_add_string(&buf, "id", jail_name);
+	blobmsg_add_string(&buf, "status", rsstate?"stopped":"uninitialized");
+	blobmsg_add_string(&buf, "bundle", bundle);
+	blobmsg_close_table(&buf, blobmsg_open_table(&buf, "annotations"));
+
+	tmp = blobmsg_format_json_indent(buf.head, true, 0);
+	if (!tmp) {
+		blob_buf_free(&buf);
+		return -ENOMEM;
+	}
+
+	printf("%s\n", tmp);
+	free(tmp);
+
+	blob_buf_free(&buf);
+
+	return 0;
+}
+
+static void netinfo_str(struct blob_attr *netinfo, char *out, size_t outlen)
+{
+	struct blob_attr *tn[__NET_MAX], *ti[__NET_IF_MAX];
+	struct blob_attr *curif, *curaddr;
+	const char *ifname;
+	size_t len = 0;
+	int remif, remaddr;
+	int ifcount = 0;
+
+	snprintf(out, outlen, "-");
+	if (!netinfo)
+		return;
+
+	blobmsg_parse(net_policy, __NET_MAX, tn,
+		      blobmsg_data(netinfo), blobmsg_len(netinfo));
+	if (tn[NET_NAMESPACE] &&
+	    !strcmp(blobmsg_get_string(tn[NET_NAMESPACE]), "host")) {
+		snprintf(out, outlen, "host");
+		return;
+	}
+	if (!tn[NET_INTERFACES])
+		return;
+
+	blobmsg_for_each_attr(curif, tn[NET_INTERFACES], remif)
+		ifcount++;
+
+	blobmsg_for_each_attr(curif, tn[NET_INTERFACES], remif) {
+		blobmsg_parse(net_if_policy, __NET_IF_MAX, ti,
+			      blobmsg_data(curif), blobmsg_len(curif));
+		if (!ti[NET_IF_ADDRESSES])
+			continue;
+
+		ifname = ti[NET_IF_NAME] ?
+			blobmsg_get_string(ti[NET_IF_NAME]) : "?";
+		blobmsg_for_each_attr(curaddr, ti[NET_IF_ADDRESSES], remaddr) {
+			if (blobmsg_type(curaddr) != BLOBMSG_TYPE_STRING)
+				continue;
+
+			len += snprintf(out + len, outlen - len, "%s%s%s%s",
+					len ? "," : "",
+					ifcount > 1 ? ifname : "",
+					ifcount > 1 ? "=" : "",
+					blobmsg_get_string(curaddr));
+			if (len >= outlen)
+				len = outlen - 1;
+		}
+	}
+}
+
+static int uxc_list(void)
+{
+	struct blob_attr *cur, *tb[__CONF_MAX], *ts[__STATE_MAX], *netinfo;
+	int rem, pass;
+	struct runtime_state *rsstate = NULL;
+	char *name, *bundle, *ocistatus, *status, *created, *rootfs, *tmp;
+	int container_pid;
+	static struct blob_buf buf;
+	void *arr, *obj, *ann;
+	size_t id_w = 2, pid_w = 3, status_w = 6, bundle_w = 6, created_w = 7, owner_w = 5;
+	char pidstr[12];
+	char netstr[512];
+
+	if (quiet_output) {
+		blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
+			blobmsg_parse(conf_policy, __CONF_MAX, tb,
+				      blobmsg_data(cur), blobmsg_len(cur));
+			if (!tb[CONF_NAME] || !tb[CONF_PATH])
+				continue;
+
+			printf("%s\n", blobmsg_get_string(tb[CONF_NAME]));
+		}
+		return 0;
+	}
+
+	if (json_output) {
+		blob_buf_init(&buf, 0);
+		arr = blobmsg_open_array(&buf, "");
+	}
+
+	for (pass = json_output ? 1 : 0; pass < 2; pass++) {
+		if (pass == 1 && !json_output)
+			printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n",
+			       (int)id_w, "ID", (int)pid_w, "PID",
+			       (int)status_w, "STATUS", (int)bundle_w, "BUNDLE",
+			       (int)created_w, "CREATED", (int)owner_w, "OWNER",
+			       "NET");
+
+		blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
+			blobmsg_parse(conf_policy, __CONF_MAX, tb,
+				      blobmsg_data(cur), blobmsg_len(cur));
+			if (!tb[CONF_NAME] || !tb[CONF_PATH])
+				continue;
+
+			name = blobmsg_get_string(tb[CONF_NAME]);
+			bundle = blobmsg_get_string(tb[CONF_PATH]);
+
+			ocistatus = NULL;
+			container_pid = 0;
+			created = "-";
+			rootfs = NULL;
+			netinfo = NULL;
+			rsstate = avl_find_element(&runtime, name, rsstate, avl);
+			if (rsstate && rsstate->ocistate) {
+				blobmsg_parse(state_policy, __STATE_MAX, ts,
+					      blobmsg_data(rsstate->ocistate),
+					      blobmsg_len(rsstate->ocistate));
+				if (ts[STATE_STATUS])
+					ocistatus = blobmsg_get_string(ts[STATE_STATUS]);
+				if (ts[STATE_PID])
+					container_pid = blobmsg_get_u32(ts[STATE_PID]);
+				if (ts[STATE_BUNDLE])
+					bundle = blobmsg_get_string(ts[STATE_BUNDLE]);
+				if (ts[STATE_CREATED])
+					created = blobmsg_get_string(ts[STATE_CREATED]);
+				rootfs = ts[STATE_ROOTFS] ? blobmsg_get_string(ts[STATE_ROOTFS]) : NULL;
+				netinfo = ts[STATE_NETWORK];
+			}
+			status = ocistatus?:(rsstate && rsstate->running)?"creating":(rsstate?"stopped":"uninitialized");
+
+			if (container_pid > 0)
+				snprintf(pidstr, sizeof(pidstr), "%d", container_pid);
+			else
+				snprintf(pidstr, sizeof(pidstr), "%s", "-");
+
+			if (pass == 0) {
+				if (strlen(name) > id_w) id_w = strlen(name);
+				if (strlen(pidstr) > pid_w) pid_w = strlen(pidstr);
+				if (strlen(status) > status_w) status_w = strlen(status);
+				if (strlen(bundle) > bundle_w) bundle_w = strlen(bundle);
+				if (strlen(created) > created_w) created_w = strlen(created);
+				continue;
+			}
+
+			if (json_output) {
+				obj = blobmsg_open_table(&buf, "");
+				blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
+				blobmsg_add_string(&buf, "id", name);
+				if (container_pid > 0)
+					blobmsg_add_u32(&buf, "pid", container_pid);
+				blobmsg_add_string(&buf, "status", status);
+				blobmsg_add_string(&buf, "bundle", bundle);
+				if (rsstate && rsstate->ocistate && ts[STATE_ANNOTATIONS]) {
+					blobmsg_add_blob(&buf, ts[STATE_ANNOTATIONS]);
+				} else {
+					ann = blobmsg_open_table(&buf, "annotations");
+					blobmsg_close_table(&buf, ann);
+				}
+				if (rsstate && rsstate->ocistate && ts[STATE_NETWORK])
+					blobmsg_add_blob(&buf, ts[STATE_NETWORK]);
+				if (rootfs)
+					blobmsg_add_string(&buf, "rootfs", rootfs);
+
+				if (strcmp(created, "-"))
+					blobmsg_add_string(&buf, "created", created);
+
+				blobmsg_add_string(&buf, "owner", "root");
+				blobmsg_close_table(&buf, obj);
+			} else {
+				netinfo_str(netinfo, netstr, sizeof(netstr));
+				printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n",
+				       (int)id_w, name, (int)pid_w, pidstr,
+				       (int)status_w, status, (int)bundle_w, bundle,
+				       (int)created_w, created, (int)owner_w, "root",
+				       netstr);
+			}
+		}
+	}
+
+	if (json_output) {
+		blobmsg_close_array(&buf, arr);
+		tmp = blobmsg_format_json_indent(buf.head, true, 0);
+		if (!tmp) {
+			blob_buf_free(&buf);
+			return -ENOMEM;
+		}
+		printf("%s\n", tmp);
+		free(tmp);
+		blob_buf_free(&buf);
+	}
+
+	return 0;
 }
 
 static int uxc_start(const char *name, bool console)
@@ -2500,449 +2934,6 @@ static int uxc_boot(const char *mountpoint)
 	}
 
 	return ret;
-}
-
-#define UVOL_EXEC_TIMEOUT_DEFAULT	120
-#define UVOL_TIMEOUT_MARGIN_MS		10000
-
-enum {
-	UVOL_CODE,
-	UVOL_READY,
-	UVOL_META,
-	__UVOL_MAX,
-};
-
-static const struct blobmsg_policy uvol_policy[__UVOL_MAX] = {
-	[UVOL_CODE] = { .name = "code", .type = BLOBMSG_TYPE_INT32 },
-	[UVOL_READY] = { .name = "ready", .type = BLOBMSG_TYPE_BOOL },
-	[UVOL_META] = { .name = "meta", .type = BLOBMSG_TYPE_BOOL },
-};
-
-struct uvol_reply {
-	int code;
-	bool answered;
-	bool ready;
-	bool meta;
-};
-
-static void uvol_cb(struct ubus_request *req, int type, struct blob_attr *msg)
-{
-	struct blob_attr *tb[__UVOL_MAX];
-	struct uvol_reply *reply = req->priv;
-
-	if (!msg)
-		return;
-
-	blobmsg_parse(uvol_policy, __UVOL_MAX, tb, blob_data(msg), blob_len(msg));
-
-	reply->answered = true;
-
-	if (tb[UVOL_CODE])
-		reply->code = blobmsg_get_u32(tb[UVOL_CODE]);
-
-	if (tb[UVOL_READY])
-		reply->ready = blobmsg_get_bool(tb[UVOL_READY]);
-
-	if (tb[UVOL_META])
-		reply->meta = blobmsg_get_bool(tb[UVOL_META]);
-}
-
-static void uci_value_cb(struct ubus_request *req, int type, struct blob_attr *msg)
-{
-	static const struct blobmsg_policy pol = {
-		.name = "value", .type = BLOBMSG_TYPE_STRING
-	};
-	struct blob_attr *tb;
-
-	if (!msg)
-		return;
-
-	blobmsg_parse(&pol, 1, &tb, blob_data(msg), blob_len(msg));
-	if (tb)
-		*(int *)req->priv = atoi(blobmsg_get_string(tb));
-}
-
-static uint32_t uvol_ubus_id(void)
-{
-	static bool looked_up;
-	static uint32_t id;
-
-	if (!looked_up) {
-		if (ubus_lookup_id(ctx, "uvol", &id))
-			id = 0;
-
-		looked_up = true;
-	}
-
-	return id;
-}
-
-static bool uvol_ubus_available(void)
-{
-	return uvol_ubus_id() != 0;
-}
-
-static int uvol_timeout(void)
-{
-	static struct blob_buf req;
-	static int timeout_ms;
-	int secs = UVOL_EXEC_TIMEOUT_DEFAULT;
-	uint32_t id;
-
-	if (timeout_ms)
-		return timeout_ms;
-
-	if (!ubus_lookup_id(ctx, "uci", &id)) {
-		blob_buf_init(&req, 0);
-		blobmsg_add_string(&req, "config", "rpcd");
-		blobmsg_add_string(&req, "section", "@rpcd[0]");
-		blobmsg_add_string(&req, "option", "timeout");
-		ubus_invoke(ctx, id, "get", req.head, uci_value_cb, &secs, 3000);
-	}
-
-	if (secs < 1 || secs > 600)
-		secs = UVOL_EXEC_TIMEOUT_DEFAULT;
-
-	timeout_ms = secs * 1000 + UVOL_TIMEOUT_MARGIN_MS;
-
-	return timeout_ms;
-}
-
-static int uvol_call(const char *method, struct blob_attr *args,
-		     struct uvol_reply *reply)
-{
-	static struct blob_buf empty;
-
-	memset(reply, 0, sizeof(*reply));
-
-	if (!args) {
-		blob_buf_init(&empty, 0);
-		args = empty.head;
-	}
-
-	if (ubus_invoke(ctx, uvol_ubus_id(), method, args, uvol_cb, reply,
-			uvol_timeout()))
-		return -EIO;
-
-	if (!reply->answered)
-		return -EIO;
-
-	return 0;
-}
-
-static int uvol_call_volume(const char *method, const char *vol)
-{
-	static struct blob_buf req;
-	struct uvol_reply reply;
-
-	blob_buf_init(&req, 0);
-	blobmsg_add_string(&req, "name", vol);
-
-	if (uvol_call(method, req.head, &reply))
-		return -EIO;
-
-	return reply.code;
-}
-
-static bool uvol_name_valid(const char *vol)
-{
-	size_t i;
-
-	if (!vol || !*vol || strlen(vol) > 127)
-		return false;
-
-	if (!isalnum((unsigned char)vol[0]) && vol[0] != '_' && vol[0] != '.')
-		return false;
-
-	for (i = 0; vol[i]; i++)
-		if (!isalnum((unsigned char)vol[i]) && vol[i] != '.' &&
-		    vol[i] != '_' && vol[i] != '-')
-			return false;
-
-	return true;
-}
-
-static int uvol_name_check(const char *vol)
-{
-	if (uvol_name_valid(vol))
-		return 0;
-
-	fprintf(stderr, "uxc: refusing volume name '%s'\n", vol ? vol : "");
-
-	return -EINVAL;
-}
-
-static const char *uvol_volume_name(const char *path)
-{
-	const char prefix[] = "/tmp/run/uvol/";
-	const size_t plen = sizeof(prefix) - 1;
-
-	if (!path || strncmp(path, prefix, plen))
-		return NULL;
-
-	if (!path[plen] || strchr(path + plen, '/'))
-		return NULL;
-
-	if (!uvol_name_valid(path + plen))
-		return NULL;
-
-	return path + plen;
-}
-
-static int run_uvol_argv(char *const argv[])
-{
-	pid_t pid;
-	int status;
-
-	pid = fork();
-	if (pid == 0) {
-		execv(argv[0], argv);
-		_exit(127);
-	} else if (pid < 0) {
-		return -errno;
-	}
-
-	while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
-
-	if (!WIFEXITED(status))
-		return -EIO;
-
-	return WEXITSTATUS(status);
-}
-
-static int run_uvol(const char *action, const char *vol)
-{
-	char *argv[] = { "/usr/sbin/uvol", (char *)action, (char *)vol, NULL };
-
-	if (uvol_name_check(vol))
-		return -EINVAL;
-
-	if (uvol_ubus_available())
-		return uvol_call_volume(action, vol);
-
-	return run_uvol_argv(argv);
-}
-
-static int run_uvol_create(const char *vol, long long size, const char *mode)
-{
-	char sizebytes[32];
-	char *argv[] = { "/usr/sbin/uvol", "create", (char *)vol,
-			 sizebytes, (char *)mode, NULL };
-	static struct blob_buf req;
-	struct uvol_reply reply;
-
-	if (uvol_name_check(vol))
-		return -EINVAL;
-
-	snprintf(sizebytes, sizeof(sizebytes), "%lld", size);
-
-	if (!uvol_ubus_available())
-		return run_uvol_argv(argv);
-
-	blob_buf_init(&req, 0);
-	blobmsg_add_string(&req, "name", vol);
-	blobmsg_add_u64(&req, "size", size);
-	blobmsg_add_string(&req, "mode", mode);
-
-	if (uvol_call("create", req.head, &reply))
-		return -EIO;
-
-	return reply.code;
-}
-
-static int run_uvol_resize(const char *vol, long long size)
-{
-	char sizebytes[32];
-	char *argv[] = { "/usr/sbin/uvol", "resize", (char *)vol, sizebytes, NULL };
-	static struct blob_buf req;
-	struct uvol_reply reply;
-
-	if (uvol_name_check(vol))
-		return -EINVAL;
-
-	snprintf(sizebytes, sizeof(sizebytes), "%lld", size);
-
-	if (!uvol_ubus_available())
-		return run_uvol_argv(argv);
-
-	blob_buf_init(&req, 0);
-	blobmsg_add_string(&req, "name", vol);
-	blobmsg_add_u64(&req, "size", size);
-
-	if (uvol_call("resize", req.head, &reply))
-		return -EIO;
-
-	return reply.code;
-}
-
-static int uvol_status(const char *vol)
-{
-	char *argv[] = { "/usr/sbin/uvol", "status", (char *)vol, NULL };
-
-	if (uvol_name_check(vol))
-		return -EINVAL;
-
-	if (uvol_ubus_available())
-		return uvol_call_volume("status", vol);
-
-	return run_uvol_argv(argv);
-}
-
-static bool uvol_meta_pending(void)
-{
-	struct uvol_reply reply;
-
-	if (!uvol_ubus_available())
-		return uvol_status(".meta") != 0;
-
-	if (uvol_call("ready", NULL, &reply))
-		return true;
-
-	return !reply.meta;
-}
-
-static bool uvol_backend_pending(void)
-{
-	struct uvol_reply reply;
-
-	if (!uvol_ubus_available())
-		return false;
-
-	if (uvol_call("ready", NULL, &reply))
-		return true;
-
-	return !reply.ready;
-}
-
-static long long parse_size_bytes(const char *s)
-{
-	char *end;
-	long long v;
-
-	if (!s)
-		return -1;
-
-	v = strtoll(s, &end, 10);
-	if (end == s || v < 0)
-		return -1;
-
-	switch (*end) {
-	case 'g':
-	case 'G':
-		v *= 1024;
-	case 'm':
-	case 'M':
-		v *= 1024;
-	case 'k':
-	case 'K':
-		v *= 1024;
-		++end;
-		break;
-	case '\0':
-		break;
-	default:
-		return -1;
-	}
-
-	if (*end)
-		return -1;
-
-	return v;
-}
-
-static int create_rw_uvol(const char *volname, long long bytes)
-{
-	int ret, st;
-
-	ret = run_uvol_create(volname, bytes, "rw");
-	if (ret != -EIO)
-		return ret;
-
-	st = uvol_status(volname);
-	if (st != 16 && st != 22)
-		return ret;
-
-	return run_uvol_create(volname, bytes, "rw");
-}
-
-static int provision_rw_uvol(const char *volname, const char *size)
-{
-	long long bytes;
-	int st, rr;
-
-	bytes = parse_size_bytes(size);
-	if (bytes <= 0) {
-		fprintf(stderr, "uxc: invalid size '%s' for volume %s\n", size, volname);
-		return -EINVAL;
-	}
-
-	st = uvol_status(volname);
-	if (st == 2) {
-		if (create_rw_uvol(volname, bytes)) {
-			fprintf(stderr, "uxc: failed to create volume %s\n", volname);
-			return -EIO;
-		}
-	} else {
-		rr = run_uvol_resize(volname, bytes);
-		if (rr == 22)
-			fprintf(stderr, "uxc: volume %s larger than requested, kept\n", volname);
-		else if (rr) {
-			fprintf(stderr, "uxc: failed to resize volume %s\n", volname);
-			return -EIO;
-		}
-	}
-
-	if (run_uvol("up", volname)) {
-		fprintf(stderr, "uxc: failed to activate volume %s\n", volname);
-		return -EIO;
-	}
-
-	return 0;
-}
-
-static int provision_data_volumes(const char *container, struct blob_attr *vols,
-				  struct blob_buf *req)
-{
-	struct blob_attr *vcur, *vt[__VOL_MAX];
-	char volname[256], bindspec[PATH_MAX];
-	const char *vname, *vmount, *vsize;
-	int vrem;
-
-	blobmsg_for_each_attr(vcur, vols, vrem) {
-		blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(vcur), blobmsg_len(vcur));
-		if (!vt[VOL_NAME] || !vt[VOL_MOUNTPOINT])
-			continue;
-
-		vname = blobmsg_get_string(vt[VOL_NAME]);
-		vmount = blobmsg_get_string(vt[VOL_MOUNTPOINT]);
-		vsize = vt[VOL_SIZE] ? blobmsg_get_string(vt[VOL_SIZE]) : "64m";
-
-		snprintf(volname, sizeof(volname), "%s.%s", container, vname);
-		if (provision_rw_uvol(volname, vsize))
-			return -EIO;
-
-		snprintf(bindspec, sizeof(bindspec), "/tmp/run/uvol/%s:%s", volname, vmount);
-		blobmsg_add_string(req, bindspec, "2");
-	}
-
-	return 0;
-}
-
-static void reap_data_volumes(const char *container, struct blob_attr *vols)
-{
-	struct blob_attr *vcur, *vt[__VOL_MAX];
-	char volname[256];
-	int vrem;
-
-	blobmsg_for_each_attr(vcur, vols, vrem) {
-		blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(vcur), blobmsg_len(vcur));
-		if (!vt[VOL_NAME])
-			continue;
-		snprintf(volname, sizeof(volname), "%s.%s", container,
-			 blobmsg_get_string(vt[VOL_NAME]));
-		if (run_uvol("remove", volname))
-			fprintf(stderr, "uxc: warning: could not remove volume %s\n", volname);
-	}
 }
 
 static bool uxc_registered(const char *name)
