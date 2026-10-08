@@ -75,6 +75,7 @@ struct runtime_state {
 	int runtime_pid;
 	int exitcode;
 	uint64_t incarnation;
+	uint32_t stop_timeout;
 	struct blob_attr *ocistate;
 };
 
@@ -94,6 +95,7 @@ enum {
 	OPT_DATA_VOLUME,
 	OPT_ENV,
 	OPT_RESPAWN,
+	OPT_STOP_TIMEOUT,
 	OPT_UNSET,
 };
 
@@ -158,6 +160,7 @@ static const struct option set_opts[] = {
 	{"mounts",		required_argument,	0,	OPT_MOUNTS		},
 	{"pid-file",		required_argument,	0,	OPT_PID_FILE		},
 	{"respawn",		required_argument,	0,	OPT_RESPAWN		},
+	{"stop-timeout",	required_argument,	0,	OPT_STOP_TIMEOUT	},
 	{"temp-overlay-size",	required_argument,	0,	OPT_TEMP_OVERLAY_SIZE	},
 	{"unset",		required_argument,	0,	OPT_UNSET		},
 	{"write-overlay-path",	required_argument,	0,	OPT_WRITE_OVERLAY_PATH	},
@@ -517,10 +520,12 @@ static void usage(void) {
 	printf("\t\t[--data-volume <vol>:<mnt>[:<size>]]... [--env <KEY>=<value>]...\n");
 	printf("\t\t[--respawn enable=0|1[,min=N,max=N,multiplier=N,"
 	       "max-retries=N,reset-period=N]]\n");
+	printf("\t\t[--stop-timeout <seconds>]\n");
 	printf("\t\t[--unset <key>]...\t\t\tedit the settings of <conf> in one rewrite\n");
 	printf("\t\t\t\t\t\t--unset keys: autostart pidfile temp-overlay-size\n");
 	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
 	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol> env env=<KEY> respawn\n");
+	printf("\t\t\t\t\t\tstop-timeout\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
@@ -549,6 +554,7 @@ enum {
 	CONF_MODULE_VERSION,
 	CONF_ENV,
 	CONF_RESPAWN,
+	CONF_STOP_TIMEOUT,
 	__CONF_MAX,
 };
 
@@ -571,6 +577,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_MODULE_VERSION] = { .name = "module-version", .type = BLOBMSG_TYPE_STRING },
 	[CONF_ENV] = { .name = "env", .type = BLOBMSG_TYPE_TABLE },
 	[CONF_RESPAWN] = { .name = "respawn", .type = BLOBMSG_TYPE_TABLE },
+	[CONF_STOP_TIMEOUT] = { .name = "stop-timeout", .type = BLOBMSG_TYPE_INT32 },
 };
 
 struct settings {
@@ -942,11 +949,13 @@ static const struct blobmsg_policy instance_policy[__INSTANCE_MAX] = {
 
 enum {
 	JAIL_NAME,
+	JAIL_STOP_TIMEOUT,
 	__JAIL_MAX,
 };
 
 static const struct blobmsg_policy jail_policy[__JAIL_MAX] = {
 	[JAIL_NAME] = { .name = "name", .type = BLOBMSG_TYPE_STRING },
+	[JAIL_STOP_TIMEOUT] = { .name = "stop_timeout", .type = BLOBMSG_TYPE_INT32 },
 };
 
 static struct runtime_state *
@@ -1096,6 +1105,8 @@ static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 			rs->exitcode = exitcode;
 			rs->incarnation = incarnation;
 			rs->running = running;
+			if (tj[JAIL_STOP_TIMEOUT])
+				rs->stop_timeout = blobmsg_get_u32(tj[JAIL_STOP_TIMEOUT]);
 			avl_insert(&runtime, &rs->avl);
 		}
 	}
@@ -2624,6 +2635,33 @@ static int respawn_check(struct blob_attr *value, struct blob_attr **reg_tb)
 				    &policy);
 }
 
+static int stop_timeout_validate(const struct settings_key *key, struct blob_attr *value,
+				 struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	uint32_t seconds = blobmsg_get_u32(value);
+
+	if (!seconds)
+		return -EINVAL;
+
+	if (seconds > INT_MAX / 1000)
+		return -ERANGE;
+
+	return 0;
+}
+
+static int stop_timeout_commit(const struct settings_key *key, struct blob_attr *value,
+			       struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	struct runtime_state *rs = NULL;
+
+	rs = avl_find_element(&runtime, name, rs, avl);
+	if (runtime_live(rs))
+		fprintf(stderr, "uxc: the stop timeout of %s takes effect at the next create\n",
+			name);
+
+	return 0;
+}
+
 static const struct settings_key settings_keys[] = {
 	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
@@ -2639,6 +2677,8 @@ static const struct settings_key settings_keys[] = {
 	{ .name = "env", .entry = "env", .type = BLOBMSG_TYPE_TABLE, .validate = env_validate },
 	{ .name = "respawn", .entry = "respawn", .type = BLOBMSG_TYPE_TABLE,
 	  .validate = respawn_validate, .check = respawn_check },
+	{ .name = "stop-timeout", .type = BLOBMSG_TYPE_INT32,
+	  .validate = stop_timeout_validate, .commit = stop_timeout_commit },
 };
 
 static const struct settings_key *settings_key_find(const char *name)
@@ -3153,6 +3193,10 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 
 	if (tb[CONF_IDMAP_OFFSET])
 		blobmsg_add_string(&req, "idmap_offset", blobmsg_get_string(tb[CONF_IDMAP_OFFSET]));
+
+	if (usettings && usettings->tb[CONF_STOP_TIMEOUT])
+		blobmsg_add_u32(&req, "stop_timeout",
+				blobmsg_get_u32(usettings->tb[CONF_STOP_TIMEOUT]));
 
 	if (tb[CONF_INITENV])
 		materialise_initenv(name, tb[CONF_INITENV]);
@@ -3937,6 +3981,23 @@ static int respawn_arg_add(struct blob_buf *buf, char *arg)
 	return 0;
 }
 
+static int stop_timeout_arg_add(struct blob_buf *buf, const char *arg)
+{
+	unsigned long long n;
+	char *end;
+
+	if (!isdigit((unsigned char)*arg))
+		return -EINVAL;
+
+	n = strtoull(arg, &end, 10);
+	if (*end || n > UINT32_MAX)
+		return -EINVAL;
+
+	blobmsg_add_u32(buf, "stop-timeout", n);
+
+	return 0;
+}
+
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
 {
 	struct settings *usettings = NULL;
@@ -4514,6 +4575,9 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 			break;
 		case OPT_RESPAWN:
 			ret = respawn_arg_add(&respawn, optarg);
+			break;
+		case OPT_STOP_TIMEOUT:
+			ret = stop_timeout_arg_add(patch, optarg);
 			break;
 		case OPT_UNSET:
 			blobmsg_add_string(unset, NULL, optarg);
