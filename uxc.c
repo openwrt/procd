@@ -1989,20 +1989,52 @@ static bool envfile_has_key(const char *path, const char *key)
 	return found;
 }
 
+static int statedir_path(const char *name, char *out, size_t len)
+{
+	char root[PATH_MAX];
+	int ret;
+
+	ret = store_root_find(name, STORE_STATE, root, sizeof(root));
+	if (ret)
+		return ret;
+
+	if (mkdir(root, 0700) && errno != EEXIST)
+		return -errno;
+
+	ret = snprintf(out, len, "%s/%s", root, name);
+	if (ret < 0 || (size_t)ret >= len)
+		return -ENAMETOOLONG;
+
+	return 0;
+}
+
+static int statedir_prepare(const char *name, char *out, size_t len)
+{
+	int ret;
+
+	ret = statedir_path(name, out, len);
+	if (ret)
+		return ret;
+
+	if (mkdir(out, 0700) && errno != EEXIST)
+		return -errno;
+
+	return 0;
+}
+
 static void materialise_initenv(const char *name, struct blob_attr *initenv)
 {
-	char statedir[PATH_MAX], dir[PATH_MAX], path[PATH_MAX], secret[64];
+	char dir[PATH_MAX], path[PATH_MAX], secret[64];
 	char secrets[PATH_MAX];
 	struct blob_attr *cur;
 	const char *key, *val;
 	int rem;
 	FILE *f;
 
-	if (store_root_find(name, STORE_STATE, statedir, sizeof(statedir)) ||
+	if (store_dir(name, STORE_STATE, dir, sizeof(dir)) ||
 	    store_root_find(name, STORE_SECRETS, secrets, sizeof(secrets)))
 		return;
 
-	snprintf(dir, sizeof(dir), "%s/%s", statedir, name);
 	snprintf(path, sizeof(path), "%s/env", dir);
 
 	blobmsg_for_each_attr(cur, initenv, rem) {
@@ -2024,8 +2056,8 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 			val = secret;
 		}
 
-		mkdir(statedir, 0700);
-		mkdir(dir, 0700);
+		if (statedir_prepare(name, dir, sizeof(dir)) < 0)
+			return;
 		f = fopen(path, "a");
 		if (!f)
 			return;
@@ -3493,7 +3525,8 @@ static int settings_edit(const char *name, struct blob_attr *patch, struct blob_
 }
 
 static int uxc_create(char *name, bool immediately, const char *console_socket,
-		      bool systemd_cgroup, const char *seccomp_mode)
+		      bool systemd_cgroup, const char *seccomp_mode,
+		      const char *started_by)
 {
 	static struct blob_buf vols;
 	static struct blob_buf req;
@@ -3506,6 +3539,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	const char *imgvol = NULL;
 	char *seccomp_log = NULL;
 	char overlaypath[PATH_MAX];
+	char dir[PATH_MAX];
 	char envpath[PATH_MAX];
 	char hostsbind[PATH_MAX];
 	char provbind[2 * PATH_MAX];
@@ -3588,6 +3622,14 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (usettings && usettings->tb[CONF_STOP_TIMEOUT])
 		blobmsg_add_u32(&req, "stop_timeout",
 				blobmsg_get_u32(usettings->tb[CONF_STOP_TIMEOUT]));
+
+	if (!rundir_prepare(name, NULL, dir, sizeof(dir)))
+		blobmsg_add_string(&req, "statedir", dir);
+
+	if (!statedir_path(name, dir, sizeof(dir)))
+		blobmsg_add_string(&req, "datadir", dir);
+
+	blobmsg_add_string(&req, "started_by", started_by);
 
 	if (tb[CONF_INITENV])
 		materialise_initenv(name, tb[CONF_INITENV]);
@@ -4253,7 +4295,7 @@ static int uxc_restart(char *name, bool systemd_cgroup)
 		return -EBUSY;
 	}
 
-	ret = uxc_create(name, false, NULL, systemd_cgroup, NULL);
+	ret = uxc_create(name, false, NULL, systemd_cgroup, NULL, "operator");
 	if (ret)
 		return ret;
 
@@ -4656,7 +4698,7 @@ static int uxc_boot(const char *mountpoint)
 			continue;
 		}
 
-		if (uxc_create(name, true, NULL, false, NULL)) {
+		if (uxc_create(name, true, NULL, false, NULL, "boot")) {
 			fprintf(stderr, "uxc: boot: could not start %s\n", name);
 			ret = -EIO;
 		}
@@ -5195,7 +5237,7 @@ next_global:
 		   !strcmp(verb, "complain")) {
 		if (verb_argc != 2)
 			goto usage_out;
-		ret = uxc_create(verb_argv[1], true, NULL, false, verb);
+		ret = uxc_create(verb_argv[1], true, NULL, false, verb, "operator");
 	} else if (!strcmp(verb, "state")) {
 		if (verb_argc != 2)
 			goto usage_out;
@@ -5323,7 +5365,8 @@ next_global:
 		if (ret > 0)
 			reload_conf();
 
-		ret = uxc_create(name, false, console_socket, systemd_cgroup, NULL);
+		ret = uxc_create(name, false, console_socket, systemd_cgroup, NULL,
+				 "operator");
 	} else if (!strcmp(verb, "exec")) {
 		const char *process_file = NULL;
 		const char *pid_file = NULL;
