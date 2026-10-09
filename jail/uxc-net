@@ -707,7 +707,8 @@ let autonet_create = function(shared, net, vh) {
 };
 
 let spec_new = function() {
-	return { devices: {}, interfaces: {}, bridge_ports: {}, firewall: [], dhcp: [] };
+	return { devices: {}, interfaces: {}, bridge_ports: {}, firewall: [], dhcp: [],
+		 summary: null };
 };
 
 let instance_publish = function(name, spec) {
@@ -717,6 +718,7 @@ let instance_publish = function(name, spec) {
 		"bridge-port": spec.bridge_ports,
 		firewall: spec.firewall,
 		dhcp: spec.dhcp,
+		"container-network": spec.summary,
 	} });
 };
 
@@ -783,6 +785,19 @@ let bridged_up = function(name, ann, attach, m, spec, shared, owned) {
 
 	spec.devices[vh] = veth_device(vc, m, "h", "c");
 	spec.interfaces[accif(name)] = jailed_interface(name, vc, "eth0", net);
+	spec.summary = {
+		attach: "bridged",
+		network: net,
+		egress: [],
+		ingress: [],
+		host: [],
+		proto: proto,
+		proto6: injail_proto6(ann),
+		interfaces: { access: accif(name) },
+		zone: net,
+		devices: { host: vh, container: vc },
+		redirects: [],
+	};
 
 	append_injail(name, render_section("lan", "eth0", proto, opts));
 	if (section6 != "")
@@ -913,6 +928,11 @@ let dhcp_specs = function(name) {
 	} ];
 };
 
+let redirect_names = function(firewall) {
+	return map(filter(firewall, function(f) { return f.type == "redirect"; }),
+		   function(f) { return f.name; });
+};
+
 let routed_up = function(name, ann, m, spec) {
 	let czone = contzone(name);
 	let net = routed_subnet(name, ann);
@@ -920,9 +940,11 @@ let routed_up = function(name, ann, m, spec) {
 	let gw_ip = split(net.gw_cidr, "/")[0];
 	let proto = injail_proto(ann, "routed");
 	let section6 = injail6_section(ann);
+	let proto6;
 
 	if (!proto || section6 == null)
 		return 1;
+	proto6 = injail_proto6(ann);
 
 	spec.devices[vh] = veth_device(vc, m, "h", "c");
 	spec.interfaces[gwif(name)] = {
@@ -935,8 +957,20 @@ let routed_up = function(name, ann, m, spec) {
 		zone: czone,
 	};
 	spec.interfaces[accif(name)] = jailed_interface(name, vc, "eth0", czone);
-	spec.firewall = fw_specs(name, ann, net, injail_proto6(ann));
+	spec.firewall = fw_specs(name, ann, net, proto6);
 	spec.dhcp = dhcp_specs(name);
+	spec.summary = {
+		attach: "routed",
+		egress: csv(ann["org.openwrt.network.egress"]),
+		ingress: csv(ann["org.openwrt.network.ingress"]),
+		host: csv(ann["org.openwrt.network.host"]),
+		proto: proto,
+		proto6: proto6,
+		interfaces: { access: accif(name), gateway: gwif(name) },
+		zone: czone,
+		devices: { host: vh, container: vc },
+		redirects: redirect_names(spec.firewall),
+	};
 
 	append_injail(name, render_section("lan", "eth0", proto, {
 		ipaddr: net.container,
@@ -962,6 +996,20 @@ let backhaul_up = function(name, bh, m, spec, shared) {
 
 	spec.devices[vh] = veth_device(vc, m, "bh", "bc");
 	spec.interfaces[bhif(name)] = jailed_interface(name, vc, "bh0", null);
+	if (!spec.summary)
+		spec.summary = {
+			attach: "backhaul",
+			egress: [],
+			ingress: [],
+			host: [],
+			interfaces: {},
+			devices: {},
+			redirects: [],
+		};
+	spec.summary.backhaul = { id: bh.id };
+	if (bh.address)
+		spec.summary.backhaul.address = bh.address;
+	spec.summary.interfaces.backhaul = bhif(name);
 
 	if (bh.address)
 		append_injail(name, render_section("backhaul", "bh0", "static", {
