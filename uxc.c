@@ -565,6 +565,11 @@ enum {
 	CONF_RESPAWN,
 	CONF_STOP_TIMEOUT,
 	CONF_RESOURCES,
+	CONF_IMAGE,
+	CONF_IMAGE_DIGEST,
+	CONF_PACKAGE,
+	CONF_PACKAGE_VERSION,
+	CONF_PUBLISHER,
 	__CONF_MAX,
 };
 
@@ -589,6 +594,11 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_RESPAWN] = { .name = "respawn", .type = BLOBMSG_TYPE_TABLE },
 	[CONF_STOP_TIMEOUT] = { .name = "stop-timeout", .type = BLOBMSG_TYPE_INT32 },
 	[CONF_RESOURCES] = { .name = "resources", .type = BLOBMSG_TYPE_TABLE },
+	[CONF_IMAGE] = { .name = "image", .type = BLOBMSG_TYPE_STRING },
+	[CONF_IMAGE_DIGEST] = { .name = "image-digest", .type = BLOBMSG_TYPE_STRING },
+	[CONF_PACKAGE] = { .name = "package", .type = BLOBMSG_TYPE_STRING },
+	[CONF_PACKAGE_VERSION] = { .name = "package-version", .type = BLOBMSG_TYPE_STRING },
+	[CONF_PUBLISHER] = { .name = "publisher", .type = BLOBMSG_TYPE_STRING },
 };
 
 struct settings {
@@ -3051,6 +3061,82 @@ static int resources_apply(const struct settings_key *key, struct blob_attr *val
 	return ret;
 }
 
+static bool autostart_effective(struct blob_attr **tb, struct settings *us)
+{
+	if (us && us->autostart >= 0)
+		return !!us->autostart;
+
+	return tb[CONF_AUTOSTART] && blobmsg_get_bool(tb[CONF_AUTOSTART]);
+}
+
+enum overlay_kind {
+	OVERLAY_NONE,
+	OVERLAY_TMPFS,
+	OVERLAY_PATH,
+	OVERLAY_VOLUME,
+};
+
+static const char *const overlay_kind_names[] = {
+	[OVERLAY_NONE] = "none",
+	[OVERLAY_TMPFS] = "tmpfs",
+	[OVERLAY_PATH] = "path",
+	[OVERLAY_VOLUME] = "volume",
+};
+
+struct overlay_spec {
+	enum overlay_kind kind;
+	const char *size;
+	const char *path;
+	const char *volume;
+	char volpath[PATH_MAX];
+};
+
+static void overlay_resolve(struct blob_attr **tb, struct settings *us, const char *name,
+			    struct overlay_spec *o)
+{
+	const char *tmprwsize = NULL, *writepath = NULL;
+
+	memset(o, 0, sizeof(*o));
+
+	if (tb[CONF_TEMP_OVERLAY_SIZE])
+		tmprwsize = blobmsg_get_string(tb[CONF_TEMP_OVERLAY_SIZE]);
+
+	if (tb[CONF_WRITE_OVERLAY_PATH])
+		writepath = blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]);
+
+	if (us && us->writepath) {
+		writepath = us->writepath;
+		tmprwsize = NULL;
+	}
+
+	if (us && us->tmprwsize) {
+		tmprwsize = us->tmprwsize;
+		writepath = NULL;
+	}
+
+	if (writepath) {
+		o->kind = OVERLAY_PATH;
+		o->path = writepath;
+		o->volume = uvol_volume_name(writepath);
+		return;
+	}
+
+	if (tmprwsize) {
+		o->kind = OVERLAY_TMPFS;
+		o->size = tmprwsize;
+		return;
+	}
+
+	if (!tb[CONF_OVERLAY_SIZE])
+		return;
+
+	snprintf(o->volpath, sizeof(o->volpath), "/tmp/run/uvol/%s", name);
+	o->kind = OVERLAY_VOLUME;
+	o->size = blobmsg_get_string(tb[CONF_OVERLAY_SIZE]);
+	o->path = o->volpath;
+	o->volume = name;
+}
+
 static const struct settings_key settings_keys[] = {
 	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
@@ -3593,28 +3679,27 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode,
 		      const char *started_by)
 {
-	static struct blob_buf vols;
-	static struct blob_buf req;
+	char *path = NULL, *jailname = NULL, *pidfile = NULL;
 	struct blob_attr *cur, *tb[__CONF_MAX];
+	struct runtime_state *rsstate = NULL;
+	struct blob_attr *ptb[__PROV_MAX];
+	struct settings *usettings = NULL;
+	struct uxc_wait_state wait_state;
+	static struct blob_buf vols;
+	struct overlay_spec overlay;
+	char provbind[2 * PATH_MAX];
+	static struct blob_buf req;
+	const char *imgvol = NULL;
+	char *seccomp_log = NULL;
+	char hostsbind[PATH_MAX];
+	char envpath[PATH_MAX];
+	void *in, *ins, *j, *m;
+	char dir[PATH_MAX];
+	char reason[128];
 	int rem, ret = 0;
 	int notify_fd;
 	uint32_t id;
-	struct settings *usettings = NULL;
-	char *path = NULL, *jailname = NULL, *pidfile = NULL, *tmprwsize = NULL, *writepath = NULL;
-	const char *imgvol = NULL;
-	char *seccomp_log = NULL;
-	char overlaypath[PATH_MAX];
-	char dir[PATH_MAX];
-	char envpath[PATH_MAX];
-	char hostsbind[PATH_MAX];
-	char provbind[2 * PATH_MAX];
-	char reason[128];
-	struct blob_attr *ptb[__PROV_MAX];
-	struct runtime_state *rsstate = NULL;
-	struct uxc_wait_state wait_state;
 	int err;
-
-	void *in, *ins, *j, *m;
 
 	if (!registration_find(name, tb))
 		return -ENOENT;
@@ -3635,26 +3720,11 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (tb[CONF_PIDFILE])
 		pidfile = blobmsg_get_string(tb[CONF_PIDFILE]);
 
-	if (tb[CONF_TEMP_OVERLAY_SIZE])
-		tmprwsize = blobmsg_get_string(tb[CONF_TEMP_OVERLAY_SIZE]);
-
-	if (tb[CONF_WRITE_OVERLAY_PATH])
-		writepath = blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]);
-
 	if (tb[CONF_JAIL])
 		jailname = blobmsg_get_string(tb[CONF_JAIL]);
 
 	usettings = avl_find_element(&settings, blobmsg_get_string(tb[CONF_NAME]), usettings, avl);
-	if (usettings) {
-		if (usettings->writepath) {
-			writepath = usettings->writepath;
-			tmprwsize = NULL;
-		}
-		if (usettings->tmprwsize) {
-			tmprwsize = usettings->tmprwsize;
-			writepath = NULL;
-		}
-	}
+	overlay_resolve(tb, usettings, name, &overlay);
 
 	blob_buf_init(&req, 0);
 	blobmsg_add_string(&req, "name", name);
@@ -3744,21 +3814,17 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 
 	blobmsg_close_table(&req, j);
 
-	if (!writepath && !tmprwsize && tb[CONF_OVERLAY_SIZE]) {
-		if (provision_rw_uvol(name, blobmsg_get_string(tb[CONF_OVERLAY_SIZE]))) {
-			blob_buf_free(&req);
-			last_exit_write(name, started_by, "uxc.overlay-volume", EIO);
-			return -EIO;
-		}
-		snprintf(overlaypath, sizeof(overlaypath), "/tmp/run/uvol/%s", name);
-		writepath = overlaypath;
+	if (overlay.kind == OVERLAY_VOLUME && provision_rw_uvol(name, overlay.size)) {
+		blob_buf_free(&req);
+		last_exit_write(name, started_by, "uxc.overlay-volume", EIO);
+		return -EIO;
 	}
 
-	if (writepath)
-		blobmsg_add_string(&req, "overlaydir", writepath);
+	if (overlay.path)
+		blobmsg_add_string(&req, "overlaydir", overlay.path);
 
-	if (tmprwsize)
-		blobmsg_add_string(&req, "tmpoverlaysize", tmprwsize);
+	if (overlay.kind == OVERLAY_TMPFS)
+		blobmsg_add_string(&req, "tmpoverlaysize", overlay.size);
 
 	blobmsg_close_table(&req, in);
 	blobmsg_close_table(&req, ins);
@@ -3844,46 +3910,173 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	return ret;
 }
 
+static void container_info_volumes_add(struct blob_buf *b, const char *name,
+				       struct blob_attr *reg, struct blob_attr *set)
+{
+	struct blob_attr *cur, *vt[__VOL_MAX];
+	static struct blob_buf merged;
+	char volname[256];
+	const char *vname;
+	void *a, *t;
+	int rem;
+
+	data_volumes_effective(reg, set, &merged);
+	a = blobmsg_open_array(b, "data-volumes");
+	blobmsg_for_each_attr(cur, blob_data(merged.head), rem) {
+		blobmsg_parse(vol_policy, __VOL_MAX, vt, blobmsg_data(cur), blobmsg_len(cur));
+		if (!vt[VOL_NAME] || !vt[VOL_MOUNTPOINT])
+			continue;
+
+		vname = blobmsg_get_string(vt[VOL_NAME]);
+		data_volume_name(name, vname, volname, sizeof(volname));
+		t = blobmsg_open_table(b, NULL);
+		blobmsg_add_string(b, "name", vname);
+		blobmsg_add_string(b, "volume", volname);
+		blobmsg_add_blob(b, vt[VOL_MOUNTPOINT]);
+		blobmsg_add_string(b, "size", vt[VOL_SIZE] ?
+				   blobmsg_get_string(vt[VOL_SIZE]) : DATA_VOLUME_SIZE_DEFAULT);
+		blobmsg_add_string(b, "from", settings_array_find(reg, "name", vname) ?
+				   "registration" : "settings");
+		blobmsg_close_table(b, t);
+	}
+	blobmsg_close_array(b, a);
+	blob_buf_free(&merged);
+}
+
+static void container_info_provision_add(struct blob_buf *b, struct blob_attr *prov)
+{
+	struct blob_attr *cur, *ptb[__PROV_MAX];
+	void *a, *t;
+	int rem;
+
+	a = blobmsg_open_array(b, "provision");
+	blobmsg_for_each_attr(cur, prov, rem) {
+		blobmsg_parse(prov_policy, __PROV_MAX, ptb, blobmsg_data(cur), blobmsg_len(cur));
+		if (!ptb[PROV_SOURCE] || !ptb[PROV_DESTINATION])
+			continue;
+
+		t = blobmsg_open_table(b, NULL);
+		blobmsg_add_blob(b, ptb[PROV_SOURCE]);
+		blobmsg_add_blob(b, ptb[PROV_DESTINATION]);
+		blobmsg_add_u8(b, "secret", ptb[PROV_SECRET] && blobmsg_get_bool(ptb[PROV_SECRET]));
+		blobmsg_add_string(b, "from", "registration");
+		blobmsg_close_table(b, t);
+	}
+	blobmsg_close_array(b, a);
+}
+
+static uint32_t stop_timeout_effective(struct settings *us, struct runtime_state *rs)
+{
+	if (runtime_live(rs))
+		return rs->stop_timeout ?: UXC_STOP_TIMEOUT;
+
+	if (us && us->tb[CONF_STOP_TIMEOUT])
+		return blobmsg_get_u32(us->tb[CONF_STOP_TIMEOUT]);
+
+	return UXC_STOP_TIMEOUT;
+}
+
+static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct blob_attr **tb,
+			       struct settings *us, struct runtime_state *rs)
+{
+	static const int identity[] = { CONF_ORIGIN, CONF_IMAGE, CONF_IMAGE_DIGEST,
+					CONF_PACKAGE, CONF_PACKAGE_VERSION, CONF_PUBLISHER };
+	struct overlay_spec overlay;
+	struct blob_attr *respawn;
+	const char *name;
+	void *t, *o;
+	size_t i;
+
+	name = blobmsg_get_string(tb[CONF_NAME]);
+	t = blobmsg_open_table(b, "org.openwrt.uxc");
+	blobmsg_add_string(b, "name", name);
+	blobmsg_add_string(b, "registration", blobmsg_name(reg));
+	if (us)
+		blobmsg_add_string(b, "settings", us->fname);
+
+	for (i = 0; i < ARRAY_SIZE(identity); i++)
+		if (tb[identity[i]])
+			blobmsg_add_blob(b, tb[identity[i]]);
+
+	blobmsg_add_blob(b, tb[CONF_PATH]);
+	blobmsg_add_u8(b, "autostart", autostart_effective(tb, us));
+
+	overlay_resolve(tb, us, name, &overlay);
+	o = blobmsg_open_table(b, "overlay");
+	blobmsg_add_string(b, "kind", overlay_kind_names[overlay.kind]);
+	if (overlay.size)
+		blobmsg_add_string(b, "size", overlay.size);
+	if (overlay.path)
+		blobmsg_add_string(b, "path", overlay.path);
+	blobmsg_close_table(b, o);
+
+	container_info_volumes_add(b, name, tb[CONF_DATA_VOLUMES],
+				   us ? us->tb[CONF_DATA_VOLUMES] : NULL);
+	container_info_provision_add(b, tb[CONF_PROVISION]);
+
+	if (tb[CONF_HOSTS_FILE])
+		blobmsg_add_blob(b, tb[CONF_HOSTS_FILE]);
+
+	if (tb[CONF_INITENV])
+		blobmsg_add_blob(b, tb[CONF_INITENV]);
+
+	if (us && us->tb[CONF_ENV])
+		blobmsg_add_blob(b, us->tb[CONF_ENV]);
+
+	blobmsg_add_u32(b, "stop-timeout", stop_timeout_effective(us, rs));
+
+	if (us && us->tb[CONF_RESOURCES])
+		blobmsg_add_blob(b, us->tb[CONF_RESOURCES]);
+
+	if (us && us->tb[CONF_MODULE_VERSION])
+		blobmsg_add_blob(b, us->tb[CONF_MODULE_VERSION]);
+
+	respawn = us && us->tb[CONF_RESPAWN] ? us->tb[CONF_RESPAWN] : tb[CONF_RESPAWN];
+	if (respawn)
+		blobmsg_add_blob(b, respawn);
+
+	if (rs && rs->started_by)
+		blobmsg_add_string(b, "started-by", rs->started_by);
+
+	if (rs && rs->incarnation)
+		blobmsg_add_u64(b, "incarnation", rs->incarnation);
+
+	if (rs && rs->exitcode >= 0)
+		blobmsg_add_u32(b, "exit-code", rs->exitcode);
+
+	blobmsg_close_table(b, t);
+}
+
 static int uxc_state(char *name)
 {
-	struct runtime_state *rsstate = avl_find_element(&runtime, name, rsstate, avl);
-	struct blob_attr *ocistate = NULL;
+	struct runtime_state *rsstate = NULL;
+	struct settings *usettings = NULL;
 	struct blob_attr *tb[__CONF_MAX];
+	struct blob_attr *reg, *cur;
 	static struct blob_buf buf;
-	char *jail_name = NULL;
-	char *bundle = NULL;
-	char *state = NULL;
 	char *tmp;
+	int rem;
 
-	if (rsstate)
-		ocistate = rsstate->ocistate;
-
-	if (ocistate) {
-		state = blobmsg_format_json_indent(ocistate, true, 0);
-		if (!state)
-			return -ENOMEM;
-
-		printf("%s\n", state);
-		free(state);
-		return 0;
-	}
-
-	if (!registration_find(name, tb))
+	reg = registration_find(name, tb);
+	if (!reg)
 		return -ENOENT;
 
-	if (tb[CONF_JAIL])
-		jail_name = blobmsg_get_string(tb[CONF_JAIL]);
-	else
-		jail_name = name;
-
-	bundle = blobmsg_get_string(tb[CONF_PATH]);
+	rsstate = avl_find_element(&runtime, name, rsstate, avl);
+	usettings = avl_find_element(&settings, name, usettings, avl);
 
 	blob_buf_init(&buf, 0);
-	blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
-	blobmsg_add_string(&buf, "id", jail_name);
-	blobmsg_add_string(&buf, "status", rsstate?"stopped":"uninitialized");
-	blobmsg_add_string(&buf, "bundle", bundle);
-	blobmsg_close_table(&buf, blobmsg_open_table(&buf, "annotations"));
+	if (rsstate && rsstate->ocistate) {
+		blobmsg_for_each_attr(cur, rsstate->ocistate, rem)
+			blobmsg_add_blob(&buf, cur);
+	} else {
+		blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
+		blobmsg_add_string(&buf, "id", tb[CONF_JAIL] ?
+				   blobmsg_get_string(tb[CONF_JAIL]) : name);
+		blobmsg_add_string(&buf, "status", rsstate ? "stopped" : "uninitialized");
+		blobmsg_add_string(&buf, "bundle", blobmsg_get_string(tb[CONF_PATH]));
+		blobmsg_close_table(&buf, blobmsg_open_table(&buf, "annotations"));
+	}
+	container_info_add(&buf, reg, tb, usettings, rsstate);
 
 	tmp = blobmsg_format_json_indent(buf.head, true, 0);
 	if (!tmp) {
@@ -3950,16 +4143,17 @@ static void netinfo_str(struct blob_attr *netinfo, char *out, size_t outlen)
 
 static int uxc_list(void)
 {
+	size_t id_w = 2, pid_w = 3, status_w = 6, bundle_w = 6, created_w = 7, owner_w = 5;
 	struct blob_attr *cur, *tb[__CONF_MAX], *ts[__STATE_MAX], *netinfo;
-	int rem, pass;
-	struct runtime_state *rsstate = NULL;
 	char *name, *bundle, *ocistatus, *status, *created, *rootfs, *tmp;
-	int container_pid;
+	struct runtime_state *rsstate = NULL;
+	struct settings *usettings = NULL;
 	static struct blob_buf buf;
 	void *arr, *obj, *ann;
-	size_t id_w = 2, pid_w = 3, status_w = 6, bundle_w = 6, created_w = 7, owner_w = 5;
-	char pidstr[12];
+	int container_pid;
 	char netstr[512];
+	char pidstr[12];
+	int rem, pass;
 
 	if (quiet_output) {
 		blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
@@ -4055,6 +4249,8 @@ static int uxc_list(void)
 					blobmsg_add_string(&buf, "created", created);
 
 				blobmsg_add_string(&buf, "owner", "root");
+				usettings = avl_find_element(&settings, name, usettings, avl);
+				container_info_add(&buf, cur, tb, usettings, rsstate);
 				blobmsg_close_table(&buf, obj);
 			} else {
 				netinfo_str(netinfo, netstr, sizeof(netstr));
@@ -4689,7 +4885,6 @@ static int uxc_boot(const char *mountpoint)
 	int rem, nvols, status, ret = 0;
 	const char *imgvol;
 	unsigned int id;
-	bool autostart;
 	char *name;
 
 	ret = ubus_lookup_id(ctx, "block", &id);
@@ -4724,15 +4919,8 @@ static int uxc_boot(const char *mountpoint)
 		if (rsstate)
 			continue;
 
-		autostart = false;
-		if (tb[CONF_AUTOSTART])
-			autostart = blobmsg_get_bool(tb[CONF_AUTOSTART]);
-
 		usettings = avl_find_element(&settings, blobmsg_get_string(tb[CONF_NAME]), usettings, avl);
-		if (usettings && (usettings->autostart >= 0))
-			autostart = !!(usettings->autostart);
-
-		if (!autostart)
+		if (!autostart_effective(tb, usettings))
 			continue;
 
 		/* make sure all volumes are ready before starting */
@@ -4890,7 +5078,7 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	struct settings *usettings = NULL;
 	static struct blob_buf req, vols;
 	struct blob_attr *tb[__CONF_MAX];
-	const char *statevol = NULL;
+	struct overlay_spec overlay;
 	const char *sfname = NULL;
 	struct blob_attr *found;
 	char rundir[PATH_MAX];
@@ -4958,13 +5146,7 @@ static int uxc_delete(char *name, bool force, bool volumes)
 
 	data_volumes_effective(tb[CONF_DATA_VOLUMES],
 			       usettings ? usettings->tb[CONF_DATA_VOLUMES] : NULL, &vols);
-
-	if (usettings && usettings->writepath)
-		statevol = uvol_volume_name(usettings->writepath);
-	else if (tb[CONF_WRITE_OVERLAY_PATH])
-		statevol = uvol_volume_name(blobmsg_get_string(tb[CONF_WRITE_OVERLAY_PATH]));
-	else if (tb[CONF_OVERLAY_SIZE])
-		statevol = name;
+	overlay_resolve(tb, usettings, name, &overlay);
 
 	if (sfname && unlink(sfname) == -1 && errno != ENOENT) {
 		ret = -errno;
@@ -4981,9 +5163,10 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	else if (tree_purge(rundir))
 		fprintf(stderr, "uxc: could not remove the run-time state of %s\n", name);
 
-	if (!ret && volumes && statevol) {
-		if (run_uvol("remove", statevol))
-			fprintf(stderr, "uxc: warning: could not remove state volume %s\n", statevol);
+	if (!ret && volumes && overlay.volume) {
+		if (run_uvol("remove", overlay.volume))
+			fprintf(stderr, "uxc: warning: could not remove state volume %s\n",
+				overlay.volume);
 	}
 
 	if (!ret && volumes)
