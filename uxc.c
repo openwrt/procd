@@ -1403,6 +1403,89 @@ static int uvol_call_volume(const char *method, const char *vol)
 	return reply.code;
 }
 
+static struct blob_attr *uvol_list_blob;
+static bool uvol_list_tried;
+
+static void uvol_list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	if (msg)
+		uvol_list_blob = blob_memdup(msg);
+}
+
+static void uvol_list_load(void)
+{
+	static struct blob_buf empty;
+
+	if (uvol_list_tried)
+		return;
+
+	uvol_list_tried = true;
+	if (!uvol_ubus_available())
+		return;
+
+	blob_buf_init(&empty, 0);
+	ubus_invoke(ctx, uvol_ubus_id(), "list", empty.head, uvol_list_cb, NULL,
+		    uvol_timeout());
+}
+
+static struct blob_attr *uvol_list_volumes(void)
+{
+	static const struct blobmsg_policy pol = {
+		.name = "volumes", .type = BLOBMSG_TYPE_ARRAY
+	};
+	struct blob_attr *tb;
+
+	uvol_list_load();
+	if (!uvol_list_blob)
+		return NULL;
+
+	blobmsg_parse(&pol, 1, &tb, blob_data(uvol_list_blob),
+		      blob_len(uvol_list_blob));
+
+	return tb;
+}
+
+enum {
+	UVOL_ENTRY_NAME,
+	UVOL_ENTRY_MODE,
+	UVOL_ENTRY_SIZE,
+	__UVOL_ENTRY_MAX,
+};
+
+static const struct blobmsg_policy uvol_entry_policy[__UVOL_ENTRY_MAX] = {
+	[UVOL_ENTRY_NAME] = { .name = "name", .type = BLOBMSG_TYPE_STRING },
+	[UVOL_ENTRY_MODE] = { .name = "mode", .type = BLOBMSG_TYPE_STRING },
+	[UVOL_ENTRY_SIZE] = { .name = "size", .type = BLOBMSG_CAST_INT64 },
+};
+
+static bool uvol_list_find(const char *vol, const char **mode, int64_t *size)
+{
+	struct blob_attr *tb[__UVOL_ENTRY_MAX];
+	struct blob_attr *vols, *cur;
+	int rem;
+
+	vols = uvol_list_volumes();
+	if (!vols)
+		return false;
+
+	blobmsg_for_each_attr(cur, vols, rem) {
+		blobmsg_parse(uvol_entry_policy, __UVOL_ENTRY_MAX, tb,
+			      blobmsg_data(cur), blobmsg_len(cur));
+		if (!tb[UVOL_ENTRY_NAME] || !tb[UVOL_ENTRY_MODE])
+			continue;
+
+		if (strcmp(blobmsg_get_string(tb[UVOL_ENTRY_NAME]), vol))
+			continue;
+
+		*mode = blobmsg_get_string(tb[UVOL_ENTRY_MODE]);
+		*size = tb[UVOL_ENTRY_SIZE] ? blobmsg_cast_s64(tb[UVOL_ENTRY_SIZE]) : -1;
+
+		return true;
+	}
+
+	return false;
+}
+
 static bool uvol_name_valid(const char *vol)
 {
 	size_t i;
@@ -3910,6 +3993,28 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	return ret;
 }
 
+static void volume_status_add(struct blob_buf *b, const char *vol, const char *size_key)
+{
+	const char *mode;
+	bool up = false;
+	int64_t size;
+
+	if (uvol_list_find(vol, &mode, &size)) {
+		blobmsg_add_string(b, "mode", mode);
+		if (size >= 0)
+			blobmsg_add_u64(b, size_key, size);
+		up = !strcmp(mode, "ro") || !strcmp(mode, "rw");
+	}
+
+	blobmsg_add_u8(b, "up", up);
+}
+
+static void volume_state_add(struct blob_buf *b, const char *vol)
+{
+	blobmsg_add_string(b, "name", vol);
+	volume_status_add(b, vol, "size");
+}
+
 static void container_info_volumes_add(struct blob_buf *b, const char *name,
 				       struct blob_attr *reg, struct blob_attr *set)
 {
@@ -3937,6 +4042,7 @@ static void container_info_volumes_add(struct blob_buf *b, const char *name,
 				   blobmsg_get_string(vt[VOL_SIZE]) : DATA_VOLUME_SIZE_DEFAULT);
 		blobmsg_add_string(b, "from", settings_array_find(reg, "name", vname) ?
 				   "registration" : "settings");
+		volume_status_add(b, volname, "size-bytes");
 		blobmsg_close_table(b, t);
 	}
 	blobmsg_close_array(b, a);
@@ -3983,8 +4089,8 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 					CONF_PACKAGE, CONF_PACKAGE_VERSION, CONF_PUBLISHER };
 	struct overlay_spec overlay;
 	struct blob_attr *respawn;
-	const char *name;
-	void *t, *o;
+	const char *name, *imgvol;
+	void *t, *o, *v;
 	size_t i;
 
 	name = blobmsg_get_string(tb[CONF_NAME]);
@@ -3999,6 +4105,12 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 			blobmsg_add_blob(b, tb[identity[i]]);
 
 	blobmsg_add_blob(b, tb[CONF_PATH]);
+	imgvol = uvol_volume_name(blobmsg_get_string(tb[CONF_PATH]));
+	if (imgvol) {
+		v = blobmsg_open_table(b, "image-volume");
+		volume_state_add(b, imgvol);
+		blobmsg_close_table(b, v);
+	}
 	blobmsg_add_u8(b, "autostart", autostart_effective(tb, us));
 
 	overlay_resolve(tb, us, name, &overlay);
@@ -4008,6 +4120,11 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 		blobmsg_add_string(b, "size", overlay.size);
 	if (overlay.path)
 		blobmsg_add_string(b, "path", overlay.path);
+	if (overlay.volume) {
+		v = blobmsg_open_table(b, "volume");
+		volume_state_add(b, overlay.volume);
+		blobmsg_close_table(b, v);
+	}
 	blobmsg_close_table(b, o);
 
 	container_info_volumes_add(b, name, tb[CONF_DATA_VOLUMES],
@@ -5707,6 +5824,7 @@ usage_out:
 	ret = EXIT_FAILURE;
 runtime_out:
 	runtime_free();
+	free(uvol_list_blob);
 settings_avl_out:
 	settings_free();
 settings_out:
