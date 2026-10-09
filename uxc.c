@@ -1022,12 +1022,14 @@ static const struct blobmsg_policy state_policy[__STATE_MAX] = {
 
 enum {
 	NET_NAMESPACE,
+	NET_ATTACH,
 	NET_INTERFACES,
 	__NET_MAX,
 };
 
 static const struct blobmsg_policy net_policy[__NET_MAX] = {
 	[NET_NAMESPACE] = { .name = "namespace", .type = BLOBMSG_TYPE_STRING },
+	[NET_ATTACH] = { .name = "attach", .type = BLOBMSG_TYPE_STRING },
 	[NET_INTERFACES] = { .name = "interfaces", .type = BLOBMSG_TYPE_ARRAY },
 };
 
@@ -4082,6 +4084,161 @@ static uint32_t stop_timeout_effective(struct settings *us, struct runtime_state
 	return UXC_STOP_TIMEOUT;
 }
 
+enum {
+	LAST_EXIT_SERVICE,
+	LAST_EXIT_INSTANCE,
+	LAST_EXIT_PID,
+	LAST_EXIT_INCARNATION,
+	LAST_EXIT_REASON,
+	LAST_EXIT_ERRNO,
+	LAST_EXIT_EXIT_CODE,
+	LAST_EXIT_REQUESTED,
+	LAST_EXIT_STARTED,
+	LAST_EXIT_ESCALATED,
+	LAST_EXIT_STARTED_BY,
+	LAST_EXIT_CREATED,
+	LAST_EXIT_STOPPED_AT,
+	__LAST_EXIT_MAX,
+};
+
+static const struct blobmsg_policy last_exit_policy[__LAST_EXIT_MAX] = {
+	[LAST_EXIT_SERVICE] = { .name = "service", .type = BLOBMSG_TYPE_STRING },
+	[LAST_EXIT_INSTANCE] = { .name = "instance", .type = BLOBMSG_TYPE_STRING },
+	[LAST_EXIT_PID] = { .name = "pid", .type = BLOBMSG_TYPE_INT32 },
+	[LAST_EXIT_INCARNATION] = { .name = "incarnation", .type = BLOBMSG_CAST_INT64 },
+	[LAST_EXIT_REASON] = { .name = "reason", .type = BLOBMSG_TYPE_STRING },
+	[LAST_EXIT_ERRNO] = { .name = "errno", .type = BLOBMSG_TYPE_INT32 },
+	[LAST_EXIT_EXIT_CODE] = { .name = "exit_code", .type = BLOBMSG_TYPE_INT32 },
+	[LAST_EXIT_REQUESTED] = { .name = "requested", .type = BLOBMSG_TYPE_BOOL },
+	[LAST_EXIT_STARTED] = { .name = "started", .type = BLOBMSG_TYPE_BOOL },
+	[LAST_EXIT_ESCALATED] = { .name = "escalated", .type = BLOBMSG_TYPE_BOOL },
+	[LAST_EXIT_STARTED_BY] = { .name = "started_by", .type = BLOBMSG_TYPE_STRING },
+	[LAST_EXIT_CREATED] = { .name = "created", .type = BLOBMSG_CAST_INT64 },
+	[LAST_EXIT_STOPPED_AT] = { .name = "stopped_at", .type = BLOBMSG_CAST_INT64 },
+};
+
+struct last_exit_key {
+	int idx;
+	const char *name;
+};
+
+static const struct last_exit_key last_exit_keys[] = {
+	{ LAST_EXIT_EXIT_CODE, "exit-code" },
+	{ LAST_EXIT_REASON, "reason" },
+	{ LAST_EXIT_ERRNO, "errno" },
+	{ LAST_EXIT_REQUESTED, "requested" },
+	{ LAST_EXIT_STARTED, "started" },
+	{ LAST_EXIT_ESCALATED, "escalated" },
+	{ LAST_EXIT_STARTED_BY, "started-by" },
+	{ LAST_EXIT_CREATED, "created" },
+	{ LAST_EXIT_STOPPED_AT, "stopped-at" },
+};
+
+static bool last_exit_current(struct blob_attr **tb, struct runtime_state *rs)
+{
+	if (!tb[LAST_EXIT_INCARNATION])
+		return !rs;
+
+	return !rs || blobmsg_cast_u64(tb[LAST_EXIT_INCARNATION]) == rs->incarnation;
+}
+
+static bool last_exit_load(const char *name, struct runtime_state *rs,
+			   struct blob_buf *buf, struct blob_attr **tb)
+{
+	char path[PATH_MAX];
+
+	if (rundir_path(name, "last-exit", path, sizeof(path)))
+		return false;
+
+	blob_buf_init(buf, 0);
+	if (!blobmsg_add_json_from_file(buf, path))
+		return false;
+
+	blobmsg_parse(last_exit_policy, __LAST_EXIT_MAX, tb,
+		      blob_data(buf->head), blob_len(buf->head));
+
+	return last_exit_current(tb, rs);
+}
+
+static void last_exit_add(struct blob_buf *b, const char *name, struct runtime_state *rs)
+{
+	struct blob_attr *tb[__LAST_EXIT_MAX], *cur;
+	static struct blob_buf buf;
+	size_t i;
+	void *t;
+
+	if (runtime_live(rs))
+		return;
+
+	if (!last_exit_load(name, rs, &buf, tb)) {
+		blob_buf_free(&buf);
+		return;
+	}
+
+	t = blobmsg_open_table(b, "last-exit");
+	if (tb[LAST_EXIT_INCARNATION])
+		blobmsg_add_u64(b, "incarnation",
+				blobmsg_cast_u64(tb[LAST_EXIT_INCARNATION]));
+
+	for (i = 0; i < ARRAY_SIZE(last_exit_keys); i++) {
+		cur = tb[last_exit_keys[i].idx];
+		if (!cur)
+			continue;
+
+		blobmsg_add_field(b, blobmsg_type(cur), last_exit_keys[i].name,
+				  blobmsg_data(cur), blobmsg_data_len(cur));
+	}
+	blobmsg_close_table(b, t);
+	blob_buf_free(&buf);
+}
+
+static struct blob_attr *container_network_published(struct runtime_state *rs)
+{
+	struct blob_attr *ti[__INSTANCE_MAX];
+
+	if (!rs->instance)
+		return NULL;
+
+	blobmsg_parse(instance_policy, __INSTANCE_MAX, ti,
+		      blobmsg_data(rs->instance), blobmsg_len(rs->instance));
+	if (!ti[INSTANCE_DATA])
+		return NULL;
+
+	return blob_key_find(ti[INSTANCE_DATA], "container-network");
+}
+
+static void container_info_network_add(struct blob_buf *b, struct runtime_state *rs)
+{
+	struct blob_attr *ts[__STATE_MAX], *tn[__NET_MAX], *net;
+	void *t;
+
+	if (!rs)
+		return;
+
+	net = container_network_published(rs);
+	if (net) {
+		blobmsg_add_blob(b, net);
+		return;
+	}
+
+	if (!rs->ocistate)
+		return;
+
+	blobmsg_parse(state_policy, __STATE_MAX, ts,
+		      blobmsg_data(rs->ocistate), blobmsg_len(rs->ocistate));
+	if (!ts[STATE_NETWORK])
+		return;
+
+	blobmsg_parse(net_policy, __NET_MAX, tn,
+		      blobmsg_data(ts[STATE_NETWORK]), blobmsg_len(ts[STATE_NETWORK]));
+	if (!tn[NET_ATTACH])
+		return;
+
+	t = blobmsg_open_table(b, "container-network");
+	blobmsg_add_blob(b, tn[NET_ATTACH]);
+	blobmsg_close_table(b, t);
+}
+
 static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct blob_attr **tb,
 			       struct settings *us, struct runtime_state *rs)
 {
@@ -4160,6 +4317,9 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 
 	if (rs && rs->exitcode >= 0)
 		blobmsg_add_u32(b, "exit-code", rs->exitcode);
+
+	container_info_network_add(b, rs);
+	last_exit_add(b, name, rs);
 
 	blobmsg_close_table(b, t);
 }
