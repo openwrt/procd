@@ -23,7 +23,7 @@ SET(SOURCES procd.c signal.c state.c hotplug-dispatch.c inittab.c rcS.c ubus.c
 	service/validate.c service/trigger.c service/watch.c service/vrf.c
 	utils/utils.c)
 IF(NOT DISABLE_INIT)
-  SET(SOURCES ${SOURCES} watchdog.c plug/coldplug.c plug/hotplug.c)
+  SET(SOURCES ${SOURCES} watchdog.c plug/coldplug.c plug/hotplug.c initd/mkdev.c)
 ENDIF()
 
 FIND_LIBRARY(ubox NAMES ubox)
