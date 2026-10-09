@@ -75,6 +75,7 @@
 #include "cgroups.h"
 #include "netifd.h"
 #include "../state-file.h"
+#include "../uptime.h"
 #include "../stdio-fds.h"
 
 #include <libubox/blobmsg.h>
@@ -2531,6 +2532,8 @@ static int setns_open(unsigned long nstype)
 static int jail_running = 0;
 static int jail_return_code = 0;
 static bool jail_reaped;
+static bool jail_exec_acked;
+static bool jail_stop_escalated;
 static bool poststart_pending;
 
 static void post_poststop(void)
@@ -2586,6 +2589,7 @@ static int jail_pidfd_send_signal(int sig)
 static void jail_process_timeout_cb(struct uloop_timeout *t)
 {
 	DEBUG("jail process failed to stop, sending SIGKILL\n");
+	jail_stop_escalated = true;
 	jail_pidfd_send_signal(SIGKILL);
 }
 
@@ -5469,6 +5473,7 @@ static const char *annotation_get(struct blob_attr *attrs, const char *key)
 }
 
 static struct timespec jail_created;
+static uint64_t jail_created_uptime;
 
 static void oci_state_fill_runtime(struct blob_buf *b)
 {
@@ -7658,6 +7663,7 @@ static void post_main(struct uloop_timeout *t)
 	}
 
 	clock_gettime(CLOCK_REALTIME, &jail_created);
+	jail_created_uptime = uptime_get();
 	jail_oci_state = OCI_STATE_CREATED;
 
 	run_hooks(opts.hooks.prestart, post_prestart);
@@ -7690,6 +7696,15 @@ static void emit_instance_event(const char *event)
 		if (jail_reaped)
 			blobmsg_add_u32(&notify_buf, "exit_code",
 					jail_return_code);
+		if (jail_stop_requested)
+			blobmsg_add_u8(&notify_buf, "requested", 1);
+		if (jail_exec_acked)
+			blobmsg_add_u8(&notify_buf, "started", 1);
+		if (jail_stop_escalated)
+			blobmsg_add_u8(&notify_buf, "escalated", 1);
+		if (jail_created_uptime)
+			blobmsg_add_u64(&notify_buf, "created", jail_created_uptime);
+		blobmsg_add_u64(&notify_buf, "stopped_at", uptime_get());
 	}
 	ubus_send_event(parent_ctx, event, notify_buf.head);
 }
@@ -7749,6 +7764,7 @@ static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 	}
 
 	if (exec_ack_len == 1) {
+		jail_exec_acked = true;
 		emit_instance_event("instance.running");
 		poststart_dispatch(true);
 		return;
