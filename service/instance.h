@@ -46,6 +46,9 @@ struct jail {
 	char *idmap_offset;
 	char *consolesocket;
 	char *envfile;
+	char *statedir;
+	char *datadir;
+	char *started_by;
 	struct blobmsg_list mount;
 	struct blobmsg_list setns;
 	uint32_t stop_timeout;
