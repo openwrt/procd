@@ -165,8 +165,11 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 
 	blobmsg_parse_array(mkdev_policy, 3, tb, blobmsg_data(data), blobmsg_data_len(data));
 	if (tb[0] && tb[1] && minor && major && subsystem) {
+		const char *target = blobmsg_get_string(tb[0]);
+		mode_t mode = strtoul(blobmsg_data(tb[1]), NULL, 8);
 		mode_t m = S_IFCHR;
-		char *d = strdup(blobmsg_get_string(tb[0]));
+		char *d = strdup(target);
+		int ret;
 
 		d = dirname(d);
 		mkdir_p(d, 0755);
@@ -174,9 +177,9 @@ static void handle_makedev(struct blob_attr *msg, struct blob_attr *data)
 
 		if (!strcmp(subsystem, "block"))
 			m = S_IFBLK;
-		mknod(blobmsg_get_string(tb[0]),
-				m | strtoul(blobmsg_data(tb[1]), NULL, 8),
-				makedev(atoi(major), atoi(minor)));
+		ret = mknod(target, m | mode, makedev(atoi(major), atoi(minor)));
+		if (!ret || errno == EEXIST)
+			chmod(target, mode);
 		if (tb[2])
 			chgrp_target(tb[2], tb[0]);
 	}
