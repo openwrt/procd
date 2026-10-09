@@ -333,6 +333,7 @@ int parseOCIlinuxcgroups_devices(struct blob_attr *msg)
 	total_ins += 2;
 
 	/* allocate memory for eBPF program */
+	free(program);
 	program = calloc(total_ins, sizeof(struct bpf_insn));
 	if (!program) {
 		ret = ENOMEM;
