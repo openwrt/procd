@@ -49,6 +49,7 @@
 #include "container.h"
 #include "log.h"
 #include "state-file.h"
+#include "uptime.h"
 #include "stdio-fds.h"
 
 #define UXC_VERSION "0.3"
@@ -3524,6 +3525,54 @@ static int settings_edit(const char *name, struct blob_attr *patch, struct blob_
 	return 1;
 }
 
+static bool last_exit_reason_is(const char *name, const char *reason)
+{
+	struct blob_attr *tb[__UXC_WAIT_INST_MAX];
+	static struct blob_buf buf;
+	char path[PATH_MAX];
+	bool match = false;
+
+	if (rundir_path(name, "last-exit", path, sizeof(path)))
+		return false;
+
+	blob_buf_init(&buf, 0);
+	if (blobmsg_add_json_from_file(&buf, path)) {
+		blobmsg_parse(uxc_wait_inst_policy, __UXC_WAIT_INST_MAX, tb,
+			      blob_data(buf.head), blob_len(buf.head));
+		match = tb[UXC_WAIT_REASON] &&
+			!strcmp(blobmsg_get_string(tb[UXC_WAIT_REASON]), reason);
+	}
+	blob_buf_free(&buf);
+
+	return match;
+}
+
+static void last_exit_write(const char *name, const char *started_by,
+			    const char *reason, int err)
+{
+	static struct blob_buf buf;
+	char path[PATH_MAX];
+	int ret;
+
+	if (rundir_prepare(name, "last-exit", path, sizeof(path)))
+		return;
+
+	blob_buf_init(&buf, 0);
+	blobmsg_add_string(&buf, "service", name);
+	blobmsg_add_string(&buf, "instance", name);
+	blobmsg_add_string(&buf, "reason", reason);
+	if (err)
+		blobmsg_add_u32(&buf, "errno", err);
+	blobmsg_add_string(&buf, "started_by", started_by);
+	blobmsg_add_u64(&buf, "stopped_at", uptime_get());
+
+	ret = json_file_write(path, buf.head, 0644);
+	blob_buf_free(&buf);
+	if (ret)
+		fprintf(stderr, "uxc: warning: cannot write %s: %s\n", path,
+			strerror(-ret));
+}
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode,
 		      const char *started_by)
@@ -3563,6 +3612,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	imgvol = uvol_volume_name(path);
 	if (imgvol && run_uvol("up", imgvol)) {
 		fprintf(stderr, "uxc: failed to activate image volume %s\n", imgvol);
+		last_exit_write(name, started_by, "uxc.image-volume", EIO);
 		return -EIO;
 	}
 
@@ -3653,6 +3703,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (ret) {
 		blobmsg_close_table(&req, m);
 		blob_buf_free(&req);
+		last_exit_write(name, started_by, "uxc.data-volume", -ret);
 		return ret;
 	}
 	if (tb[CONF_HOSTS_FILE]) {
@@ -3680,6 +3731,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (!writepath && !tmprwsize && tb[CONF_OVERLAY_SIZE]) {
 		if (provision_rw_uvol(name, blobmsg_get_string(tb[CONF_OVERLAY_SIZE]))) {
 			blob_buf_free(&req);
+			last_exit_write(name, started_by, "uxc.overlay-volume", EIO);
 			return -EIO;
 		}
 		snprintf(overlaypath, sizeof(overlaypath), "/tmp/run/uvol/%s", name);
@@ -3707,6 +3759,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 
 	if (ubus_lookup_id(ctx, "container", &id)) {
 		blob_buf_free(&req);
+		last_exit_write(name, started_by, "uxc.add", EIO);
 		return -EIO;
 	}
 
@@ -3729,6 +3782,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (ret) {
 		blob_buf_free(&req);
 		uxc_wait_disarm();
+		last_exit_write(name, started_by, "uxc.add", EIO);
 		return -EIO;
 	}
 
@@ -4614,7 +4668,7 @@ static int uxc_boot(const char *mountpoint)
 	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
 	static struct blob_buf req, vols;
-	int rem, nvols, ret = 0;
+	int rem, nvols, status, ret = 0;
 	const char *imgvol;
 	unsigned int id;
 	bool autostart;
@@ -4691,9 +4745,13 @@ static int uxc_boot(const char *mountpoint)
 			continue;
 		}
 
-		if (imgvol && uvol_status(imgvol)) {
+		status = imgvol ? uvol_status(imgvol) : 0;
+		if (status) {
 			ERROR("uxc: %s image %s missing (interrupted upgrade?); run 'apk fix %s'\n",
 			      name, imgvol, name);
+			if (!last_exit_reason_is(name, "uxc.image-volume"))
+				last_exit_write(name, "boot", "uxc.image-volume",
+						status == 2 ? ENOENT : EIO);
 			free(name);
 			continue;
 		}
