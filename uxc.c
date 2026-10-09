@@ -313,6 +313,7 @@ struct uxc_wait_state {
 	const char *object;
 	char reason[96];
 	uint64_t since_incarnation;
+	bool escalated;
 	int result;
 	int err;
 };
@@ -325,6 +326,7 @@ enum {
 	UXC_WAIT_REASON,
 	UXC_WAIT_ERRNO,
 	UXC_WAIT_INCARNATION,
+	UXC_WAIT_ESCALATED,
 	__UXC_WAIT_INST_MAX,
 };
 
@@ -334,6 +336,7 @@ static const struct blobmsg_policy uxc_wait_inst_policy[__UXC_WAIT_INST_MAX] = {
 	[UXC_WAIT_REASON]      = { "reason",      BLOBMSG_TYPE_STRING },
 	[UXC_WAIT_ERRNO]       = { "errno",       BLOBMSG_TYPE_INT32 },
 	[UXC_WAIT_INCARNATION] = { "incarnation", BLOBMSG_TYPE_INT64 },
+	[UXC_WAIT_ESCALATED]   = { "escalated",   BLOBMSG_TYPE_BOOL },
 };
 
 static void uxc_wait_timeout_cb(struct uloop_timeout *t)
@@ -379,6 +382,8 @@ static void uxc_wait_event_cb(struct ubus_context *uctx,
 	if (tb[UXC_WAIT_ERRNO])
 		w->err = blobmsg_get_u32(tb[UXC_WAIT_ERRNO]);
 
+	w->escalated = tb[UXC_WAIT_ESCALATED] &&
+		       blobmsg_get_bool(tb[UXC_WAIT_ESCALATED]);
 	w->result = result;
 	uloop_end();
 }
@@ -4315,6 +4320,8 @@ static int uxc_kill(char *name, int signal, bool all)
 			fprintf(stderr, "uxc: interrupted while waiting for %s to stop\n", name);
 			ret = -EINTR;
 		}
+		if (wait_state.escalated)
+			fprintf(stderr, "uxc: %s did not stop on SIGTERM and was killed\n", name);
 	}
 
 out:
