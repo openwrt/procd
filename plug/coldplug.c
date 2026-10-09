@@ -18,6 +18,7 @@
 #include <sys/sysmacros.h>
 
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "../procd.h"
@@ -25,8 +26,36 @@
 
 #include "hotplug.h"
 #include "../container.h"
+#include "../initd/init.h"
+#include "../utils/utils.h"
 
 static struct uloop_process udevtrigger;
+
+static void coldplug_console(void)
+{
+	char line[256], *tty, *sep;
+	mode_t mode = 0600;
+
+	mknod("/dev/console", S_IFCHR | 0600, makedev(5, 1));
+
+	tty = get_cmdline_val("console", line, sizeof(line));
+	if (!tty || get_cmdline_val_offset("console", line, sizeof(line), 1))
+		return;
+
+	sep = strchr(tty, ',');
+	if (sep)
+		*sep = '\0';
+
+	if (!strcmp(tty, "console"))
+		return;
+
+	if (!strcmp(tty, "tty"))
+		mode = 0666;
+	else if (!strncmp(tty, "tty", 3))
+		mode = 0660;
+
+	mkdev(tty, mode);
+}
 
 static void coldplug_complete(struct uloop_timeout *t)
 {
@@ -51,6 +80,7 @@ void procd_coldplug(void)
 		umount2("/dev/", MNT_DETACH);
 		mount("tmpfs", "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, "mode=0755,size=512K");
 		mknod("/dev/null", S_IFCHR | 0666, makedev(1, 3));
+		coldplug_console();
 		mkdir("/dev/pts", 0755);
 		mount("devpts", "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0);
 	}
