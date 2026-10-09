@@ -104,7 +104,8 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"a:A:b:cC:d:De:EfFG:h:iI:j:J:k:lm:M:n:NoO:pP:q:r:R:sS:uU:V:w:x:t:T:yY:Z"
+#define OPT_ARGS	"a:A:b:cC:d:De:EfFg:G:h:iI:j:J:k:K:lm:M:n:NoO:pP:q:r:R:sS:uU:V:w:" \
+		"x:X:t:T:yY:Z"
 
 #define JAIL_MAX_CREDENTIALS	16
 static const char *cred_targets[JAIL_MAX_CREDENTIALS];
@@ -211,6 +212,9 @@ static struct {
 	struct blob_attr *netdevices;
 	int term_timeout;
 	int stop_timeout;
+	char *statedir;
+	char *datadir;
+	char *started_by;
 	struct {
 		bool set;
 		uint32_t policy;
@@ -2478,6 +2482,9 @@ static void usage(void)
 	fprintf(stderr, "  -P <pidfile>\tcreate <pidfile>\n");
 	fprintf(stderr, "  -a <fd>\tsend SIGCHLD through inherited pidfd <fd> once the container is gone\n");
 	fprintf(stderr, "  -A <num>\ttag the lifecycle events of this run with incarnation <num>\n");
+	fprintf(stderr, "  -g <origin>\ttag the lifecycle events with start origin <origin>\n");
+	fprintf(stderr, "  -X <dir>\tstate directory for the last exit record\n");
+	fprintf(stderr, "  -K <dir>\tpersistent directory handed to uxc-net\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
 and he has the same powers as root outside the jail,\n\
 thus he can escape the jail and/or break stuff.\n\
@@ -6904,6 +6911,15 @@ int main(int argc, char **argv)
 		case 'A':
 			opts.incarnation = strtoull(optarg, NULL, 10);
 			break;
+		case 'g':
+			opts.started_by = optarg;
+			break;
+		case 'X':
+			opts.statedir = optarg;
+			break;
+		case 'K':
+			opts.datadir = optarg;
+			break;
 		case 'Y':
 			opts.console_socket = optarg;
 			break;
@@ -6925,6 +6941,9 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
+
+	if (opts.started_by && !*opts.started_by)
+		opts.started_by = NULL;
 
 	if (opts.console_socket && parse_inherited_console_fd(opts.console_socket) < 0) {
 		static char fdspec[16];
@@ -7223,7 +7242,8 @@ static void post_prestart(void)
 
 static int run_uxc_net(const char *action)
 {
-	char *argv[] = { "/sbin/uxc-net", opts.name, (char *)action, opts.ocibundle, NULL };
+	char *argv[] = { "/sbin/uxc-net", opts.name, (char *)action, opts.ocibundle,
+			 opts.datadir, NULL };
 	pid_t pid;
 	int status;
 
@@ -7686,6 +7706,8 @@ static void emit_instance_event(const char *event)
 	blobmsg_add_u32(&notify_buf, "pid", getpid());
 	if (opts.incarnation)
 		blobmsg_add_u64(&notify_buf, "incarnation", opts.incarnation);
+	if (opts.started_by)
+		blobmsg_add_string(&notify_buf, "started_by", opts.started_by);
 	if (!strcmp(event, "instance.stopped") ||
 	    !strcmp(event, "instance.create_failed")) {
 		if (jail_reason)
