@@ -77,6 +77,8 @@ struct runtime_state {
 	int exitcode;
 	uint64_t incarnation;
 	uint32_t stop_timeout;
+	char *started_by;
+	struct blob_attr *instance;
 	struct blob_attr *ocistate;
 };
 
@@ -945,6 +947,7 @@ enum {
 	INSTANCE_INCARNATION,
 	INSTANCE_EXITCODE,
 	INSTANCE_JAIL,
+	INSTANCE_DATA,
 	__INSTANCE_MAX,
 };
 
@@ -954,17 +957,20 @@ static const struct blobmsg_policy instance_policy[__INSTANCE_MAX] = {
 	[INSTANCE_INCARNATION] = { .name = "incarnation", .type = BLOBMSG_TYPE_INT64 },
 	[INSTANCE_EXITCODE] = { .name = "exit_code", .type = BLOBMSG_TYPE_INT32 },
 	[INSTANCE_JAIL] = { .name = "jail", .type = BLOBMSG_TYPE_TABLE },
+	[INSTANCE_DATA] = { .name = "data", .type = BLOBMSG_TYPE_TABLE },
 };
 
 enum {
 	JAIL_NAME,
 	JAIL_STOP_TIMEOUT,
+	JAIL_STARTED_BY,
 	__JAIL_MAX,
 };
 
 static const struct blobmsg_policy jail_policy[__JAIL_MAX] = {
 	[JAIL_NAME] = { .name = "name", .type = BLOBMSG_TYPE_STRING },
 	[JAIL_STOP_TIMEOUT] = { .name = "stop_timeout", .type = BLOBMSG_TYPE_INT32 },
+	[JAIL_STARTED_BY] = { .name = "started_by", .type = BLOBMSG_TYPE_STRING },
 };
 
 static struct runtime_state *
@@ -1116,6 +1122,9 @@ static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 			rs->running = running;
 			if (tj[JAIL_STOP_TIMEOUT])
 				rs->stop_timeout = blobmsg_get_u32(tj[JAIL_STOP_TIMEOUT]);
+			if (tj[JAIL_STARTED_BY])
+				rs->started_by = strdup(blobmsg_get_string(tj[JAIL_STARTED_BY]));
+			rs->instance = blob_memdup(curi);
 			avl_insert(&runtime, &rs->avl);
 		}
 	}
@@ -1220,6 +1229,8 @@ static void runtime_free(void)
 		avl_delete(&runtime, &item->avl);
 		free(item->instance_name);
 		free(item->jail_name);
+		free(item->started_by);
+		free(item->instance);
 		free(item->ocistate);
 		free(item);
 	}
