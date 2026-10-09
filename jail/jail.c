@@ -7689,16 +7689,43 @@ static void post_main(struct uloop_timeout *t)
 	run_hooks(opts.hooks.prestart, post_prestart);
 }
 
-static void emit_instance_event(const char *event)
+static void jail_write_last_exit(void)
 {
-	if (!opts.ocibundle || !opts.name || !parent_ctx)
+	char path[PATH_MAX];
+	uid_t euid;
+	char *s;
+	int rc;
+
+	if (!opts.statedir || jail_restarting())
 		return;
 
-	if (!strcmp(event, "instance.stopped") && !exit_from_child &&
-	    !cgroups_destroyed()) {
-		ERROR("instance.stopped emitted before the cgroup was destroyed\n");
-		cgroups_destroy();
-	}
+	if (snprintf(path, sizeof(path), "%s/last-exit", opts.statedir) >=
+	    (int)sizeof(path))
+		return;
+
+	s = blobmsg_format_json(notify_buf.head, true);
+	if (!s)
+		return;
+
+	euid = geteuid();
+	if (euid && seteuid(0))
+		ERROR("seteuid(0) failed: %m\n");
+
+	rc = file_write_atomic(path, s, strlen(s), 0644);
+	if (euid && seteuid(euid))
+		ERROR("seteuid(%d) failed: %m\n", euid);
+
+	free(s);
+	if (rc < 0)
+		ERROR("cannot write %s: %s\n", path, strerror(-rc));
+}
+
+static bool instance_event_build(const char *event)
+{
+	char boot_id[40];
+
+	if (!opts.ocibundle || !opts.name)
+		return false;
 
 	blob_buf_init(&notify_buf, 0);
 	blobmsg_add_string(&notify_buf, "service", opts.name);
@@ -7727,8 +7754,30 @@ static void emit_instance_event(const char *event)
 		if (jail_created_uptime)
 			blobmsg_add_u64(&notify_buf, "created", jail_created_uptime);
 		blobmsg_add_u64(&notify_buf, "stopped_at", uptime_get());
+		if (boot_id_get(boot_id, sizeof(boot_id)))
+			blobmsg_add_string(&notify_buf, "boot_id", boot_id);
 	}
-	ubus_send_event(parent_ctx, event, notify_buf.head);
+
+	return true;
+}
+
+static void emit_instance_event(const char *event)
+{
+	if (!instance_event_build(event))
+		return;
+
+	if (!strcmp(event, "instance.stopped") && !exit_from_child &&
+	    !cgroups_destroyed()) {
+		ERROR("instance.stopped emitted before the cgroup was destroyed\n");
+		cgroups_destroy();
+	}
+
+	if (!strcmp(event, "instance.stopped") ||
+	    !strcmp(event, "instance.create_failed"))
+		jail_write_last_exit();
+
+	if (parent_ctx)
+		ubus_send_event(parent_ctx, event, notify_buf.head);
 }
 
 static void post_poststart(void);
