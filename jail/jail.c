@@ -6228,6 +6228,8 @@ static void signals_init(void)
 		s.sa_handler = jail_handle_signal;
 		sigaction(i, &s, NULL);
 	}
+
+	sigprocmask(SIG_UNBLOCK, &sigmask, NULL);
 }
 
 static void parent_pidfd_check(void)

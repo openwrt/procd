@@ -1127,7 +1127,13 @@ instance_start(struct service_instance *in)
 
 	if (!pid) {
 		procd_signal_reset();
-		procd_signal_restore(&oldset);
+		/*
+		 * A signal sent to a starting instance, e.g. the reload SIGHUP,
+		 * would kill ujail before it installs its handlers. Keep the
+		 * signals pending; ujail unblocks them once it can forward them.
+		 */
+		if (!in->has_jail)
+			procd_signal_restore(&oldset);
 		uloop_done();
 		closefd(opipe[0]);
 		closefd(epipe[0]);
