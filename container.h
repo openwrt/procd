@@ -23,7 +23,7 @@
 #define PROCD_NOAFILE_DIR "/tmp/.ujail"
 #define PROCD_NOAFILE PROCD_NOAFILE_DIR "/noafile"
 
-#define UXC_STOP_TIMEOUT 120
+#define UXC_STOP_TIMEOUT 10
 
 static inline bool is_container() {
 	struct stat s;
