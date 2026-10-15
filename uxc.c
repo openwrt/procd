@@ -58,6 +58,7 @@
 #define UXC_VOL_SECRETDIR "/tmp/run/uvol/.meta/secrets"
 #define UXC_RUN_DIR "/tmp/run/uxc"
 #define UXC_VOL_PROVISIONDIR "/tmp/run/uvol/.meta/provision"
+#define UXC_DISABLED_MARKER UXC_ETC_CONFDIR "/disabled"
 #define PROVISION_STAGE_SUFFIX ".new"
 #define HOSTS_FILE_DEST "/etc/hosts"
 
@@ -557,6 +558,8 @@ static void usage(void) {
 	printf("\t\t\t\t\t\tprovision provision=<dst> stop-timeout resources\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
+	printf("\tdisable-all\t\t\t\tstop every container and refuse creates until enable-all\n");
+	printf("\tenable-all\t\t\t\tallow creates again and start the autostart containers\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
 	printf("\tresume <conf>\t\t\t\tthaw a previously paused container <conf>\n");
 	printf("\texec <conf> [--process <file>] [-d] [-p <pid-file>] [-- cmd args]\n");
@@ -4082,6 +4085,21 @@ static void uxc_create_respawn_add(struct blob_buf *req, const char *name,
 	blobmsg_close_table(req, t);
 }
 
+static bool containers_disabled(void)
+{
+	return !access(UXC_DISABLED_MARKER, F_OK);
+}
+
+static int containers_disabled_refuse(const char *name)
+{
+	if (!containers_disabled())
+		return 0;
+
+	fprintf(stderr, "uxc: containers are disabled, not creating %s\n", name);
+
+	return -EPERM;
+}
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode,
 		      const char *started_by)
@@ -4104,6 +4122,10 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	int notify_fd;
 	int ret = 0;
 	uint32_t id;
+
+	ret = containers_disabled_refuse(name);
+	if (ret)
+		return ret;
 
 	if (!registration_find(name, tb))
 		return -ENOENT;
@@ -4663,6 +4685,8 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 		blobmsg_close_table(b, v);
 	}
 	blobmsg_add_u8(b, "autostart", autostart_effective(tb, us));
+	if (containers_disabled())
+		blobmsg_add_u8(b, "containers-disabled", 1);
 
 	overlay_resolve(tb, us, name, &overlay);
 	o = blobmsg_open_table(b, "overlay");
@@ -5159,19 +5183,15 @@ static bool respawn_cancelled(const char *name)
 	return true;
 }
 
-static int uxc_kill(char *name, int signal, bool all)
+static int runtime_kill(char *name, int signal, bool all)
 {
 	struct runtime_state *rsstate = NULL;
 	struct uxc_wait_state wait_state;
-	struct blob_attr *tb[__CONF_MAX];
 	bool wait_stop = (signal < 0);
 	static struct blob_buf req;
 	unsigned int id;
 	char *objname;
 	int ret;
-
-	if (!registration_find(name, tb))
-		return -ENOENT;
 
 	rsstate = avl_find_element(&runtime, name, rsstate, avl);
 
@@ -5242,6 +5262,16 @@ static int uxc_kill(char *name, int signal, bool all)
 out:
 	free(objname);
 	return ret;
+}
+
+static int uxc_kill(char *name, int signal, bool all)
+{
+	struct blob_attr *tb[__CONF_MAX];
+
+	if (!registration_find(name, tb))
+		return -ENOENT;
+
+	return runtime_kill(name, signal, all);
 }
 
 static int uxc_restart(char *name, bool systemd_cgroup)
@@ -5830,6 +5860,11 @@ static int uxc_boot(const char *mountpoint)
 	unsigned int id;
 	char *name;
 
+	if (containers_disabled()) {
+		fprintf(stderr, "uxc: containers are disabled, not starting any\n");
+		return 0;
+	}
+
 	ret = ubus_lookup_id(ctx, "block", &id);
 	if (ret)
 		return -ENOENT;
@@ -5991,6 +6026,41 @@ static int reconcile_purge(const char *base, const char *name, const char *state
 	fprintf(stderr, "uxc: reconcile: purged orphaned state for %s\n", name);
 
 	return 0;
+}
+
+static int uxc_disable_all(void)
+{
+	struct runtime_state *rs;
+	int ret, err;
+
+	if (mkdir(UXC_ETC_CONFDIR, 0755) && errno != EEXIST)
+		ret = -errno;
+	else
+		ret = file_write_atomic(UXC_DISABLED_MARKER, "", 0, 0644);
+
+	if (ret) {
+		fprintf(stderr, "uxc: cannot write %s: %s\n", UXC_DISABLED_MARKER,
+			strerror(-ret));
+		return ret;
+	}
+
+	avl_for_each_element(&runtime, rs, avl) {
+		err = runtime_live(rs) ? runtime_kill(rs->container_name, -1, false) : 0;
+		if (err && !ret)
+			ret = err;
+
+		uxc_instance_drop(rs->container_name);
+	}
+
+	return ret;
+}
+
+static int uxc_enable_all(void)
+{
+	if (unlink(UXC_DISABLED_MARKER) && errno != ENOENT)
+		return -errno;
+
+	return uxc_boot(NULL);
 }
 
 static int reconcile_base(const char *base, int *purged)
@@ -6474,6 +6544,14 @@ next_global:
 			goto usage_out;
 		uxc_reconcile();
 		ret = uxc_boot(verb_argc == 2 ? verb_argv[1] : NULL);
+	} else if (!strcmp(verb, "disable-all")) {
+		if (verb_argc != 1)
+			goto usage_out;
+		ret = uxc_disable_all();
+	} else if (!strcmp(verb, "enable-all")) {
+		if (verb_argc != 1)
+			goto usage_out;
+		ret = uxc_enable_all();
 	} else if (!strcmp(verb, "reconcile")) {
 		if (verb_argc != 1)
 			goto usage_out;
@@ -6628,7 +6706,7 @@ next_global:
 			goto usage_out;
 		name = verb_argv[optind];
 
-		ret = uxc_exists(name);
+		ret = uxc_exists(name) ?: containers_disabled_refuse(name);
 		if (ret)
 			goto runtime_out;
 
