@@ -544,7 +544,7 @@ static int conf_load(bool load_settings)
 		return 0;
 
 	for (j = 0; j < gl.gl_pathc; j++) {
-		o = blobmsg_open_table(target, strdup(gl.gl_pathv[j]));
+		o = blobmsg_open_table(target, gl.gl_pathv[j]);
 		if (!blobmsg_add_json_from_file(target, gl.gl_pathv[j])) {
 			ERROR("uxc: failed to load %s\n", gl.gl_pathv[j]);
 			continue;
