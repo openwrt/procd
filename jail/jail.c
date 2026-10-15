@@ -249,11 +249,6 @@ static int num_volume_sources;
 static int exec_ack[2] = { -1, -1 };
 static char exec_ack_buf[1 + sizeof(int)];
 static size_t exec_ack_len;
-static void exec_ack_cb(struct uloop_fd *fd, unsigned int events);
-static struct uloop_fd exec_ack_uloop = {
-	.cb = exec_ack_cb,
-};
-
 extern int pivot_root(const char *new_root, const char *put_old);
 
 int debug = 0;
@@ -473,7 +468,6 @@ int console_fd;
 static int console_slave_fd = -1;
 static char console_slave_name[64];
 
-
 /*
  * Joining a namespace by path needs privilege in the user namespace owning it,
  * which our own user namespace would take away, so in that case it is created
@@ -673,72 +667,6 @@ static void free_opts(bool parent) {
 	}
 }
 
-static int mount_overlay(char *jail_root, char *overlaydir) {
-	char *upperdir, *workdir, *optsstr, *upperetc, *upperresolvconf;
-	const char mountoptsformat[] = "lowerdir=%s,upperdir=%s,workdir=%s";
-	const char mountoptsformat_userns[] = "lowerdir=%s,upperdir=%s,workdir=%s,userxattr";
-	int ret = -1, fd;
-
-	if (asprintf(&upperdir, "%s%s", overlaydir, "/upper") < 0)
-		goto out;
-
-	if (asprintf(&workdir, "%s%s", overlaydir, "/work") < 0)
-		goto upper_printf;
-
-	if (asprintf(&optsstr,
-		     (opts.namespace & CLONE_NEWUSER) ? mountoptsformat_userns : mountoptsformat,
-		     jail_root, upperdir, workdir) < 0)
-		goto work_printf;
-
-	if (mkdir_p(upperdir, 0755) || mkdir_p(workdir, 0755))
-		goto opts_printf;
-
-/*
- * make sure /etc/resolv.conf exists in overlay and is owned by jail userns root
- * this is to work-around a bug in overlayfs described in the overlayfs-userns
- * patch:
- * 3. modification of a file 'hithere' which is in l but not yet
- * in u, and which is not owned by T, is not allowed, even if
- * writes to u are allowed.  This may be a bug in overlayfs,
- * but it is safe behavior.
- */
-	if (asprintf(&upperetc, "%s/etc", upperdir) < 0)
-		goto opts_printf;
-
-	if (mkdir_p(upperetc, 0755))
-		goto upper_etc_printf;
-
-	if (asprintf(&upperresolvconf, "%s/resolv.conf", upperetc) < 0)
-		goto upper_etc_printf;
-
-	fd = creat(upperresolvconf, 0644);
-	if (fd < 0) {
-		if (errno != EEXIST)
-			ERROR("creat(%s) failed: %m\n", upperresolvconf);
-	} else {
-		close(fd);
-	}
-	DEBUG("mount -t overlay %s %s (%s)\n", jail_root, jail_root, optsstr);
-
-	if (mount(jail_root, jail_root, "overlay", MS_NOATIME, optsstr))
-		goto upper_resolvconf_printf;
-
-	ret = 0;
-
-upper_resolvconf_printf:
-	free(upperresolvconf);
-upper_etc_printf:
-	free(upperetc);
-opts_printf:
-	free(optsstr);
-work_printf:
-	free(workdir);
-upper_printf:
-	free(upperdir);
-out:
-	return ret;
-}
-
 static void pass_console(int console_fd)
 {
 	struct ubus_context *child_ctx = ubus_connect(NULL);
@@ -868,37 +796,6 @@ static int send_console_fd(const char *spec, int console_fd, const char *slave_n
 	return ret;
 }
 
-static int create_dev_console(const char *jail_root)
-{
-	char dev_console_path[PATH_MAX];
-	char fdpath[64];
-	int dev_console_dummy;
-
-	if (console_slave_fd < 0)
-		return 1;
-
-	snprintf(dev_console_path, sizeof(dev_console_path), "%s/dev/console", jail_root);
-	dev_console_dummy = creat(dev_console_path, 0620);
-	if (dev_console_dummy >= 0)
-		close(dev_console_dummy);
-
-	snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", console_slave_fd);
-	if (mount(fdpath, dev_console_path, "bind", MS_BIND, NULL))
-		return 1;
-
-	setsid();
-	if (ioctl(console_slave_fd, TIOCSCTTY, 0) < 0)
-		WARNING("TIOCSCTTY on guest console failed: %m\n");
-
-	dup2(console_slave_fd, 0);
-	dup2(console_slave_fd, 1);
-	dup2(console_slave_fd, 2);
-	if (console_slave_fd > 2)
-		close(console_slave_fd);
-
-	return 0;
-}
-
 static int hook_running = 0;
 static int hook_return_code = 0;
 static bool hook_chain_failed = false;
@@ -906,13 +803,19 @@ static struct hook_execvpe **current_hook = NULL;
 typedef void (*hook_return_handler)(void);
 static hook_return_handler hook_return_cb = NULL;
 
-static void hook_process_timeout_cb(struct uloop_timeout *t);
+static void run_hooklist(void);
+static struct uloop_process hook_process;
+
+static void hook_process_timeout_cb(struct uloop_timeout *t)
+{
+	DEBUG("hook process failed to stop, sending SIGKILL\n");
+	kill(hook_process.pid, SIGKILL);
+}
+
 static struct uloop_timeout hook_process_timeout = {
 	.cb = hook_process_timeout_cb,
 };
 
-static void run_hooklist(void);
-static void oci_state_fill(struct blob_buf *b);
 static void hook_process_handler(struct uloop_process *c, int ret)
 {
 	uloop_timeout_cancel(&hook_process_timeout);
@@ -935,110 +838,6 @@ static void hook_process_handler(struct uloop_process *c, int ret)
 	run_hooklist();
 }
 
-static struct uloop_process hook_process;
-
-static void hook_process_timeout_cb(struct uloop_timeout *t)
-{
-	DEBUG("hook process failed to stop, sending SIGKILL\n");
-	kill(hook_process.pid, SIGKILL);
-}
-
-static int hook_state_fd(void)
-{
-	static struct blob_buf sb;
-	char *state;
-	size_t len;
-	int fd;
-
-	blob_buf_init(&sb, 0);
-	oci_state_fill(&sb);
-	state = blobmsg_format_json(sb.head, true);
-	if (!state)
-		return -1;
-
-	fd = memfd_create("oci-state", MFD_CLOEXEC);
-	if (fd < 0) {
-		free(state);
-		return -1;
-	}
-
-	len = strlen(state);
-	if (write(fd, state, len) != (ssize_t)len ||
-	    lseek(fd, 0, SEEK_SET) == (off_t)-1) {
-		WARNING("cannot pass the container state to the hook: %m\n");
-		free(state);
-		close(fd);
-		return -1;
-	}
-
-	free(state);
-
-	return fd;
-}
-
-static void run_hooklist(void)
-{
-	struct hook_execvpe *hook = *current_hook;
-	int state_fd;
-	struct stat s;
-
-	if (!hook)
-		return hook_return_cb();
-
-	DEBUG("executing hook %s\n", hook->file);
-
-	if (stat(hook->file, &s)) {
-		hook_process_handler(&hook_process, ENOENT);
-		return;
-	}
-
-	if (!((unsigned long)s.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-		hook_process_handler(&hook_process, EPERM);
-		return;
-	}
-
-	state_fd = hook_state_fd();
-
-	hook_running = 1;
-	hook_process.pid = fork();
-	if (hook_process.pid == 0) {
-		/* child */
-		if (state_fd > -1) {
-			dup2(state_fd, STDIN_FILENO);
-			close(state_fd);
-		}
-		execve(hook->file, hook->argv, hook->envp);
-		ERROR("execve error %m\n");
-		_exit(errno);
-	} else if (hook_process.pid < 0) {
-		/* fork error */
-		ERROR("hook fork error\n");
-		hook_running = 0;
-		if (state_fd > -1)
-			close(state_fd);
-		hook_process_handler(&hook_process, errno);
-		return;
-	}
-
-	/* parent */
-	if (state_fd > -1)
-		close(state_fd);
-
-	hook_process.cb = hook_process_handler;
-	uloop_process_add(&hook_process);
-
-	if (hook->timeout > 0)
-		uloop_timeout_set(&hook_process_timeout, 1000 * hook->timeout);
-
-	uloop_run();
-	if (hook_running) {
-		DEBUG("uloop interrupted, killing jail process\n");
-		kill(hook_process.pid, SIGTERM);
-		uloop_timeout_set(&hook_process_timeout, 1000);
-		uloop_run();
-	}
-}
-
 static void run_hooks(struct hook_execvpe **hooklist, hook_return_handler return_cb)
 {
 	hook_chain_failed = false;
@@ -1052,56 +851,6 @@ static void run_hooks(struct hook_execvpe **hooklist, hook_return_handler return
 	hook_return_cb = return_cb;
 
 	run_hooklist();
-}
-
-static int apply_sysctl(const char *jail_root)
-{
-	struct sysctl_val **cur;
-	char *procdir, *fname;
-	int f;
-
-	if (!opts.sysctl)
-		return 0;
-
-	if (asprintf(&procdir, "%s/proc", jail_root) < 0)
-		return ENOMEM;
-
-	if (mkdir(procdir, 0700))
-		return errno;
-
-	if (mount("proc", procdir, "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0))
-		return EPERM;
-
-	cur = opts.sysctl;
-
-	while (*cur) {
-		if (asprintf(&fname, "%s/sys/%s", procdir, (*cur)->entry) < 0)
-			return ENOMEM;
-
-		DEBUG("sysctl: writing '%s' to %s\n", (*cur)->value, fname);
-
-		f = open(fname, O_WRONLY);
-		if (f < 0) {
-			ERROR("sysctl: can't open %s\n", fname);
-			free(fname);
-			return errno;
-		}
-		if (write(f, (*cur)->value, strlen((*cur)->value)) < 0) {
-			ERROR("sysctl: write to %s\n", fname);
-			free(fname);
-			close(f);
-			return errno;
-		}
-
-		free(fname);
-		close(f);
-		++cur;
-	}
-	umount(procdir);
-	rmdir(procdir);
-	free(procdir);
-
-	return 0;
 }
 
 /* glibc defines makedev calling a function. make sure it's a pure macro */
@@ -1240,6 +989,153 @@ static int prepare_jail_dev(void)
 }
 
 static char jail_root[] = "/tmp/ujail-XXXXXX";
+static int mount_overlay(char *jail_root, char *overlaydir) {
+	char *upperdir, *workdir, *optsstr, *upperetc, *upperresolvconf;
+	const char mountoptsformat[] = "lowerdir=%s,upperdir=%s,workdir=%s";
+	const char mountoptsformat_userns[] = "lowerdir=%s,upperdir=%s,workdir=%s,userxattr";
+	int ret = -1, fd;
+
+	if (asprintf(&upperdir, "%s%s", overlaydir, "/upper") < 0)
+		goto out;
+
+	if (asprintf(&workdir, "%s%s", overlaydir, "/work") < 0)
+		goto upper_printf;
+
+	if (asprintf(&optsstr,
+		     (opts.namespace & CLONE_NEWUSER) ? mountoptsformat_userns : mountoptsformat,
+		     jail_root, upperdir, workdir) < 0)
+		goto work_printf;
+
+	if (mkdir_p(upperdir, 0755) || mkdir_p(workdir, 0755))
+		goto opts_printf;
+
+/*
+ * make sure /etc/resolv.conf exists in overlay and is owned by jail userns root
+ * this is to work-around a bug in overlayfs described in the overlayfs-userns
+ * patch:
+ * 3. modification of a file 'hithere' which is in l but not yet
+ * in u, and which is not owned by T, is not allowed, even if
+ * writes to u are allowed.  This may be a bug in overlayfs,
+ * but it is safe behavior.
+ */
+	if (asprintf(&upperetc, "%s/etc", upperdir) < 0)
+		goto opts_printf;
+
+	if (mkdir_p(upperetc, 0755))
+		goto upper_etc_printf;
+
+	if (asprintf(&upperresolvconf, "%s/resolv.conf", upperetc) < 0)
+		goto upper_etc_printf;
+
+	fd = creat(upperresolvconf, 0644);
+	if (fd < 0) {
+		if (errno != EEXIST)
+			ERROR("creat(%s) failed: %m\n", upperresolvconf);
+	} else {
+		close(fd);
+	}
+	DEBUG("mount -t overlay %s %s (%s)\n", jail_root, jail_root, optsstr);
+
+	if (mount(jail_root, jail_root, "overlay", MS_NOATIME, optsstr))
+		goto upper_resolvconf_printf;
+
+	ret = 0;
+
+upper_resolvconf_printf:
+	free(upperresolvconf);
+upper_etc_printf:
+	free(upperetc);
+opts_printf:
+	free(optsstr);
+work_printf:
+	free(workdir);
+upper_printf:
+	free(upperdir);
+out:
+	return ret;
+}
+
+static int create_dev_console(const char *jail_root)
+{
+	char dev_console_path[PATH_MAX];
+	char fdpath[64];
+	int dev_console_dummy;
+
+	if (console_slave_fd < 0)
+		return 1;
+
+	snprintf(dev_console_path, sizeof(dev_console_path), "%s/dev/console", jail_root);
+	dev_console_dummy = creat(dev_console_path, 0620);
+	if (dev_console_dummy >= 0)
+		close(dev_console_dummy);
+
+	snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", console_slave_fd);
+	if (mount(fdpath, dev_console_path, "bind", MS_BIND, NULL))
+		return 1;
+
+	setsid();
+	if (ioctl(console_slave_fd, TIOCSCTTY, 0) < 0)
+		WARNING("TIOCSCTTY on guest console failed: %m\n");
+
+	dup2(console_slave_fd, 0);
+	dup2(console_slave_fd, 1);
+	dup2(console_slave_fd, 2);
+	if (console_slave_fd > 2)
+		close(console_slave_fd);
+
+	return 0;
+}
+
+static int apply_sysctl(const char *jail_root)
+{
+	struct sysctl_val **cur;
+	char *procdir, *fname;
+	int f;
+
+	if (!opts.sysctl)
+		return 0;
+
+	if (asprintf(&procdir, "%s/proc", jail_root) < 0)
+		return ENOMEM;
+
+	if (mkdir(procdir, 0700))
+		return errno;
+
+	if (mount("proc", procdir, "proc", MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0))
+		return EPERM;
+
+	cur = opts.sysctl;
+
+	while (*cur) {
+		if (asprintf(&fname, "%s/sys/%s", procdir, (*cur)->entry) < 0)
+			return ENOMEM;
+
+		DEBUG("sysctl: writing '%s' to %s\n", (*cur)->value, fname);
+
+		f = open(fname, O_WRONLY);
+		if (f < 0) {
+			ERROR("sysctl: can't open %s\n", fname);
+			free(fname);
+			return errno;
+		}
+		if (write(f, (*cur)->value, strlen((*cur)->value)) < 0) {
+			ERROR("sysctl: write to %s\n", fname);
+			free(fname);
+			close(f);
+			return errno;
+		}
+
+		free(fname);
+		close(f);
+		++cur;
+	}
+	umount(procdir);
+	rmdir(procdir);
+	free(procdir);
+
+	return 0;
+}
+
 /* Handshake for the deferred CLONE_NEWUSER creation in enter_userns(). */
 int userns_pipe[4];
 
@@ -1351,8 +1247,6 @@ static int sock_recv_fds(int sock, char *tag, int *fds, int maxfds)
 
 	return nfds;
 }
-
-static void enter_jail_fs(void);
 
 static size_t path_depth(const char *path)
 {
@@ -1505,135 +1399,7 @@ static void jail_tmpdir_remove(const char *dir)
 	unlinkat(jail_tmp_dirfd, base ? base + 1 : dir, AT_REMOVEDIR);
 }
 
-static int build_jail_fs(void)
-{
-	char *overlaydir = NULL;
-	int ret;
-
-	old_umask = umask(0);
-
-	if (opts.console && console_slave_name[0]) {
-		console_slave_fd = open(console_slave_name, O_RDWR | O_NOCTTY);
-		if (console_slave_fd < 0)
-			WARNING("open guest console slave %s: %m\n", console_slave_name);
-	}
-
-	jail_tmp_dirfd = open("/tmp", O_PATH | O_DIRECTORY | O_CLOEXEC);
-
-	if (mkdtemp(jail_root) == NULL) {
-		ERROR("mkdtemp(%s) failed: %m\n", jail_root);
-		return -1;
-	}
-
-	if (apply_sysctl(jail_root)) {
-		ERROR("failed to apply sysctl values\n");
-		return -1;
-	}
-
-	if (opts.extroot) {
-		if (extroot_idmap_fd >= 0) {
-			if (sys_move_mount(extroot_idmap_fd, "", AT_FDCWD, jail_root, MOVE_MOUNT_F_EMPTY_PATH)) {
-				ERROR("move_mount(idmapped extroot) failed: %m\n");
-				return -1;
-			}
-			close(extroot_idmap_fd);
-			extroot_idmap_fd = -1;
-		} else if (mount(opts.extroot, jail_root, "bind", MS_BIND, NULL)) {
-			ERROR("extroot mount failed %m\n");
-			return -1;
-		}
-	} else {
-		if (mount("tmpfs", jail_root, "tmpfs", MS_NOATIME, "mode=0755")) {
-			ERROR("tmpfs mount failed %m\n");
-			return -1;
-		}
-	}
-
-	if (opts.tmpoverlaysize) {
-		char mountoptsstr[] = "mode=0755,size=XXXXXXXX";
-
-		snprintf(mountoptsstr, sizeof(mountoptsstr),
-			 "mode=0755,size=%s", opts.tmpoverlaysize);
-		if (mkdtemp(tmpovdir) == NULL) {
-			ERROR("mkdtemp(%s) failed: %m\n", jail_root);
-			return -1;
-		}
-		if (mount("tmpfs", tmpovdir, "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID | MS_NODEV,
-			  mountoptsstr)) {
-			ERROR("failed to mount tmpfs for overlay (size=%s)\n", opts.tmpoverlaysize);
-			return -1;
-		}
-		overlaydir = tmpovdir;
-	}
-
-	if (opts.overlaydir)
-		overlaydir = opts.overlaydir;
-
-	if (overlaydir) {
-		if (overlay_idmap_fd >= 0) {
-			if (sys_move_mount(overlay_idmap_fd, "", AT_FDCWD, overlaydir, MOVE_MOUNT_F_EMPTY_PATH)) {
-				ERROR("move_mount(idmapped overlay upper) failed: %m\n");
-				return -1;
-			}
-			close(overlay_idmap_fd);
-			overlay_idmap_fd = -1;
-		} else if (mount(NULL, overlaydir, NULL,
-			  MS_BIND | MS_REMOUNT | MS_NOEXEC | MS_NOSUID | MS_NODEV, NULL)) {
-			WARNING("failed to harden overlay upper %s: %m\n", overlaydir);
-		}
-
-		ret = mount_overlay(jail_root, overlaydir);
-		if (ret)
-			return ret;
-	}
-
-	if (chdir(jail_root)) {
-		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
-		return -1;
-	}
-
-	jail_fs_set_userns(jail_has_userns());
-
-	if (mount_all(jail_root, jail_dev)) {
-		ERROR("mount_all() failed\n");
-		return -1;
-	}
-
-	if (opts.console)
-		create_dev_console(jail_root);
-
-	if ((opts.namespace & CLONE_NEWNET) && opts.private_netifd) {
-		char jailetc[PATH_MAX], devresolv[PATH_MAX], etcresolv[PATH_MAX];
-		struct stat rcst;
-		int treefd;
-
-		snprintf(devresolv, PATH_MAX, "%s/dev/resolv.conf", jail_root);
-		snprintf(etcresolv, PATH_MAX, "%s/etc/resolv.conf", jail_root);
-		if (stat(etcresolv, &rcst) && (overlaydir || !opts.ronly)) {
-			snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
-			mkdir_p(jailetc, 0755);
-			close(creat(etcresolv, 0644));
-		}
-		if (!stat(etcresolv, &rcst)) {
-			treefd = sys_open_tree(AT_FDCWD, devresolv,
-					       OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_SYMLINK_NOFOLLOW);
-			if (treefd < 0) {
-				WARNING("open_tree(/dev/resolv.conf) failed: %m\n");
-			} else {
-				if (sys_move_mount(treefd, "", AT_FDCWD, etcresolv, MOVE_MOUNT_F_EMPTY_PATH))
-					WARNING("move_mount onto /etc/resolv.conf failed: %m\n");
-				close(treefd);
-			}
-		}
-	}
-
-	run_hooks(opts.hooks.createContainer, enter_jail_fs);
-
-	return 0;
-}
-
 static bool exit_from_child;
-static void emit_instance_event(const char *event);
 static bool pidfile_sibling(const char *pidfile, const char *name, char *path, size_t len)
 {
 	char *slash;
@@ -1693,9 +1459,6 @@ static void notify_signal(int fd)
 	syscall(SYS_pidfd_send_signal, fd, SIGCHLD, NULL, 0);
 }
 
-static bool jail_ptrace_seccomp(void);
-static bool jail_inproc_seccomp(void);
-
 static int restart_argv_save(int argc, char **argv)
 {
 	int i;
@@ -1747,106 +1510,6 @@ static void jail_restart_exec(void)
 	free(argv);
 }
 
-static void free_and_exit(int ret)
-{
-	if (!exit_from_child && !stop_announced && !jail_restarting())
-		notify_signal(opts.notify_fd);
-
-	if (!exit_from_child && opts.jail_network_started) {
-		jail_network_teardown();
-		opts.jail_network_started = false;
-	}
-
-	if (!exit_from_child && opts.ocibundle && container_registered)
-		cgroups_destroy();
-
-	if (!exit_from_child && opts.ocibundle)
-		cgroups_free();
-
-	if (!exit_from_child && jail_dev_staged) {
-		umount2(jail_dev, MNT_DETACH);
-		rmdir(jail_dev);
-		jail_dev_staged = false;
-	}
-
-	if (!exit_from_child && !stop_announced && opts.ocibundle && parent_ctx &&
-	    opts.name) {
-		if (jail_restarting())
-			jail_reason_set("jail.restart", 0);
-
-		emit_instance_event(container_registered ? "instance.stopped" :
-							  "instance.create_failed");
-	}
-
-	if (!exit_from_child && parent_ctx && delete_deferred)
-		ubus_complete_deferred_request(parent_ctx, &delete_request, 0);
-
-	if (!exit_from_child && parent_ctx)
-		ubus_free(parent_ctx);
-
-	free_opts(!exit_from_child);
-
-	if (jail_restarting())
-		jail_restart_exec();
-
-	exit(ret);
-}
-
-static int setns_open(unsigned long nstype);
-static void post_jail_fs(void);
-static void enter_userns(void);
-static int userns_wait_idmaps(void);
-#ifdef CLONE_NEWTIME
-static int timens_create(void);
-#endif
-static int remask_after_unshare(void);
-static void remount_proc_sys_after_unshare(void);
-static void hook_chain_check(const char *chain, int ack_fd)
-{
-	if (!hook_chain_failed)
-		return;
-
-	ERROR("%s hook failed; aborting container\n", chain);
-	if (ack_fd >= 0)
-		xwrite_byte(ack_fd, EXEC_ACK_HOOK);
-	free_and_exit(EXIT_FAILURE);
-}
-
-static void enter_jail_fs(void)
-{
-	if (chdir(jail_root)) {
-		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
-		free_and_exit(-1);
-	}
-	if (pivot_root(".", ".") == -1) {
-		ERROR("pivot_root(%s) failed: %m\n", jail_root);
-		free_and_exit(-1);
-	}
-	if (umount2(".", MNT_DETACH)) {
-		ERROR("umount2() of the old root failed: %m\n");
-		free_and_exit(-1);
-	}
-
-	jail_tmpdir_remove(jail_root);
-	if (opts.tmpoverlaysize)
-		jail_tmpdir_remove(tmpovdir);
-	if (jail_tmp_dirfd >= 0) {
-		close(jail_tmp_dirfd);
-		jail_tmp_dirfd = -1;
-	}
-
-	if (chdir("/")) {
-		ERROR("chdir(/) (after pivot_root) failed: %m\n");
-		free_and_exit(-1);
-	}
-
-	if (opts.ronly)
-		mount(NULL, "/", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
-
-	umask(old_umask);
-	enter_userns();
-}
-
 static int userns_wait_idmaps(void)
 {
 	char buf[1];
@@ -1891,57 +1554,6 @@ static int userns_become_root(void)
 	}
 
 	return 0;
-}
-
-static void enter_userns(void)
-{
-	int ret;
-
-	hook_chain_check("createContainer", -1);
-
-	if (!userns_deferred()) {
-		post_jail_fs();
-		return;
-	}
-
-	if (opts.setns.user != -1) {
-		/* maps exist already, no handshake */
-		ret = setns_open(CLONE_NEWUSER);
-		if (ret) {
-			ERROR("failed to join user namespace: %s\n", strerror(ret));
-			free_and_exit(-1);
-		}
-	} else {
-		if (unshare(CLONE_NEWUSER)) {
-			ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
-			free_and_exit(-1);
-		}
-
-		if (userns_wait_idmaps())
-			free_and_exit(-1);
-	}
-
-	if (userns_become_root())
-		free_and_exit(-1);
-
-#ifdef CLONE_NEWTIME
-	if ((opts.namespace & CLONE_NEWTIME) && opts.setns.time == -1 &&
-	    timens_create())
-		free_and_exit(-1);
-#endif
-
-	if ((opts.namespace & CLONE_NEWNS) && unshare(CLONE_NEWNS)) {
-		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
-		free_and_exit(-1);
-	}
-	if (opts.namespace & CLONE_NEWNS) {
-		if (remask_after_unshare())
-			free_and_exit(-1);
-
-		remount_proc_sys_after_unshare();
-	}
-
-	post_jail_fs();
 }
 
 static int write_uid_gid_map(pid_t child_pid, bool gidmap, char *mapstr)
@@ -2007,110 +1619,6 @@ static int write_setgroups(pid_t child_pid, bool allow)
 
 	close(setgroups_file);
 	return 0;
-}
-
-static void get_jail_user(int *user, int *user_gid, int *gr_gid)
-{
-	struct passwd pwd, *p = NULL;
-	struct group grp, *g = NULL;
-	char *buf = NULL;
-	size_t bufsize;
-	long sc;
-	int ret = 0, attempt;
-
-	if (opts.user) {
-		sc = sysconf(_SC_GETPW_R_SIZE_MAX);
-		bufsize = (sc > 0) ? (size_t)sc : 16384;
-
-		for (attempt = 0; attempt < 8; attempt++) {
-			buf = malloc(bufsize);
-			if (!buf) {
-				ERROR("out of memory resolving user %s\n", opts.user);
-				free_and_exit(EXIT_FAILURE);
-			}
-
-			ret = getpwnam_r(opts.user, &pwd, buf, bufsize, &p);
-			if (ret != ERANGE)
-				break;
-
-			free(buf);
-			buf = NULL;
-			bufsize *= 2;
-		}
-
-		if (ret || !p) {
-			free(buf);
-			if (!ret)
-				ERROR("failed to get uid/gid for user %s: "
-				      "no such user\n", opts.user);
-			else
-				ERROR("failed to get uid/gid for user %s: %d (%s)\n",
-				      opts.user, ret, strerror(ret));
-			free_and_exit(EXIT_FAILURE);
-		}
-
-		*user = p->pw_uid;
-		*user_gid = p->pw_gid;
-		free(buf);
-	} else {
-		*user = -1;
-		*user_gid = -1;
-	}
-
-	if (opts.group) {
-		sc = sysconf(_SC_GETGR_R_SIZE_MAX);
-		bufsize = (sc > 0) ? (size_t)sc : 16384;
-
-		for (attempt = 0; attempt < 8; attempt++) {
-			buf = malloc(bufsize);
-			if (!buf) {
-				ERROR("out of memory resolving group %s\n", opts.group);
-				free_and_exit(EXIT_FAILURE);
-			}
-
-			ret = getgrnam_r(opts.group, &grp, buf, bufsize, &g);
-			if (ret != ERANGE)
-				break;
-
-			free(buf);
-			buf = NULL;
-			bufsize *= 2;
-		}
-
-		if (ret || !g) {
-			free(buf);
-			if (!ret)
-				ERROR("failed to get gid for group %s: "
-				      "no such group\n", opts.group);
-			else
-				ERROR("failed to get gid for group %s: %d (%s)\n",
-				      opts.group, ret, strerror(ret));
-			free_and_exit(EXIT_FAILURE);
-		}
-
-		*gr_gid = g->gr_gid;
-		free(buf);
-	} else {
-		*gr_gid = -1;
-	}
-};
-
-static void set_jail_user(int pw_uid, int user_gid, int gr_gid)
-{
-	if (opts.user && (user_gid != -1) && initgroups(opts.user, user_gid)) {
-		ERROR("failed to initgroups() for user %s: %m\n", opts.user);
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if ((gr_gid != -1) && setregid(gr_gid, gr_gid)) {
-		ERROR("failed to set group id %d: %m\n", gr_gid);
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if ((pw_uid != -1) && setreuid(pw_uid, pw_uid)) {
-		ERROR("failed to set user id %d: %m\n", pw_uid);
-		free_and_exit(EXIT_FAILURE);
-	}
 }
 
 static const char *proc_mask_critical[] = {
@@ -2215,41 +1723,6 @@ static int remask_after_unshare(void)
 				WARNING("could not make %s read-only: %m\n", *dp);
 
 	return 0;
-}
-
-/* /proc/sys is locked read-only for every procfs jail via a self-bind,
- * separately from the mask_default_paths() lists above; a deferred-
- * userns jail skips it in phase 1 for the same reason it skips the
- * masks (see the call site in post_main()), so re-apply it here. */
-static void remount_proc_sys_after_unshare(void)
-{
-	struct stat s;
-
-	if (!(opts.procfs || opts.ocibundle))
-		return;
-	if (mount_is_defined("/proc/sys"))
-		return;
-	if (stat("/proc/sys", &s))
-		return;
-
-	/* the MS_MOVE below needs a mountpoint to move from, or it's a
-	 * silent EINVAL. */
-	if ((opts.namespace & CLONE_NEWNET) &&
-	    mount("/proc/sys/net", "/proc/self/net", "bind", MS_BIND, NULL)) {
-		ERROR("failed to stash /proc/sys/net: %m\n");
-		free_and_exit(-1);
-	}
-
-	if (bind_remount_readonly("/proc/sys", 0)) {
-		ERROR("failed to remount /proc/sys read-only: %m\n");
-		free_and_exit(-1);
-	}
-
-	if ((opts.namespace & CLONE_NEWNET) &&
-	    mount("/proc/self/net", "/proc/sys/net", "bind", MS_MOVE, NULL)) {
-		ERROR("failed to restore /proc/sys/net: %m\n");
-		free_and_exit(-1);
-	}
 }
 
 static bool resolve_jail_user_gids(int primary_gid)
@@ -2556,45 +2029,6 @@ static bool jail_exec_acked;
 static bool jail_stop_escalated;
 static bool poststart_pending;
 
-static void post_poststop(void)
-{
-	if (jail_process_pidfd >= 0) {
-		close(jail_process_pidfd);
-		jail_process_pidfd = -1;
-	}
-	free_and_exit(jail_return_code);
-}
-
-static void poststop_hooks(void)
-{
-	run_hooks(opts.hooks.poststop, post_poststop);
-}
-
-static void jail_process_timeout_cb(struct uloop_timeout *t);
-static struct uloop_timeout jail_process_timeout = {
-	.cb = jail_process_timeout_cb,
-};
-static void poststop(void);
-static void jail_process_handler(struct uloop_process *c, int ret)
-{
-	uloop_timeout_cancel(&jail_process_timeout);
-	jail_reaped = true;
-	if (WIFEXITED(ret)) {
-		jail_return_code = WEXITSTATUS(ret);
-		INFO("jail (%d) exited with exit: %d\n", c->pid, jail_return_code);
-	} else {
-		jail_return_code = 128 + WTERMSIG(ret);
-		INFO("jail (%d) exited with signal: %d\n", c->pid, WTERMSIG(ret));
-	}
-	jail_write_exit_status(opts.pidfile, jail_return_code);
-	jail_running = 0;
-
-	if (hook_running || poststart_pending)
-		return;
-
-	poststop();
-}
-
 static struct uloop_process jail_process;
 
 static int jail_pidfd_send_signal(int sig)
@@ -2611,79 +2045,9 @@ static void jail_process_timeout_cb(struct uloop_timeout *t)
 	jail_pidfd_send_signal(SIGKILL);
 }
 
-static void container_delete_cb(struct uloop_timeout *t)
-{
-	if (!delete_awaited)
-		return;
-
-	delete_awaited = false;
-	poststop_hooks();
-}
-
-static struct uloop_timeout container_delete_timeout = {
-	.cb = container_delete_cb,
+static struct uloop_timeout jail_process_timeout = {
+	.cb = jail_process_timeout_cb,
 };
-
-static void jail_handle_signal(int signo)
-{
-	if (signo == SIGTERM) {
-		jail_stop_requested = true;
-		delete_requested = true;
-	}
-
-	if (hook_running) {
-		DEBUG("forwarding signal %d to the hook process\n", signo);
-		kill(hook_process.pid, signo);
-		/* set timeout to send SIGKILL hook process in case SIGTERM doesn't succeed */
-		if (signo == SIGTERM)
-			uloop_timeout_set(&hook_process_timeout, opts.term_timeout * 1000);
-	}
-
-	if (jail_running) {
-		DEBUG("forwarding signal %d to the jailed process\n", signo);
-		jail_pidfd_send_signal(signo);
-		/* set timeout to send SIGKILL jail process in case SIGTERM doesn't succeed */
-		if (signo == SIGTERM)
-			uloop_timeout_set(&jail_process_timeout, opts.term_timeout * 1000);
-	}
-
-	if (signo == SIGTERM && delete_awaited)
-		uloop_timeout_add(&container_delete_timeout);
-}
-
-static void signals_init(void)
-{
-	int i;
-	sigset_t sigmask;
-
-	sigfillset(&sigmask);
-	for (i = 0; i < _NSIG; i++) {
-		struct sigaction s = { 0 };
-
-		if (!sigismember(&sigmask, i))
-			continue;
-		switch (i) {
-		case SIGCHLD:
-		case SIGPIPE:
-		case SIGKILL:
-		case SIGSTOP:
-		case SIGSEGV:
-		case SIGBUS:
-		case SIGFPE:
-		case SIGILL:
-		case SIGSYS:
-		case SIGABRT:
-		case SIGTRAP:
-			continue;
-		default:
-			break;
-		}
-
-		s.sa_handler = jail_handle_signal;
-		sigaction(i, &s, NULL);
-	}
-}
-
 enum {
 	OCI_PROCESS_SCHEDULER_POLICY,
 	OCI_PROCESS_SCHEDULER_NICE,
@@ -3177,373 +2541,12 @@ static int timens_create(void)
 	return 0;
 }
 
-static void pre_exec_jail(struct uloop_timeout *t);
-static struct uloop_timeout pre_exec_timeout = {
-	.cb = pre_exec_jail,
-};
-
 int pipes[4];
 static int parent_pidfd = -1;
 
 static bool jail_has_utsns(void)
 {
 	return (opts.namespace & CLONE_NEWUTS) || opts.setns.uts != -1;
-}
-
-static int exec_jail(void *arg)
-{
-	char buf[1];
-	char tag;
-	int recv_fds[JAIL_IDMAP_MAX_FDS];
-	int nrecv;
-	int ret;
-
-	exit_from_child = true;
-	prctl(PR_SET_SECUREBITS, 0);
-
-	uloop_init();
-	signals_init();
-
-	close(pipes[0]);
-	close(pipes[3]);
-
-	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1) {
-		close(userns_pipe[0]);
-		close(userns_pipe[3]);
-	} else {
-		/* Not deferring anything: this handshake isn't used at all. */
-		close(userns_pipe[0]);
-		close(userns_pipe[1]);
-		close(userns_pipe[2]);
-		close(userns_pipe[3]);
-	}
-
-	ret = setns_open(CLONE_NEWNET);
-	if (!ret)
-		ret = setns_open(CLONE_NEWNS);
-	if (!ret)
-		ret = setns_open(CLONE_NEWIPC);
-	if (!ret)
-		ret = setns_open(CLONE_NEWUTS);
-#ifdef CLONE_NEWTIME
-	if (!ret)
-		ret = setns_open(CLONE_NEWTIME);
-#endif
-	if (ret) {
-		ERROR("failed to join namespace: %s\n", strerror(ret));
-		return EXIT_FAILURE;
-	}
-
-	if ((opts.namespace & CLONE_NEWNS) && isolate_mountns()) {
-		ERROR("mount propagation failed: %m\n");
-		return EXIT_FAILURE;
-	}
-
-	/*
-	 * Must run before enter_userns() drops privilege over the inherited
-	 * mounts. A userns from clone() owns its mntns and has everything
-	 * inherited MNT_LOCKED, so there the detach is neither possible nor
-	 * needed.
-	 */
-	if ((opts.namespace & CLONE_NEWNS) && userns_deferred() &&
-	    detach_inherited_mounts()) {
-		ERROR("failed to detach inherited mounts\n");
-		return EXIT_FAILURE;
-	}
-
-	buf[0] = 'i';
-	if (write(pipes[1], buf, 1) < 1) {
-		ERROR("can't write to parent\n");
-		return EXIT_FAILURE;
-	}
-	close(pipes[1]);
-
-	nrecv = sock_recv_fds(pipes[2], &tag, recv_fds, JAIL_IDMAP_MAX_FDS);
-	if (nrecv < 0) {
-		ERROR("can't read from parent\n");
-		return EXIT_FAILURE;
-	}
-	if (tag != 'O') {
-		ERROR("parent had an error, child exiting\n");
-		return EXIT_FAILURE;
-	}
-	if (nrecv > 0)
-		jail_idmap_assign(jail_idmap_active() && opts.extroot,
-				  false,
-				  recv_fds, nrecv, &extroot_idmap_fd, &overlay_idmap_fd);
-
-	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred()) {
-		if (userns_wait_idmaps() || userns_become_root())
-			return EXIT_FAILURE;
-	}
-
-	if (opts.namespace & CLONE_NEWCGROUP)
-		unshare(CLONE_NEWCGROUP);
-
-	ret = setns_open(CLONE_NEWCGROUP);
-	if (ret) {
-		ERROR("failed to join cgroup namespace: %s\n", strerror(ret));
-		free_and_exit(EXIT_FAILURE);
-	}
-
-#ifdef CLONE_NEWTIME
-	if ((opts.namespace & CLONE_NEWTIME) && opts.setns.time == -1 &&
-	    !userns_deferred() && timens_create())
-		free_and_exit(EXIT_FAILURE);
-#endif
-
-	if (jail_has_utsns()
-			&& opts.hostname && strlen(opts.hostname) > 0
-			&& sethostname(opts.hostname, strlen(opts.hostname))) {
-		ERROR("sethostname(%s) failed: %m\n", opts.hostname);
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (jail_has_utsns()
-			&& opts.domainname && strlen(opts.domainname) > 0
-			&& setdomainname(opts.domainname, strlen(opts.domainname))) {
-		ERROR("setdomainname(%s) failed: %m\n", opts.domainname);
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	uloop_timeout_add(&pre_exec_timeout);
-	uloop_run();
-
-	free_and_exit(-1);
-	return -1;
-}
-
-static void pre_exec_jail(struct uloop_timeout *t)
-{
-	if ((opts.namespace & CLONE_NEWNS) && build_jail_fs()) {
-		ERROR("failed to build jail fs\n");
-		free_and_exit(EXIT_FAILURE);
-	} else if (!(opts.namespace & CLONE_NEWNS)) {
-		/*
-		 * No mount namespace to build (plain "-f"): build_jail_fs()
-		 * is skipped, so reach enter_userns() directly here instead.
-		 */
-		run_hooks(opts.hooks.createContainer, enter_userns);
-	}
-}
-
-static void post_start_hook(void);
-static void post_jail_fs(void)
-{
-	char buf[1];
-	ssize_t n;
-
-	if (opts.rootfs_propagation && !(opts.rootfs_propagation & MS_SLAVE) &&
-	    (opts.namespace & CLONE_NEWNS) &&
-	    mount(NULL, "/", NULL, opts.rootfs_propagation, NULL)) {
-		ERROR("rootfsPropagation: %m\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	do {
-		if (jail_stop_requested)
-			free_and_exit(128 + SIGTERM);
-
-		n = read(pipes[2], buf, 1);
-	} while (n < 0 && errno == EINTR);
-	if (n < 1) {
-		ERROR("can't read from parent\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-	if (buf[0] != '!') {
-		ERROR("parent had an error, child exiting\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-	close(pipes[2]);
-
-	run_hooks(opts.hooks.startContainer, post_start_hook);
-}
-
-static void parent_pidfd_check(void)
-{
-	struct pollfd pfd = { .fd = parent_pidfd, .events = POLLIN };
-
-	if (poll(&pfd, 1, 0) > 0) {
-		ERROR("parent died before PR_SET_PDEATHSIG\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	close(parent_pidfd);
-}
-
-static void post_start_hook(void)
-{
-	struct sock_fprog *seccomp_prog = opts.ociseccomp_linker ?: opts.ociseccomp;
-	int pw_uid, pw_gid, gr_gid;
-	int exec_errno;
-
-	hook_chain_check("startContainer", exec_ack[1]);
-
-	if (opts.scheduler.set && applyOCIprocessscheduler())
-		free_and_exit(EXIT_FAILURE);
-
-	if (opts.ioprio.set && applyOCIprocessiopriority())
-		free_and_exit(EXIT_FAILURE);
-
-	syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC);
-
-	if (seccomp_prog && jail_inproc_seccomp() && !opts.no_new_privs &&
-	    applyOCIlinuxseccomp(seccomp_prog, opts.name, opts.ocibundle))
-		free_and_exit(EXIT_FAILURE);
-
-	/*
-	 * make sure setuid/setgid won't drop capabilities in case capabilities
-	 * have been specified explicitely.
-	 */
-	if (opts.capset.apply) {
-		if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
-			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-	}
-
-	/* drop capabilities, retain those still needed to further setup jail */
-	if (applyOCIcapabilities(opts.capset, (1LLU << CAP_SETGID) | (1LLU << CAP_SETUID) | (1LLU << CAP_SETPCAP)))
-		free_and_exit(EXIT_FAILURE);
-
-	/* use either cmdline-supplied user/group or uid/gid from OCI spec */
-	if (opts.ocibundle || opts.uidmap || !(opts.namespace & CLONE_NEWUSER)) {
-		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
-		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
-	} else if (opts.user || opts.group || opts.pw_uid != -1 || opts.pw_gid != -1 || opts.gr_gid != -1) {
-		WARNING("user/group identity switch (-U/-G) is not re-applied under "
-			"CLONE_NEWUSER without an OCI bundle or explicit uidmap; the "
-			"process already has the correct identity via the uid_map\n");
-	}
-
-	if (opts.additional_gids) {
-		bool default_own_userns_map = !opts.uidmap &&
-			(opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1;
-
-		if (default_own_userns_map) {
-			bool has_gr = (opts.gr_gid != -1);
-			int primary_gid = has_gr ? opts.gr_gid :
-				((opts.pw_uid != -1) ? opts.pw_gid : 65534);
-			int *inner_id = compute_inner_gids(primary_gid);
-
-			if (inner_id) {
-				gid_t *mapped = calloc(opts.num_additional_gids ?: 1, sizeof(gid_t));
-				size_t i;
-
-				if (mapped) {
-					for (i = 0; i < opts.num_additional_gids; i++)
-						mapped[i] = (gid_t)inner_id[i];
-					if (setgroups(opts.num_additional_gids, mapped) < 0) {
-						ERROR("setgroups failed: %m\n");
-						free(mapped);
-						free(inner_id);
-						free_and_exit(EXIT_FAILURE);
-					}
-					free(mapped);
-				} else {
-					ERROR("out of memory computing setgroups() list\n");
-					free(inner_id);
-					free_and_exit(EXIT_FAILURE);
-				}
-				free(inner_id);
-			} else {
-				ERROR("out of memory computing setgroups() list\n");
-				free_and_exit(EXIT_FAILURE);
-			}
-		} else if (setgroups(opts.num_additional_gids, opts.additional_gids) < 0) {
-			ERROR("setgroups failed: %m\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-	}
-
-	if (opts.set_umask)
-		umask(opts.umask);
-
-	/* restore securebits back to normal (and lock them if not in userns) */
-	if (opts.capset.apply) {
-		if (prctl(PR_SET_SECUREBITS, jail_in_userns() ? 0 :
-		    SECBIT_KEEP_CAPS_LOCKED|SECBIT_NO_SETUID_FIXUP_LOCKED|SECBIT_NOROOT_LOCKED)) {
-			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-	}
-
-	/* drop remaining capabilities to end up with specified sets */
-	if (applyOCIcapabilities(opts.capset, 0))
-		free_and_exit(EXIT_FAILURE);
-
-	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
-		ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	/* the supervisor can SIGKILL ujail on its own death (netifd on exit,
-	 * procd's instance_timeout() escalation); die with it, otherwise the
-	 * jailed process keeps running and the supervisor's supervisor starts
-	 * a second instance. Placed after set_jail_user() and the capability
-	 * transitions, whose commit_creds() would zero pdeath_signal, but before
-	 * the seccomp filter, which need not permit prctl() to reach execve(). */
-	if (prctl(PR_SET_PDEATHSIG, SIGKILL)) {
-		ERROR("prctl(PR_SET_PDEATHSIG) failed: %m\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	/* the parent can die between the fork() and the prctl above; the death
-	 * signal is then bound to the process we are reparented to and never
-	 * delivered, so detect the exit on the inherited pidfd and die ourselves.
-	 * getppid() == 1 cannot serve here: in a new PID namespace the parent is
-	 * not visible and getppid() reads 0 either way. */
-	parent_pidfd_check();
-
-	if (opts.mdwe_flags && prctl(PR_SET_MDWE, opts.mdwe_flags, 0, 0, 0)) {
-		ERROR("prctl(PR_SET_MDWE, 0x%lx) failed: %m\n", opts.mdwe_flags);
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	char **envp = build_envp(opts.envp);
-	if (!envp)
-		free_and_exit(EXIT_FAILURE);
-
-	if (opts.cwd && chdir(opts.cwd)) {
-		ERROR("chdir(cwd=%s) failed: %m\n", opts.cwd);
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (opts.landlock.n > 0 && landlock_apply(&opts.landlock)) {
-		ERROR("landlock_apply failed\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (seccomp_prog && jail_inproc_seccomp() && opts.no_new_privs &&
-	    applyOCIlinuxseccomp(seccomp_prog, opts.name, opts.ocibundle))
-		free_and_exit(EXIT_FAILURE);
-
-	uloop_end();
-	free_opts(false);
-	if (jail_ptrace_seccomp() && ptrace(PTRACE_TRACEME, 0, 0, 0)) {
-		ERROR("PTRACE_TRACEME failed: %m\n");
-		exit(EXIT_FAILURE);
-	}
-	DEBUG("exec-ing %s\n", *opts.jail_argv);
-	if (xwrite_byte(exec_ack[1], EXEC_ACK_EXEC) < 1) {
-		ERROR("cannot announce the exec to the parent: %m\n");
-		exit(EXIT_FAILURE);
-	}
-
-	if (opts.envp) { /* respect PATH if potentially set in ENV */
-		environ = envp;
-		execvpe(*opts.jail_argv, opts.jail_argv, envp);
-	} else {
-		execve(*opts.jail_argv, opts.jail_argv, envp);
-	}
-
-	/* we get there only if execve fails */
-	exec_errno = errno;
-	ERROR("failed to execve %s: %m\n", *opts.jail_argv);
-	if (write(exec_ack[1], &exec_errno, sizeof(exec_errno)) !=
-	    sizeof(exec_errno))
-		ERROR("cannot report the exec failure to the parent: %m\n");
-	exit(EXIT_FAILURE);
 }
 
 int ns_open_pid(const char *nstype, const pid_t target_ns)
@@ -3670,7 +2673,6 @@ static int parseOCIroot(const char *jsonfile, struct blob_attr *msg)
 	return 0;
 }
 
-
 enum {
 	OCI_HOOK_PATH,
 	OCI_HOOK_ARGS,
@@ -3685,7 +2687,6 @@ static const struct blobmsg_policy oci_hook_policy[] = {
 	[OCI_HOOK_ENV] = { "env", BLOBMSG_TYPE_ARRAY },
 	[OCI_HOOK_TIMEOUT] = { "timeout", BLOBMSG_TYPE_INT32 },
 };
-
 
 static int parseOCIhook(struct hook_execvpe ***hooklist, struct blob_attr *msg)
 {
@@ -3725,7 +2726,6 @@ static int parseOCIhook(struct hook_execvpe ***hooklist, struct blob_attr *msg)
 			((*hooklist)[idx]->argv)[1] = NULL;
 		};
 
-
 		if (tb[OCI_HOOK_ENV]) {
 			ret = parseOCIenvarray(tb[OCI_HOOK_ENV], &((*hooklist)[idx]->envp));
 			if (ret)
@@ -3752,7 +2752,6 @@ errout:
 
 	return ret;
 };
-
 
 enum {
 	OCI_HOOKS_PRESTART,
@@ -3832,7 +2831,6 @@ out_prestart:
 
 	return ret;
 };
-
 
 enum {
 	OCI_PROCESS_USER_UID,
@@ -3946,7 +2944,6 @@ static int resolve_rlimit(char *type) {
 	return -1;
 }
 
-
 static int parseOCIrlimit(struct blob_attr *msg)
 {
 	struct blob_attr *tb[__OCI_PROCESS_RLIMIT_MAX];
@@ -4048,7 +3045,6 @@ static int parseOCIprocessconsolesize(struct blob_attr *msg)
 
 	return 0;
 }
-
 
 static int parseOCIprocess(struct blob_attr *msg)
 {
@@ -4659,7 +3655,6 @@ static int parseOCIsysctl(struct blob_attr *msg)
 	return 0;
 }
 
-
 enum {
 	OCI_LINUX_CGROUPSPATH,
 	OCI_LINUX_RESOURCES,
@@ -5226,7 +4221,6 @@ static int set_oom_score_adj(void)
 	return 0;
 }
 
-
 enum {
 	OCI_STATE_CREATING,
 	OCI_STATE_CREATED,
@@ -5237,33 +4231,11 @@ enum {
 
 static int jail_oci_state = OCI_STATE_CREATING;
 static bool jail_create_done;
-static void pipe_send_start_container(struct uloop_timeout *t);
-static struct uloop_timeout start_container_timeout = {
-	.cb = pipe_send_start_container,
-};
-
 static bool jail_oci_live(void)
 {
 	return jail_create_done &&
 	       (jail_oci_state == OCI_STATE_CREATED ||
 		jail_oci_state == OCI_STATE_RUNNING);
-}
-
-static int handle_start(struct ubus_context *ctx, struct ubus_object *obj,
-			struct ubus_request_data *req, const char *method,
-			struct blob_attr *msg)
-{
-	if (!jail_create_done || jail_oci_state != OCI_STATE_CREATED)
-		return UBUS_STATUS_INVALID_ARGUMENT;
-
-	if (!opts.jail_argv) {
-		ERROR("start refused: the bundle defines no process\n");
-		return UBUS_STATUS_INVALID_ARGUMENT;
-	}
-
-	uloop_timeout_add(&start_container_timeout);
-
-	return UBUS_STATUS_OK;
 }
 
 struct netns_ifinfo {
@@ -5633,6 +4605,102 @@ static void oci_state_fill(struct blob_buf *b)
 
 	if (opts.annotations)
 		blobmsg_add_blob(b, opts.annotations);
+}
+
+static int hook_state_fd(void)
+{
+	static struct blob_buf sb;
+	char *state;
+	size_t len;
+	int fd;
+
+	blob_buf_init(&sb, 0);
+	oci_state_fill(&sb);
+	state = blobmsg_format_json(sb.head, true);
+	if (!state)
+		return -1;
+
+	fd = memfd_create("oci-state", MFD_CLOEXEC);
+	if (fd < 0) {
+		free(state);
+		return -1;
+	}
+
+	len = strlen(state);
+	if (write(fd, state, len) != (ssize_t)len ||
+	    lseek(fd, 0, SEEK_SET) == (off_t)-1) {
+		WARNING("cannot pass the container state to the hook: %m\n");
+		free(state);
+		close(fd);
+		return -1;
+	}
+
+	free(state);
+
+	return fd;
+}
+
+static void run_hooklist(void)
+{
+	struct hook_execvpe *hook = *current_hook;
+	int state_fd;
+	struct stat s;
+
+	if (!hook)
+		return hook_return_cb();
+
+	DEBUG("executing hook %s\n", hook->file);
+
+	if (stat(hook->file, &s)) {
+		hook_process_handler(&hook_process, ENOENT);
+		return;
+	}
+
+	if (!((unsigned long)s.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+		hook_process_handler(&hook_process, EPERM);
+		return;
+	}
+
+	state_fd = hook_state_fd();
+
+	hook_running = 1;
+	hook_process.pid = fork();
+	if (hook_process.pid == 0) {
+		/* child */
+		if (state_fd > -1) {
+			dup2(state_fd, STDIN_FILENO);
+			close(state_fd);
+		}
+		execve(hook->file, hook->argv, hook->envp);
+		ERROR("execve error %m\n");
+		_exit(errno);
+	} else if (hook_process.pid < 0) {
+		/* fork error */
+		ERROR("hook fork error\n");
+		hook_running = 0;
+		if (state_fd > -1)
+			close(state_fd);
+		hook_process_handler(&hook_process, errno);
+		return;
+	}
+
+	/* parent */
+	if (state_fd > -1)
+		close(state_fd);
+
+	hook_process.cb = hook_process_handler;
+	uloop_process_add(&hook_process);
+
+	if (hook->timeout > 0)
+		uloop_timeout_set(&hook_process_timeout, 1000 * hook->timeout);
+
+	uloop_run();
+	if (hook_running) {
+		DEBUG("uloop interrupted, killing jail process\n");
+		kill(hook_process.pid, SIGTERM);
+		uloop_timeout_set(&hook_process_timeout, 1000);
+		uloop_run();
+	}
 }
 
 static int handle_state(struct ubus_context *ctx, struct ubus_object *obj,
@@ -6644,6 +5712,463 @@ static void add_volume(const char *source, const char *dest)
 	free(real);
 }
 
+static int pidns_fd;
+struct env_e {
+	struct list_head list;
+	char *envarg;
+};
+
+static int run_uxc_net(const char *action)
+{
+	char *argv[] = { "/sbin/uxc-net", opts.name, (char *)action, opts.ocibundle,
+			 opts.datadir, NULL };
+	pid_t pid;
+	int status;
+
+	if (!opts.ocibundle || !opts.name)
+		return 0;
+
+	pid = fork();
+	if (pid == 0) {
+		execv(argv[0], argv);
+		ERROR("failed to execv uxc-net: %m\n");
+		_exit(127);
+	} else if (pid < 0) {
+		ERROR("uxc-net fork error: %m\n");
+		return -1;
+	}
+
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
+
+	return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+static void netifd_restart_cb(struct ubus_context *ctx, struct ubus_event_handler *ev,
+			      const char *type, struct blob_attr *msg)
+{
+	static const struct blobmsg_policy pol = {
+		.name = "path", .type = BLOBMSG_TYPE_STRING
+	};
+	struct blob_attr *tb;
+
+	if (!msg)
+		return;
+
+	blobmsg_parse(&pol, 1, &tb, blob_data(msg), blob_len(msg));
+	if (!tb || strcmp(blobmsg_get_string(tb), "network.interface"))
+		return;
+
+	if (!jail_running || jail_stop_requested || netifd_restart_pending)
+		return;
+
+	INFO("netifd restarted, restarting the container\n");
+	netifd_restart_pending = true;
+	if (jail_pidfd_send_signal(SIGTERM)) {
+		ERROR("cannot stop the container for the restart: %m\n");
+		netifd_restart_pending = false;
+		return;
+	}
+	uloop_timeout_set(&jail_process_timeout, jail_stop_timeout_ms());
+}
+
+static struct ubus_event_handler netifd_restart_handler = {
+	.cb = netifd_restart_cb,
+};
+
+static void netifd_restart_watch(void)
+{
+	if (!(opts.namespace & CLONE_NEWNET) || !opts.ocibundle || !opts.name)
+		return;
+
+	if (ubus_register_event_handler(parent_ctx, &netifd_restart_handler, "ubus.object.add"))
+		WARNING("cannot watch for netifd restarts\n");
+}
+
+static void jail_write_last_exit(void)
+{
+	char path[PATH_MAX];
+	uid_t euid;
+	char *s;
+	int rc;
+
+	if (!opts.statedir || jail_restarting())
+		return;
+
+	if (snprintf(path, sizeof(path), "%s/last-exit", opts.statedir) >=
+	    (int)sizeof(path))
+		return;
+
+	s = blobmsg_format_json(notify_buf.head, true);
+	if (!s)
+		return;
+
+	euid = geteuid();
+	if (euid && seteuid(0))
+		ERROR("seteuid(0) failed: %m\n");
+
+	rc = file_write_atomic(path, s, strlen(s), 0644);
+	if (euid && seteuid(euid))
+		ERROR("seteuid(%d) failed: %m\n", euid);
+
+	free(s);
+	if (rc < 0)
+		ERROR("cannot write %s: %s\n", path, strerror(-rc));
+}
+
+static bool instance_event_build(const char *event)
+{
+	char boot_id[40];
+
+	if (!opts.ocibundle || !opts.name)
+		return false;
+
+	blob_buf_init(&notify_buf, 0);
+	blobmsg_add_string(&notify_buf, "service", opts.name);
+	blobmsg_add_string(&notify_buf, "instance", opts.name);
+	blobmsg_add_u32(&notify_buf, "pid", getpid());
+	if (opts.incarnation)
+		blobmsg_add_u64(&notify_buf, "incarnation", opts.incarnation);
+	if (opts.started_by)
+		blobmsg_add_string(&notify_buf, "started_by", opts.started_by);
+	if (!strcmp(event, "instance.stopped") ||
+	    !strcmp(event, "instance.create_failed")) {
+		if (jail_reason)
+			blobmsg_add_string(&notify_buf, "reason", jail_reason);
+		if (jail_reason && jail_reason_errno)
+			blobmsg_add_u32(&notify_buf, "errno",
+					jail_reason_errno);
+		if (jail_reaped)
+			blobmsg_add_u32(&notify_buf, "exit_code",
+					jail_return_code);
+		if (jail_stop_requested)
+			blobmsg_add_u8(&notify_buf, "requested", 1);
+		if (jail_exec_acked)
+			blobmsg_add_u8(&notify_buf, "started", 1);
+		if (jail_stop_escalated)
+			blobmsg_add_u8(&notify_buf, "escalated", 1);
+		if (jail_created_uptime)
+			blobmsg_add_u64(&notify_buf, "created", jail_created_uptime);
+		blobmsg_add_u64(&notify_buf, "stopped_at", uptime_get());
+		if (boot_id_get(boot_id, sizeof(boot_id)))
+			blobmsg_add_string(&notify_buf, "boot_id", boot_id);
+	}
+
+	return true;
+}
+
+static void emit_instance_event(const char *event)
+{
+	if (!instance_event_build(event))
+		return;
+
+	if (!strcmp(event, "instance.stopped") && !exit_from_child &&
+	    !cgroups_destroyed()) {
+		ERROR("instance.stopped emitted before the cgroup was destroyed\n");
+		cgroups_destroy();
+	}
+
+	if (!strcmp(event, "instance.stopped") ||
+	    !strcmp(event, "instance.create_failed"))
+		jail_write_last_exit();
+
+	if (parent_ctx)
+		ubus_send_event(parent_ctx, event, notify_buf.head);
+}
+
+static void free_and_exit(int ret)
+{
+	if (!exit_from_child && !stop_announced && !jail_restarting())
+		notify_signal(opts.notify_fd);
+
+	if (!exit_from_child && opts.jail_network_started) {
+		jail_network_teardown();
+		opts.jail_network_started = false;
+	}
+
+	if (!exit_from_child && opts.ocibundle && container_registered)
+		cgroups_destroy();
+
+	if (!exit_from_child && opts.ocibundle)
+		cgroups_free();
+
+	if (!exit_from_child && jail_dev_staged) {
+		umount2(jail_dev, MNT_DETACH);
+		rmdir(jail_dev);
+		jail_dev_staged = false;
+	}
+
+	if (!exit_from_child && !stop_announced && opts.ocibundle && parent_ctx &&
+	    opts.name) {
+		if (jail_restarting())
+			jail_reason_set("jail.restart", 0);
+
+		emit_instance_event(container_registered ? "instance.stopped" :
+							  "instance.create_failed");
+	}
+
+	if (!exit_from_child && parent_ctx && delete_deferred)
+		ubus_complete_deferred_request(parent_ctx, &delete_request, 0);
+
+	if (!exit_from_child && parent_ctx)
+		ubus_free(parent_ctx);
+
+	free_opts(!exit_from_child);
+
+	if (jail_restarting())
+		jail_restart_exec();
+
+	exit(ret);
+}
+
+static void hook_chain_check(const char *chain, int ack_fd)
+{
+	if (!hook_chain_failed)
+		return;
+
+	ERROR("%s hook failed; aborting container\n", chain);
+	if (ack_fd >= 0)
+		xwrite_byte(ack_fd, EXEC_ACK_HOOK);
+	free_and_exit(EXIT_FAILURE);
+}
+
+static void get_jail_user(int *user, int *user_gid, int *gr_gid)
+{
+	struct passwd pwd, *p = NULL;
+	struct group grp, *g = NULL;
+	char *buf = NULL;
+	size_t bufsize;
+	long sc;
+	int ret = 0, attempt;
+
+	if (opts.user) {
+		sc = sysconf(_SC_GETPW_R_SIZE_MAX);
+		bufsize = (sc > 0) ? (size_t)sc : 16384;
+
+		for (attempt = 0; attempt < 8; attempt++) {
+			buf = malloc(bufsize);
+			if (!buf) {
+				ERROR("out of memory resolving user %s\n", opts.user);
+				free_and_exit(EXIT_FAILURE);
+			}
+
+			ret = getpwnam_r(opts.user, &pwd, buf, bufsize, &p);
+			if (ret != ERANGE)
+				break;
+
+			free(buf);
+			buf = NULL;
+			bufsize *= 2;
+		}
+
+		if (ret || !p) {
+			free(buf);
+			if (!ret)
+				ERROR("failed to get uid/gid for user %s: "
+				      "no such user\n", opts.user);
+			else
+				ERROR("failed to get uid/gid for user %s: %d (%s)\n",
+				      opts.user, ret, strerror(ret));
+			free_and_exit(EXIT_FAILURE);
+		}
+
+		*user = p->pw_uid;
+		*user_gid = p->pw_gid;
+		free(buf);
+	} else {
+		*user = -1;
+		*user_gid = -1;
+	}
+
+	if (opts.group) {
+		sc = sysconf(_SC_GETGR_R_SIZE_MAX);
+		bufsize = (sc > 0) ? (size_t)sc : 16384;
+
+		for (attempt = 0; attempt < 8; attempt++) {
+			buf = malloc(bufsize);
+			if (!buf) {
+				ERROR("out of memory resolving group %s\n", opts.group);
+				free_and_exit(EXIT_FAILURE);
+			}
+
+			ret = getgrnam_r(opts.group, &grp, buf, bufsize, &g);
+			if (ret != ERANGE)
+				break;
+
+			free(buf);
+			buf = NULL;
+			bufsize *= 2;
+		}
+
+		if (ret || !g) {
+			free(buf);
+			if (!ret)
+				ERROR("failed to get gid for group %s: "
+				      "no such group\n", opts.group);
+			else
+				ERROR("failed to get gid for group %s: %d (%s)\n",
+				      opts.group, ret, strerror(ret));
+			free_and_exit(EXIT_FAILURE);
+		}
+
+		*gr_gid = g->gr_gid;
+		free(buf);
+	} else {
+		*gr_gid = -1;
+	}
+};
+
+static void set_jail_user(int pw_uid, int user_gid, int gr_gid)
+{
+	if (opts.user && (user_gid != -1) && initgroups(opts.user, user_gid)) {
+		ERROR("failed to initgroups() for user %s: %m\n", opts.user);
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if ((gr_gid != -1) && setregid(gr_gid, gr_gid)) {
+		ERROR("failed to set group id %d: %m\n", gr_gid);
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if ((pw_uid != -1) && setreuid(pw_uid, pw_uid)) {
+		ERROR("failed to set user id %d: %m\n", pw_uid);
+		free_and_exit(EXIT_FAILURE);
+	}
+}
+
+/* /proc/sys is locked read-only for every procfs jail via a self-bind,
+ * separately from the mask_default_paths() lists above; a deferred-
+ * userns jail skips it in phase 1 for the same reason it skips the
+ * masks (see the call site in post_main()), so re-apply it here. */
+static void remount_proc_sys_after_unshare(void)
+{
+	struct stat s;
+
+	if (!(opts.procfs || opts.ocibundle))
+		return;
+	if (mount_is_defined("/proc/sys"))
+		return;
+	if (stat("/proc/sys", &s))
+		return;
+
+	/* the MS_MOVE below needs a mountpoint to move from, or it's a
+	 * silent EINVAL. */
+	if ((opts.namespace & CLONE_NEWNET) &&
+	    mount("/proc/sys/net", "/proc/self/net", "bind", MS_BIND, NULL)) {
+		ERROR("failed to stash /proc/sys/net: %m\n");
+		free_and_exit(-1);
+	}
+
+	if (bind_remount_readonly("/proc/sys", 0)) {
+		ERROR("failed to remount /proc/sys read-only: %m\n");
+		free_and_exit(-1);
+	}
+
+	if ((opts.namespace & CLONE_NEWNET) &&
+	    mount("/proc/self/net", "/proc/sys/net", "bind", MS_MOVE, NULL)) {
+		ERROR("failed to restore /proc/sys/net: %m\n");
+		free_and_exit(-1);
+	}
+}
+
+static void post_poststop(void)
+{
+	if (jail_process_pidfd >= 0) {
+		close(jail_process_pidfd);
+		jail_process_pidfd = -1;
+	}
+	free_and_exit(jail_return_code);
+}
+
+static void poststop_hooks(void)
+{
+	run_hooks(opts.hooks.poststop, post_poststop);
+}
+
+static void container_delete_cb(struct uloop_timeout *t)
+{
+	if (!delete_awaited)
+		return;
+
+	delete_awaited = false;
+	poststop_hooks();
+}
+
+static struct uloop_timeout container_delete_timeout = {
+	.cb = container_delete_cb,
+};
+
+static void jail_handle_signal(int signo)
+{
+	if (signo == SIGTERM) {
+		jail_stop_requested = true;
+		delete_requested = true;
+	}
+
+	if (hook_running) {
+		DEBUG("forwarding signal %d to the hook process\n", signo);
+		kill(hook_process.pid, signo);
+		/* set timeout to send SIGKILL hook process in case SIGTERM doesn't succeed */
+		if (signo == SIGTERM)
+			uloop_timeout_set(&hook_process_timeout, opts.term_timeout * 1000);
+	}
+
+	if (jail_running) {
+		DEBUG("forwarding signal %d to the jailed process\n", signo);
+		jail_pidfd_send_signal(signo);
+		/* set timeout to send SIGKILL jail process in case SIGTERM doesn't succeed */
+		if (signo == SIGTERM)
+			uloop_timeout_set(&jail_process_timeout, opts.term_timeout * 1000);
+	}
+
+	if (signo == SIGTERM && delete_awaited)
+		uloop_timeout_add(&container_delete_timeout);
+}
+
+static void signals_init(void)
+{
+	int i;
+	sigset_t sigmask;
+
+	sigfillset(&sigmask);
+	for (i = 0; i < _NSIG; i++) {
+		struct sigaction s = { 0 };
+
+		if (!sigismember(&sigmask, i))
+			continue;
+		switch (i) {
+		case SIGCHLD:
+		case SIGPIPE:
+		case SIGKILL:
+		case SIGSTOP:
+		case SIGSEGV:
+		case SIGBUS:
+		case SIGFPE:
+		case SIGILL:
+		case SIGSYS:
+		case SIGABRT:
+		case SIGTRAP:
+			continue;
+		default:
+			break;
+		}
+
+		s.sa_handler = jail_handle_signal;
+		sigaction(i, &s, NULL);
+	}
+}
+
+static void parent_pidfd_check(void)
+{
+	struct pollfd pfd = { .fd = parent_pidfd, .events = POLLIN };
+
+	if (poll(&pfd, 1, 0) > 0) {
+		ERROR("parent died before PR_SET_PDEATHSIG\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	close(parent_pidfd);
+}
+
 static int
 container_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 			struct ubus_request_data *req, const char *method,
@@ -6658,6 +6183,889 @@ container_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 
 	if (delete_awaited)
 		uloop_timeout_add(&container_delete_timeout);
+
+	return UBUS_STATUS_OK;
+}
+
+static bool jail_inproc_seccomp(void)
+{
+	if (seccomp_oci_needs_inproc())
+		return true;
+
+	return opts.ocibundle && !opts.no_new_privs && opts.seccomp_mode == SECCOMP_MODE_ENFORCE;
+}
+
+static bool jail_ptrace_seccomp(void)
+{
+	if (opts.seccomp_mode == SECCOMP_MODE_TRACE)
+		return true;
+
+	return opts.ociseccomp && !jail_inproc_seccomp();
+}
+
+static void post_start_hook(void)
+{
+	struct sock_fprog *seccomp_prog = opts.ociseccomp_linker ?: opts.ociseccomp;
+	int pw_uid, pw_gid, gr_gid;
+	int exec_errno;
+
+	hook_chain_check("startContainer", exec_ack[1]);
+
+	if (opts.scheduler.set && applyOCIprocessscheduler())
+		free_and_exit(EXIT_FAILURE);
+
+	if (opts.ioprio.set && applyOCIprocessiopriority())
+		free_and_exit(EXIT_FAILURE);
+
+	syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC);
+
+	if (seccomp_prog && jail_inproc_seccomp() && !opts.no_new_privs &&
+	    applyOCIlinuxseccomp(seccomp_prog, opts.name, opts.ocibundle))
+		free_and_exit(EXIT_FAILURE);
+
+	/*
+	 * make sure setuid/setgid won't drop capabilities in case capabilities
+	 * have been specified explicitely.
+	 */
+	if (opts.capset.apply) {
+		if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
+			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
+			free_and_exit(EXIT_FAILURE);
+		}
+	}
+
+	/* drop capabilities, retain those still needed to further setup jail */
+	if (applyOCIcapabilities(opts.capset, (1LLU << CAP_SETGID) | (1LLU << CAP_SETUID) | (1LLU << CAP_SETPCAP)))
+		free_and_exit(EXIT_FAILURE);
+
+	/* use either cmdline-supplied user/group or uid/gid from OCI spec */
+	if (opts.ocibundle || opts.uidmap || !(opts.namespace & CLONE_NEWUSER)) {
+		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
+		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
+	} else if (opts.user || opts.group || opts.pw_uid != -1 || opts.pw_gid != -1 || opts.gr_gid != -1) {
+		WARNING("user/group identity switch (-U/-G) is not re-applied under "
+			"CLONE_NEWUSER without an OCI bundle or explicit uidmap; the "
+			"process already has the correct identity via the uid_map\n");
+	}
+
+	if (opts.additional_gids) {
+		bool default_own_userns_map = !opts.uidmap &&
+			(opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1;
+
+		if (default_own_userns_map) {
+			bool has_gr = (opts.gr_gid != -1);
+			int primary_gid = has_gr ? opts.gr_gid :
+				((opts.pw_uid != -1) ? opts.pw_gid : 65534);
+			int *inner_id = compute_inner_gids(primary_gid);
+
+			if (inner_id) {
+				gid_t *mapped = calloc(opts.num_additional_gids ?: 1, sizeof(gid_t));
+				size_t i;
+
+				if (mapped) {
+					for (i = 0; i < opts.num_additional_gids; i++)
+						mapped[i] = (gid_t)inner_id[i];
+					if (setgroups(opts.num_additional_gids, mapped) < 0) {
+						ERROR("setgroups failed: %m\n");
+						free(mapped);
+						free(inner_id);
+						free_and_exit(EXIT_FAILURE);
+					}
+					free(mapped);
+				} else {
+					ERROR("out of memory computing setgroups() list\n");
+					free(inner_id);
+					free_and_exit(EXIT_FAILURE);
+				}
+				free(inner_id);
+			} else {
+				ERROR("out of memory computing setgroups() list\n");
+				free_and_exit(EXIT_FAILURE);
+			}
+		} else if (setgroups(opts.num_additional_gids, opts.additional_gids) < 0) {
+			ERROR("setgroups failed: %m\n");
+			free_and_exit(EXIT_FAILURE);
+		}
+	}
+
+	if (opts.set_umask)
+		umask(opts.umask);
+
+	/* restore securebits back to normal (and lock them if not in userns) */
+	if (opts.capset.apply) {
+		if (prctl(PR_SET_SECUREBITS, jail_in_userns() ? 0 :
+		    SECBIT_KEEP_CAPS_LOCKED|SECBIT_NO_SETUID_FIXUP_LOCKED|SECBIT_NOROOT_LOCKED)) {
+			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
+			free_and_exit(EXIT_FAILURE);
+		}
+	}
+
+	/* drop remaining capabilities to end up with specified sets */
+	if (applyOCIcapabilities(opts.capset, 0))
+		free_and_exit(EXIT_FAILURE);
+
+	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+		ERROR("prctl(PR_SET_NO_NEW_PRIVS) failed: %m\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	/* the supervisor can SIGKILL ujail on its own death (netifd on exit,
+	 * procd's instance_timeout() escalation); die with it, otherwise the
+	 * jailed process keeps running and the supervisor's supervisor starts
+	 * a second instance. Placed after set_jail_user() and the capability
+	 * transitions, whose commit_creds() would zero pdeath_signal, but before
+	 * the seccomp filter, which need not permit prctl() to reach execve(). */
+	if (prctl(PR_SET_PDEATHSIG, SIGKILL)) {
+		ERROR("prctl(PR_SET_PDEATHSIG) failed: %m\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	/* the parent can die between the fork() and the prctl above; the death
+	 * signal is then bound to the process we are reparented to and never
+	 * delivered, so detect the exit on the inherited pidfd and die ourselves.
+	 * getppid() == 1 cannot serve here: in a new PID namespace the parent is
+	 * not visible and getppid() reads 0 either way. */
+	parent_pidfd_check();
+
+	if (opts.mdwe_flags && prctl(PR_SET_MDWE, opts.mdwe_flags, 0, 0, 0)) {
+		ERROR("prctl(PR_SET_MDWE, 0x%lx) failed: %m\n", opts.mdwe_flags);
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	char **envp = build_envp(opts.envp);
+	if (!envp)
+		free_and_exit(EXIT_FAILURE);
+
+	if (opts.cwd && chdir(opts.cwd)) {
+		ERROR("chdir(cwd=%s) failed: %m\n", opts.cwd);
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if (opts.landlock.n > 0 && landlock_apply(&opts.landlock)) {
+		ERROR("landlock_apply failed\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if (seccomp_prog && jail_inproc_seccomp() && opts.no_new_privs &&
+	    applyOCIlinuxseccomp(seccomp_prog, opts.name, opts.ocibundle))
+		free_and_exit(EXIT_FAILURE);
+
+	uloop_end();
+	free_opts(false);
+	if (jail_ptrace_seccomp() && ptrace(PTRACE_TRACEME, 0, 0, 0)) {
+		ERROR("PTRACE_TRACEME failed: %m\n");
+		exit(EXIT_FAILURE);
+	}
+	DEBUG("exec-ing %s\n", *opts.jail_argv);
+	if (xwrite_byte(exec_ack[1], EXEC_ACK_EXEC) < 1) {
+		ERROR("cannot announce the exec to the parent: %m\n");
+		exit(EXIT_FAILURE);
+	}
+
+	if (opts.envp) { /* respect PATH if potentially set in ENV */
+		environ = envp;
+		execvpe(*opts.jail_argv, opts.jail_argv, envp);
+	} else {
+		execve(*opts.jail_argv, opts.jail_argv, envp);
+	}
+
+	/* we get there only if execve fails */
+	exec_errno = errno;
+	ERROR("failed to execve %s: %m\n", *opts.jail_argv);
+	if (write(exec_ack[1], &exec_errno, sizeof(exec_errno)) !=
+	    sizeof(exec_errno))
+		ERROR("cannot report the exec failure to the parent: %m\n");
+	exit(EXIT_FAILURE);
+}
+
+static void post_jail_fs(void)
+{
+	char buf[1];
+	ssize_t n;
+
+	if (opts.rootfs_propagation && !(opts.rootfs_propagation & MS_SLAVE) &&
+	    (opts.namespace & CLONE_NEWNS) &&
+	    mount(NULL, "/", NULL, opts.rootfs_propagation, NULL)) {
+		ERROR("rootfsPropagation: %m\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	do {
+		if (jail_stop_requested)
+			free_and_exit(128 + SIGTERM);
+
+		n = read(pipes[2], buf, 1);
+	} while (n < 0 && errno == EINTR);
+	if (n < 1) {
+		ERROR("can't read from parent\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+	if (buf[0] != '!') {
+		ERROR("parent had an error, child exiting\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+	close(pipes[2]);
+
+	run_hooks(opts.hooks.startContainer, post_start_hook);
+}
+
+static void enter_userns(void)
+{
+	int ret;
+
+	hook_chain_check("createContainer", -1);
+
+	if (!userns_deferred()) {
+		post_jail_fs();
+		return;
+	}
+
+	if (opts.setns.user != -1) {
+		/* maps exist already, no handshake */
+		ret = setns_open(CLONE_NEWUSER);
+		if (ret) {
+			ERROR("failed to join user namespace: %s\n", strerror(ret));
+			free_and_exit(-1);
+		}
+	} else {
+		if (unshare(CLONE_NEWUSER)) {
+			ERROR("unshare(CLONE_NEWUSER) failed: %m\n");
+			free_and_exit(-1);
+		}
+
+		if (userns_wait_idmaps())
+			free_and_exit(-1);
+	}
+
+	if (userns_become_root())
+		free_and_exit(-1);
+
+#ifdef CLONE_NEWTIME
+	if ((opts.namespace & CLONE_NEWTIME) && opts.setns.time == -1 &&
+	    timens_create())
+		free_and_exit(-1);
+#endif
+
+	if ((opts.namespace & CLONE_NEWNS) && unshare(CLONE_NEWNS)) {
+		ERROR("unshare(CLONE_NEWNS) failed: %m\n");
+		free_and_exit(-1);
+	}
+	if (opts.namespace & CLONE_NEWNS) {
+		if (remask_after_unshare())
+			free_and_exit(-1);
+
+		remount_proc_sys_after_unshare();
+	}
+
+	post_jail_fs();
+}
+
+static void enter_jail_fs(void)
+{
+	if (chdir(jail_root)) {
+		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
+		free_and_exit(-1);
+	}
+	if (pivot_root(".", ".") == -1) {
+		ERROR("pivot_root(%s) failed: %m\n", jail_root);
+		free_and_exit(-1);
+	}
+	if (umount2(".", MNT_DETACH)) {
+		ERROR("umount2() of the old root failed: %m\n");
+		free_and_exit(-1);
+	}
+
+	jail_tmpdir_remove(jail_root);
+	if (opts.tmpoverlaysize)
+		jail_tmpdir_remove(tmpovdir);
+	if (jail_tmp_dirfd >= 0) {
+		close(jail_tmp_dirfd);
+		jail_tmp_dirfd = -1;
+	}
+
+	if (chdir("/")) {
+		ERROR("chdir(/) (after pivot_root) failed: %m\n");
+		free_and_exit(-1);
+	}
+
+	if (opts.ronly)
+		mount(NULL, "/", "bind", MS_REMOUNT | MS_BIND | MS_RDONLY, 0);
+
+	umask(old_umask);
+	enter_userns();
+}
+
+static int build_jail_fs(void)
+{
+	char *overlaydir = NULL;
+	int ret;
+
+	old_umask = umask(0);
+
+	if (opts.console && console_slave_name[0]) {
+		console_slave_fd = open(console_slave_name, O_RDWR | O_NOCTTY);
+		if (console_slave_fd < 0)
+			WARNING("open guest console slave %s: %m\n", console_slave_name);
+	}
+
+	jail_tmp_dirfd = open("/tmp", O_PATH | O_DIRECTORY | O_CLOEXEC);
+
+	if (mkdtemp(jail_root) == NULL) {
+		ERROR("mkdtemp(%s) failed: %m\n", jail_root);
+		return -1;
+	}
+
+	if (apply_sysctl(jail_root)) {
+		ERROR("failed to apply sysctl values\n");
+		return -1;
+	}
+
+	if (opts.extroot) {
+		if (extroot_idmap_fd >= 0) {
+			if (sys_move_mount(extroot_idmap_fd, "", AT_FDCWD, jail_root, MOVE_MOUNT_F_EMPTY_PATH)) {
+				ERROR("move_mount(idmapped extroot) failed: %m\n");
+				return -1;
+			}
+			close(extroot_idmap_fd);
+			extroot_idmap_fd = -1;
+		} else if (mount(opts.extroot, jail_root, "bind", MS_BIND, NULL)) {
+			ERROR("extroot mount failed %m\n");
+			return -1;
+		}
+	} else {
+		if (mount("tmpfs", jail_root, "tmpfs", MS_NOATIME, "mode=0755")) {
+			ERROR("tmpfs mount failed %m\n");
+			return -1;
+		}
+	}
+
+	if (opts.tmpoverlaysize) {
+		char mountoptsstr[] = "mode=0755,size=XXXXXXXX";
+
+		snprintf(mountoptsstr, sizeof(mountoptsstr),
+			 "mode=0755,size=%s", opts.tmpoverlaysize);
+		if (mkdtemp(tmpovdir) == NULL) {
+			ERROR("mkdtemp(%s) failed: %m\n", jail_root);
+			return -1;
+		}
+		if (mount("tmpfs", tmpovdir, "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID | MS_NODEV,
+			  mountoptsstr)) {
+			ERROR("failed to mount tmpfs for overlay (size=%s)\n", opts.tmpoverlaysize);
+			return -1;
+		}
+		overlaydir = tmpovdir;
+	}
+
+	if (opts.overlaydir)
+		overlaydir = opts.overlaydir;
+
+	if (overlaydir) {
+		if (overlay_idmap_fd >= 0) {
+			if (sys_move_mount(overlay_idmap_fd, "", AT_FDCWD, overlaydir, MOVE_MOUNT_F_EMPTY_PATH)) {
+				ERROR("move_mount(idmapped overlay upper) failed: %m\n");
+				return -1;
+			}
+			close(overlay_idmap_fd);
+			overlay_idmap_fd = -1;
+		} else if (mount(NULL, overlaydir, NULL,
+			  MS_BIND | MS_REMOUNT | MS_NOEXEC | MS_NOSUID | MS_NODEV, NULL)) {
+			WARNING("failed to harden overlay upper %s: %m\n", overlaydir);
+		}
+
+		ret = mount_overlay(jail_root, overlaydir);
+		if (ret)
+			return ret;
+	}
+
+	if (chdir(jail_root)) {
+		ERROR("chdir(%s) (jail_root) failed: %m\n", jail_root);
+		return -1;
+	}
+
+	jail_fs_set_userns(jail_has_userns());
+
+	if (mount_all(jail_root, jail_dev)) {
+		ERROR("mount_all() failed\n");
+		return -1;
+	}
+
+	if (opts.console)
+		create_dev_console(jail_root);
+
+	if ((opts.namespace & CLONE_NEWNET) && opts.private_netifd) {
+		char jailetc[PATH_MAX], devresolv[PATH_MAX], etcresolv[PATH_MAX];
+		struct stat rcst;
+		int treefd;
+
+		snprintf(devresolv, PATH_MAX, "%s/dev/resolv.conf", jail_root);
+		snprintf(etcresolv, PATH_MAX, "%s/etc/resolv.conf", jail_root);
+		if (stat(etcresolv, &rcst) && (overlaydir || !opts.ronly)) {
+			snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
+			mkdir_p(jailetc, 0755);
+			close(creat(etcresolv, 0644));
+		}
+		if (!stat(etcresolv, &rcst)) {
+			treefd = sys_open_tree(AT_FDCWD, devresolv,
+					       OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_SYMLINK_NOFOLLOW);
+			if (treefd < 0) {
+				WARNING("open_tree(/dev/resolv.conf) failed: %m\n");
+			} else {
+				if (sys_move_mount(treefd, "", AT_FDCWD, etcresolv, MOVE_MOUNT_F_EMPTY_PATH))
+					WARNING("move_mount onto /etc/resolv.conf failed: %m\n");
+				close(treefd);
+			}
+		}
+	}
+
+	run_hooks(opts.hooks.createContainer, enter_jail_fs);
+
+	return 0;
+}
+
+static void pre_exec_jail(struct uloop_timeout *t)
+{
+	if ((opts.namespace & CLONE_NEWNS) && build_jail_fs()) {
+		ERROR("failed to build jail fs\n");
+		free_and_exit(EXIT_FAILURE);
+	} else if (!(opts.namespace & CLONE_NEWNS)) {
+		/*
+		 * No mount namespace to build (plain "-f"): build_jail_fs()
+		 * is skipped, so reach enter_userns() directly here instead.
+		 */
+		run_hooks(opts.hooks.createContainer, enter_userns);
+	}
+}
+
+static struct uloop_timeout pre_exec_timeout = {
+	.cb = pre_exec_jail,
+};
+
+static int exec_jail(void *arg)
+{
+	char buf[1];
+	char tag;
+	int recv_fds[JAIL_IDMAP_MAX_FDS];
+	int nrecv;
+	int ret;
+
+	exit_from_child = true;
+	prctl(PR_SET_SECUREBITS, 0);
+
+	uloop_init();
+	signals_init();
+
+	close(pipes[0]);
+	close(pipes[3]);
+
+	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1) {
+		close(userns_pipe[0]);
+		close(userns_pipe[3]);
+	} else {
+		/* Not deferring anything: this handshake isn't used at all. */
+		close(userns_pipe[0]);
+		close(userns_pipe[1]);
+		close(userns_pipe[2]);
+		close(userns_pipe[3]);
+	}
+
+	ret = setns_open(CLONE_NEWNET);
+	if (!ret)
+		ret = setns_open(CLONE_NEWNS);
+	if (!ret)
+		ret = setns_open(CLONE_NEWIPC);
+	if (!ret)
+		ret = setns_open(CLONE_NEWUTS);
+#ifdef CLONE_NEWTIME
+	if (!ret)
+		ret = setns_open(CLONE_NEWTIME);
+#endif
+	if (ret) {
+		ERROR("failed to join namespace: %s\n", strerror(ret));
+		return EXIT_FAILURE;
+	}
+
+	if ((opts.namespace & CLONE_NEWNS) && isolate_mountns()) {
+		ERROR("mount propagation failed: %m\n");
+		return EXIT_FAILURE;
+	}
+
+	/*
+	 * Must run before enter_userns() drops privilege over the inherited
+	 * mounts. A userns from clone() owns its mntns and has everything
+	 * inherited MNT_LOCKED, so there the detach is neither possible nor
+	 * needed.
+	 */
+	if ((opts.namespace & CLONE_NEWNS) && userns_deferred() &&
+	    detach_inherited_mounts()) {
+		ERROR("failed to detach inherited mounts\n");
+		return EXIT_FAILURE;
+	}
+
+	buf[0] = 'i';
+	if (write(pipes[1], buf, 1) < 1) {
+		ERROR("can't write to parent\n");
+		return EXIT_FAILURE;
+	}
+	close(pipes[1]);
+
+	nrecv = sock_recv_fds(pipes[2], &tag, recv_fds, JAIL_IDMAP_MAX_FDS);
+	if (nrecv < 0) {
+		ERROR("can't read from parent\n");
+		return EXIT_FAILURE;
+	}
+	if (tag != 'O') {
+		ERROR("parent had an error, child exiting\n");
+		return EXIT_FAILURE;
+	}
+	if (nrecv > 0)
+		jail_idmap_assign(jail_idmap_active() && opts.extroot,
+				  false,
+				  recv_fds, nrecv, &extroot_idmap_fd, &overlay_idmap_fd);
+
+	if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred()) {
+		if (userns_wait_idmaps() || userns_become_root())
+			return EXIT_FAILURE;
+	}
+
+	if (opts.namespace & CLONE_NEWCGROUP)
+		unshare(CLONE_NEWCGROUP);
+
+	ret = setns_open(CLONE_NEWCGROUP);
+	if (ret) {
+		ERROR("failed to join cgroup namespace: %s\n", strerror(ret));
+		free_and_exit(EXIT_FAILURE);
+	}
+
+#ifdef CLONE_NEWTIME
+	if ((opts.namespace & CLONE_NEWTIME) && opts.setns.time == -1 &&
+	    !userns_deferred() && timens_create())
+		free_and_exit(EXIT_FAILURE);
+#endif
+
+	if (jail_has_utsns()
+			&& opts.hostname && strlen(opts.hostname) > 0
+			&& sethostname(opts.hostname, strlen(opts.hostname))) {
+		ERROR("sethostname(%s) failed: %m\n", opts.hostname);
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if (jail_has_utsns()
+			&& opts.domainname && strlen(opts.domainname) > 0
+			&& setdomainname(opts.domainname, strlen(opts.domainname))) {
+		ERROR("setdomainname(%s) failed: %m\n", opts.domainname);
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	uloop_timeout_add(&pre_exec_timeout);
+	uloop_run();
+
+	free_and_exit(-1);
+	return -1;
+}
+
+static void jail_seccomp_run(void)
+{
+	struct seccomp_trace_opts t = {
+		.mode = opts.seccomp_mode,
+		.name = opts.name ? opts.name : "trace",
+		.log_fd = -1,
+		.main_boundary = (opts.seccomp_mode == SECCOMP_MODE_TRACE),
+		.dedup = 0,
+	};
+	int fd = -1;
+
+	if (opts.seccomp_log) {
+		fd = open(opts.seccomp_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd < 0)
+			ERROR("seccomp-trace: cannot open log %s: %m\n", opts.seccomp_log);
+		t.log_fd = fd;
+	}
+
+	seccomp_trace_run(jail_process.pid, &t);
+
+	if (fd >= 0)
+		close(fd);
+
+	free_and_exit(0);
+}
+
+static bool seccomp_target_is_static(pid_t pid)
+{
+	unsigned long pair[2];
+	bool dynamic = false;
+	char path[32];
+	FILE *f;
+
+	snprintf(path, sizeof(path), "/proc/%d/auxv", (int)pid);
+	f = fopen(path, "rb");
+	if (!f)
+		return false;
+
+	while (fread(pair, sizeof(pair), 1, f) == 1) {
+		if (pair[0] == 0)
+			break;
+		if (pair[0] == 7 && pair[1])
+			dynamic = true;
+	}
+	fclose(f);
+	return !dynamic;
+}
+
+static bool seccomp_main_trackable(pid_t pid)
+{
+	unsigned long at_entry, lsm;
+	int main_argidx;
+
+	if (seccomp_marker_addrs(pid, &at_entry, &lsm, &main_argidx))
+		return false;
+
+	return lsm != 0;
+}
+
+static void poststop(void)
+{
+	jail_oci_state = OCI_STATE_STOPPED;
+
+	if (jail_restarting())
+		jail_reason_set("jail.restart", 0);
+	else
+		notify_signal(opts.notify_fd);
+
+	if (opts.jail_network_started) {
+		jail_network_teardown();
+		opts.jail_network_started = false;
+	}
+	if ((opts.namespace & CLONE_NEWNET) && opts.name && opts.ocibundle)
+		run_uxc_net("down");
+
+	if (opts.ocibundle && container_registered)
+		cgroups_destroy();
+
+	stop_announced = true;
+	emit_instance_event(container_registered ? "instance.stopped" :
+						  "instance.create_failed");
+
+	/* a restart re-execs in place, so no delete will ever follow it */
+	if (opts.ocibundle && container_registered && !jail_restarting() &&
+	    !delete_requested) {
+		delete_awaited = true;
+		return;
+	}
+
+	poststop_hooks();
+}
+
+static void jail_process_handler(struct uloop_process *c, int ret)
+{
+	uloop_timeout_cancel(&jail_process_timeout);
+	jail_reaped = true;
+	if (WIFEXITED(ret)) {
+		jail_return_code = WEXITSTATUS(ret);
+		INFO("jail (%d) exited with exit: %d\n", c->pid, jail_return_code);
+	} else {
+		jail_return_code = 128 + WTERMSIG(ret);
+		INFO("jail (%d) exited with signal: %d\n", c->pid, WTERMSIG(ret));
+	}
+	jail_write_exit_status(opts.pidfile, jail_return_code);
+	jail_running = 0;
+
+	if (hook_running || poststart_pending)
+		return;
+
+	poststop();
+}
+
+static int jail_seccomp_handshake(void)
+{
+	struct sock_fprog *aprog;
+	int status, rc, mrc;
+
+	if (!jail_ptrace_seccomp())
+		return 0;
+
+	while (waitpid(jail_process.pid, &status, 0) < 0) {
+		if (errno == EINTR)
+			continue;
+		ERROR("seccomp-inject: waitpid: %m\n");
+		return -1;
+	}
+
+	if (!WIFSTOPPED(status)) {
+		if (WIFEXITED(status))
+			ERROR("seccomp-inject: jail exited (code %d) before entrypoint exec\n", WEXITSTATUS(status));
+		else if (WIFSIGNALED(status))
+			ERROR("seccomp-inject: jail killed by signal %d before entrypoint exec\n", WTERMSIG(status));
+		else
+			ERROR("seccomp-inject: jail exited before entrypoint exec\n");
+		uloop_process_delete(&jail_process);
+		jail_process_handler(&jail_process, status);
+		return -1;
+	}
+
+	if (opts.seccomp_mode == SECCOMP_MODE_TRACE) {
+		jail_exec_acked = true;
+		emit_instance_event("instance.running");
+		jail_seccomp_run();
+	}
+
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE &&
+	    seccomp_target_is_static(jail_process.pid)) {
+		if (opts.ociseccomp_init &&
+		    seccomp_main_trackable(jail_process.pid)) {
+			if (seccomp_inject(jail_process.pid, opts.ociseccomp_init)) {
+				ERROR("seccomp-inject: failed to arm init filter\n");
+				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+				return -1;
+			}
+			if (seccomp_run_to_main(jail_process.pid)) {
+				ERROR("seccomp-inject: failed to reach main\n");
+				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+				return -1;
+			}
+			if (opts.ociseccomp_delta_main &&
+			    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_main)) {
+				ERROR("seccomp-inject: failed to arm main delta\n");
+				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+				return -1;
+			}
+		} else if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
+			ERROR("seccomp-inject: failed to arm filter\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+		if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
+			ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
+			return -1;
+		}
+		return 0;
+	}
+
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE && !opts.ociseccomp_linker) {
+		if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
+			ERROR("seccomp-inject: failed to arm filter\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+		if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
+			ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
+			return -1;
+		}
+		return 0;
+	}
+
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE && opts.ociseccomp_linker &&
+	    seccomp_inject(jail_process.pid, opts.ociseccomp_linker)) {
+		ERROR("seccomp-inject: failed to arm linker filter\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	if (seccomp_run_to_entry(jail_process.pid)) {
+		ERROR("seccomp-inject: failed to reach entry point\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	if (opts.seccomp_mode == SECCOMP_MODE_AUDIT ||
+	    opts.seccomp_mode == SECCOMP_MODE_COMPLAIN) {
+		aprog = seccomp_oci_audit_filter(opts.ociseccomp);
+		if (!aprog) {
+			ERROR("seccomp-trace: failed to build audit filter\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+		rc = seccomp_inject(jail_process.pid, aprog);
+		free(aprog->filter);
+		free(aprog);
+		if (rc) {
+			ERROR("seccomp-trace: failed to arm audit filter\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+		jail_seccomp_run();
+	}
+
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE) {
+		if (opts.ociseccomp_delta_entry &&
+		    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_entry)) {
+			ERROR("seccomp-inject: failed to arm entry delta\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+	} else if (opts.ociseccomp_init &&
+		   seccomp_inject(jail_process.pid, opts.ociseccomp_init)) {
+		ERROR("seccomp-inject: failed to arm init filter\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	mrc = seccomp_run_to_main_from_entry(jail_process.pid);
+	if (mrc < 0) {
+		ERROR("seccomp-inject: failed to reach main\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE) {
+		if (opts.ociseccomp_delta_main &&
+		    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_main)) {
+			ERROR("seccomp-inject: failed to arm main delta\n");
+			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+			return -1;
+		}
+	} else if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
+		ERROR("seccomp-inject: failed to arm filter\n");
+		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
+		return -1;
+	}
+
+	if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
+		ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static void pipe_send_start_container(struct uloop_timeout *t)
+{
+	char sig_buf[1];
+
+	jail_oci_state = OCI_STATE_RUNNING;
+	sig_buf[0] = '!';
+	if (write(pipes[3], sig_buf, 1) < 0) {
+		ERROR("can't write to child\n");
+		free_and_exit(-1);
+	}
+	close(pipes[3]);
+
+	if (jail_seccomp_handshake()) {
+		if (!jail_reaped)
+			free_and_exit(-1);
+
+		return;
+	}
+
+	poststart_pending = true;
+}
+
+static struct uloop_timeout start_container_timeout = {
+	.cb = pipe_send_start_container,
+};
+
+static int handle_start(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	if (!jail_create_done || jail_oci_state != OCI_STATE_CREATED)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (!opts.jail_argv) {
+		ERROR("start refused: the bundle defines no process\n");
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	}
+
+	uloop_timeout_add(&start_container_timeout);
 
 	return UBUS_STATUS_OK;
 }
@@ -6683,25 +7091,629 @@ static struct ubus_object container_object = {
 	.n_methods = ARRAY_SIZE(container_methods),
 };
 
-static void netifd_restart_cb(struct ubus_context *ctx, struct ubus_event_handler *ev,
-			      const char *type, struct blob_attr *msg);
+static void post_create_runtime(void)
+{
+	if (hook_chain_failed) {
+		ERROR("createRuntime hook failed; aborting container\n");
+		jail_reason_set("hooks.createRuntime", ECANCELED);
+		free_and_exit(EXIT_FAILURE);
+	}
 
-static struct ubus_event_handler netifd_restart_handler = {
-	.cb = netifd_restart_cb,
+	if (jail_reaped) {
+		poststop();
+		return;
+	}
+
+	if (sock_send_fds(pipes[3], 'O', idmap_fds, num_idmap_fds) < 0) {
+		ERROR("can't write to child\n");
+		free_and_exit(-1);
+	}
+
+	while (num_idmap_fds > 0)
+		close(idmap_fds[--num_idmap_fds]);
+
+	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1) {
+		char ubuf[1];
+
+		if (xread_byte(userns_pipe[0], ubuf) < 1) {
+			ERROR("can't read from child\n");
+			free_and_exit(-1);
+		}
+		close(userns_pipe[0]);
+
+		if (write_setgroups(jail_process.pid, true)) {
+			ERROR("can't write setgroups\n");
+			free_and_exit(-1);
+		}
+		if (!opts.uidmap) {
+			bool has_gr = (opts.gr_gid != -1);
+			int primary_gid = has_gr ? opts.gr_gid :
+				((opts.pw_uid != -1) ? opts.pw_gid : 65534);
+			int target_uid = (opts.pw_uid != -1) ? opts.pw_uid : 65534;
+
+			if (write_single_uid_gid_map(jail_process.pid, 0, target_uid)) {
+				ERROR("failed to map uid %d into the jail's user "
+				      "namespace (mapping a uid other than your own "
+				      "requires CAP_SETUID, typically real root; use "
+				      "-U with your own account, run as a privileged "
+				      "user, or supply an explicit --uidmap)\n",
+				      target_uid);
+				free_and_exit(-1);
+			}
+
+			if (opts.additional_gids && opts.num_additional_gids) {
+				char *gidmap = build_group_gidmap(primary_gid);
+
+				if (gidmap) {
+					if (write_uid_gid_map(jail_process.pid, 1, gidmap)) {
+						ERROR("failed to map supplementary groups for "
+						      "%s into the jail's user namespace "
+						      "(mapping a gid other than your own "
+						      "requires CAP_SETGID, typically real "
+						      "root)\n", opts.user);
+						free(gidmap);
+						free_and_exit(-1);
+					}
+					free(gidmap);
+				} else {
+					WARNING("failed to build supplementary group map for "
+						"%s; falling back to primary gid only\n", opts.user);
+					if (write_single_uid_gid_map(jail_process.pid, 1, primary_gid)) {
+						ERROR("failed to map gid %d into the jail's "
+						      "user namespace (mapping a gid other "
+						      "than your own requires CAP_SETGID, "
+						      "typically real root)\n", primary_gid);
+						free_and_exit(-1);
+					}
+				}
+			} else {
+				if (write_single_uid_gid_map(jail_process.pid, 1, primary_gid)) {
+					ERROR("failed to map gid %d into the jail's user "
+					      "namespace (mapping a gid other than your "
+					      "own requires CAP_SETGID, typically real "
+					      "root)\n", primary_gid);
+					free_and_exit(-1);
+				}
+			}
+		} else {
+			if (write_uid_gid_map(jail_process.pid, 0, opts.uidmap)) {
+				ERROR("failed to write uidmap (check --uidmap values "
+				      "and privileges)\n");
+				free_and_exit(-1);
+			}
+			if (opts.gidmap && write_uid_gid_map(jail_process.pid, 1, opts.gidmap)) {
+				ERROR("failed to write gidmap (check --gidmap values "
+				      "and privileges)\n");
+				free_and_exit(-1);
+			}
+		}
+
+		ubuf[0] = 'O';
+		if (xwrite_byte(userns_pipe[3], ubuf[0]) < 0) {
+			ERROR("can't write to child\n");
+			free_and_exit(-1);
+		}
+		close(userns_pipe[3]);
+	} else {
+		close(userns_pipe[0]);
+		close(userns_pipe[3]);
+	}
+
+	jail_create_done = true;
+	emit_instance_event("instance.ready");
+
+	if (opts.ocibundle && !opts.immediately)
+		uloop_run(); /* wait for 'start' command via ubus */
+	else
+		pipe_send_start_container(NULL);
+}
+
+static void post_prestart(void)
+{
+	if (hook_chain_failed) {
+		ERROR("prestart hook failed; aborting container\n");
+		jail_reason_set("hooks.prestart", ECANCELED);
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if (jail_reaped) {
+		poststop();
+		return;
+	}
+
+	run_hooks(opts.hooks.createRuntime, post_create_runtime);
+}
+
+static void post_poststart(void)
+{
+	if (hook_chain_failed) {
+		ERROR("poststart hook failed; stopping container\n");
+		jail_reason_set("hooks.poststart", ECANCELED);
+	} else if (!jail_reaped) {
+		netifd_restart_watch();
+		uloop_run(); /* idle here while jail is running */
+	}
+
+	if (jail_running) {
+		DEBUG("killing jail process\n");
+		jail_pidfd_send_signal(SIGTERM);
+		uloop_timeout_set(&jail_process_timeout, 1000);
+		uloop_run();
+	}
+
+	poststop();
+}
+
+static void poststart_dispatch(bool executed)
+{
+	if (!poststart_pending)
+		return;
+
+	poststart_pending = false;
+
+	if (executed) {
+		run_hooks(opts.hooks.poststart, post_poststart);
+		return;
+	}
+
+	if (jail_reaped)
+		poststop();
+}
+
+static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
+{
+	int exec_errno = 0;
+	ssize_t n;
+
+	do {
+		n = read(fd->fd, exec_ack_buf + exec_ack_len,
+			 sizeof(exec_ack_buf) - exec_ack_len);
+		if (n > 0)
+			exec_ack_len += n;
+	} while (n > 0 && exec_ack_len < sizeof(exec_ack_buf));
+
+	if (n < 0 && fd->registered)
+		return;
+
+	uloop_fd_delete(fd);
+	close(fd->fd);
+	exec_ack[0] = -1;
+
+	if (jail_dev_staged) {
+		umount2(jail_dev, MNT_DETACH);
+		rmdir(jail_dev);
+		jail_dev_staged = false;
+	}
+
+	if (!exec_ack_len) {
+		INFO("the jail exited before its entrypoint was executed\n");
+		poststart_dispatch(false);
+		return;
+	}
+
+	if (exec_ack_buf[0] == EXEC_ACK_HOOK) {
+		jail_reason_set("hooks.startContainer", ECANCELED);
+		poststart_dispatch(false);
+		return;
+	}
+
+	if (exec_ack_buf[0] != EXEC_ACK_EXEC) {
+		ERROR("container.start: unexpected exec acknowledgement\n");
+		poststart_dispatch(false);
+		return;
+	}
+
+	if (exec_ack_len == 1) {
+		jail_exec_acked = true;
+		emit_instance_event("instance.running");
+		poststart_dispatch(true);
+		return;
+	}
+
+	if (exec_ack_len == sizeof(exec_ack_buf))
+		memcpy(&exec_errno, exec_ack_buf + 1, sizeof(exec_errno));
+
+	ERROR("container.start: cannot execute the entrypoint: %s\n",
+	      exec_errno ? strerror(exec_errno) : "reason not reported");
+	jail_reason_set("process.args", exec_errno ?: ENOEXEC);
+	poststart_dispatch(false);
+}
+
+static struct uloop_fd exec_ack_uloop = {
+	.cb = exec_ack_cb,
 };
 
-static void post_main(struct uloop_timeout *t);
+static void post_main(struct uloop_timeout *t)
+{
+	int child_status;
+	int nsret;
+
+	if (apply_rlimits()) {
+		ERROR("error applying resource limits\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if (opts.name)
+		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
+
+	if (pipe(&pipes[0]) < 0)
+		free_and_exit(-1);
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, &pipes[2]) < 0)
+		free_and_exit(-1);
+
+	if (pipe2(&userns_pipe[0], O_CLOEXEC) < 0 || pipe2(&userns_pipe[2], O_CLOEXEC) < 0)
+		free_and_exit(-1);
+
+	parent_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
+	if (parent_pidfd < 0) {
+		ERROR("pidfd_open() failed: %m\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	if (pipe2(exec_ack, O_CLOEXEC) < 0)
+		free_and_exit(-1);
+
+	if (opts.ocibundle)
+		cgroups_create();
+
+	if (has_namespaces()) {
+		if (opts.namespace & CLONE_NEWNS) {
+			if (!opts.extroot && (opts.user || opts.group)) {
+				add_mount_bind("/etc/passwd", 1, -1);
+				add_mount_bind("/etc/group", 1, -1);
+			}
+
+#if defined(__GLIBC__)
+			if (!opts.extroot)
+				add_mount_bind("/etc/nsswitch.conf", 1, -1);
+#endif
+			if (opts.setns.ns == -1) {
+				if (!(opts.namespace & CLONE_NEWNET)) {
+					add_mount_bind("/etc/resolv.conf", 1, 0);
+				} else if (opts.private_netifd) {
+					char hostdir[PATH_MAX], hostresolv[PATH_MAX];
+					int hostresolvfd;
+
+					snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
+					if (mkdir_p(hostdir, 0755)) {
+						ERROR("mkdir(%s) failed: %m\n", hostdir);
+						free_and_exit(-1);
+					}
+					snprintf(hostresolv, PATH_MAX, "%s/resolv.conf.auto", hostdir);
+					hostresolvfd = open(hostresolv, O_WRONLY | O_CREAT, 0644);
+					if (hostresolvfd >= 0)
+						close(hostresolvfd);
+					add_mount(hostdir, "/dev/resolv.conf.d", NULL,
+						MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, 0);
+				}
+			}
+			/* default mounts */
+			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "size=1M", -1);
+			add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0,
+				  "mode=1777,size=10%", -1);
+			{
+				const char *ptsopts = jail_has_userns() ?
+					"newinstance,ptmxmode=0666,mode=0620,gid=0" :
+					"newinstance,ptmxmode=0666,mode=0620,gid=5";
+
+				add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, ptsopts, 0);
+			}
+
+			bool defer_userns = userns_deferred();
+
+			if (defer_userns)
+				add_mount(PROCD_NOAFILE, JAIL_NOAFILE, NULL,
+					  MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, NULL, -1);
+
+			if (opts.procfs || opts.ocibundle) {
+				add_mount("proc", "/proc", "proc",
+					  detect_atime_flag("/proc") | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0, NULL, -1);
+
+				/*
+				 * hack to make /proc/sys/net read-write while the rest of /proc/sys is read-only
+				 * which cannot be expressed with OCI spec, but happends to be very useful.
+				 * Only apply it if '/proc/sys' is not already listed as mount, maskedPath or
+				 * readonlyPath.
+				 * If not running in a new network namespace, only make /proc/sys read-only.
+				 * If running in a new network namespace, temporarily stash (ie. mount-bind)
+				 * /proc/sys/net into (totally unrelated, but surely existing) /proc/self/net.
+				 * Then we mount-bind /proc/sys read-only and then mount-move /proc/self/net into
+				 * /proc/sys/net.
+				 * Mounts are established in the order they are added, so the three
+				 * steps are registered in exactly the order they have to happen in.
+				 *
+				 * A jail that defers its own CLONE_NEWUSER applies this (and all other
+				 * default masking below) itself in phase 2, once it regains its own
+				 * mount namespace: a mount locked here, while still privileged, can
+				 * never be replaced by that same, now less-privileged phase, since a
+				 * locked mount stays present underneath anything mounted over it and
+				 * still counts against the kernel's mount-visibility check for any
+				 * nested runtime's own /proc mount.
+				 */
+				if (!defer_userns && !mount_is_defined("/proc/sys")) {
+					if (opts.namespace & CLONE_NEWNET)
+						add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, 0, NULL, -1);
+
+					if (!add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, 0, NULL, -1) &&
+					    (opts.namespace & CLONE_NEWNET))
+						add_mount_inner("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, 0, NULL, -1);
+				}
+
+			}
+			if (opts.sysfs || opts.ocibundle)
+				add_mount("sysfs", "/sys", "sysfs",
+					  detect_atime_flag("/sys") | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
+
+			if (!opts.ocibundle && !defer_userns) {
+				if (opts.procfs &&
+				    (mask_default_paths(proc_mask_critical, true) ||
+				     mask_default_paths(proc_mask_optional, false)))
+					free_and_exit(-1);
+				if (opts.sysfs && mask_default_paths(sys_mask_critical, true))
+					free_and_exit(-1);
+			}
+
+		}
+
+		if (opts.setns.pid != -1) {
+			pidns_fd = ns_open_pid("pid", getpid());
+			nsret = setns_open(CLONE_NEWPID);
+			if (nsret) {
+				ERROR("failed to join pid namespace: %s\n",
+				      strerror(nsret));
+				free_and_exit(EXIT_FAILURE);
+			}
+		} else {
+			pidns_fd = -1;
+		}
+
+		if ((opts.namespace & CLONE_NEWTIME) && opts.setns.time == -1 &&
+		    access("/proc/self/ns/time", F_OK)) {
+			ERROR("kernel lacks time namespace support\n");
+			free_and_exit(EXIT_FAILURE);
+		}
+
+		if ((opts.namespace & CLONE_NEWNS) && prepare_jail_dev()) {
+			ERROR("prepare_jail_dev() failed\n");
+			free_and_exit(EXIT_FAILURE);
+		}
+
+		if (jail_has_userns()) {
+			if (opts.overlaydir) {
+				if (chown(opts.overlaydir, opts.root_map_uid, opts.root_map_uid)) {
+					ERROR("chown(%s, %d, %d) failed: %m\n",
+					      opts.overlaydir, opts.root_map_uid, opts.root_map_uid);
+					free_and_exit(EXIT_FAILURE);
+				}
+			}
+			if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
+				ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
+				free_and_exit(EXIT_FAILURE);
+			}
+			if (seteuid(opts.root_map_uid)) {
+				ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
+				free_and_exit(EXIT_FAILURE);
+			}
+		}
+
+		if (opts.console) {
+			char *slave_name;
+			int parent_master;
+
+			parent_master = posix_openpt(O_RDWR | O_NOCTTY);
+			if (parent_master < 0) {
+				ERROR("posix_openpt: %m\n");
+				free_and_exit(-1);
+			}
+			if (grantpt(parent_master) || unlockpt(parent_master) ||
+			    !(slave_name = ptsname(parent_master))) {
+				ERROR("grantpt/unlockpt/ptsname failed\n");
+				close(parent_master);
+				free_and_exit(-1);
+			}
+			if (opts.console_height && opts.console_width) {
+				struct winsize ws = {
+					.ws_row = opts.console_height,
+					.ws_col = opts.console_width,
+				};
+				ioctl(parent_master, TIOCSWINSZ, &ws);
+			}
+			strncpy(console_slave_name, slave_name, sizeof(console_slave_name) - 1);
+			console_slave_name[sizeof(console_slave_name) - 1] = '\0';
+			if (opts.console_socket) {
+				if (send_console_fd(opts.console_socket, parent_master, slave_name)) {
+					ERROR("send_console_fd failed\n");
+					close(parent_master);
+					free_and_exit(-1);
+				}
+				close(parent_master);
+			} else {
+				console_fd = parent_master;
+				if (jail_has_userns() && seteuid(0)) {
+					ERROR("seteuid(0) failed: %m\n");
+					free_and_exit(EXIT_FAILURE);
+				}
+				pass_console(console_fd);
+				if (jail_has_userns() && seteuid(opts.root_map_uid)) {
+					ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
+					free_and_exit(EXIT_FAILURE);
+				}
+			}
+		}
+
+		/*
+		 * CLONE_NEWUSER is excluded here; the child creates its own
+		 * later, in enter_userns(). See exec_jail() for why.
+		 */
+		int init_cgroup_fd = -1;
+		struct clone_args cargs = {
+			.flags = (opts.namespace & ~(CLONE_NEWCGROUP | CLONE_NEWTIME |
+						     (userns_deferred() ? CLONE_NEWUSER : 0))) | CLONE_PIDFD,
+			.pidfd = (__u64)(uintptr_t)&jail_process_pidfd,
+			.exit_signal = SIGCHLD,
+		};
+
+		if (opts.ocibundle) {
+			init_cgroup_fd = cgroups_open_dir();
+			if (init_cgroup_fd >= 0) {
+				cargs.flags |= CLONE_INTO_CGROUP;
+				cargs.cgroup = (__u64)init_cgroup_fd;
+			}
+		}
+
+		/* a clone-time userns cannot mount sysfs of a foreign netns */
+		if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred() &&
+		    !(opts.namespace & CLONE_NEWNET) && premount_sysfs())
+			WARNING("cannot mount sysfs for the jail: %m\n");
+
+		prime_jail_mount(opts.extroot);
+		prime_jail_mount(opts.overlaydir);
+		for (size_t i = 0; i < (size_t)num_volume_sources; i++)
+			prime_jail_mount(volume_sources[i]);
+
+		jail_process.pid = jail_clone3(&cargs);
+		if (init_cgroup_fd >= 0)
+			close(init_cgroup_fd);
+	} else {
+		jail_process.pid = fork();
+	}
+
+	if (jail_process.pid > 0) {
+		/* parent process */
+		char sig_buf[1];
+
+		close(parent_pidfd);
+		jail_process.cb = jail_process_handler;
+		uloop_process_add(&jail_process);
+		jail_running = 1;
+		if (seteuid(0)) {
+			ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
+			free_and_exit(EXIT_FAILURE);
+		}
+
+		prctl(PR_SET_SECUREBITS, 0);
+
+		if (jail_stop_requested) {
+			INFO("stop requested before the jail was started\n");
+			jail_pidfd_send_signal(SIGKILL);
+			while (waitpid(jail_process.pid, NULL, 0) < 0 &&
+			       errno == EINTR);
+			uloop_process_delete(&jail_process);
+			jail_running = 0;
+			free_and_exit(128 + SIGTERM);
+		}
+
+		if (pidns_fd != -1) {
+			setns(pidns_fd, CLONE_NEWPID);
+			close(pidns_fd);
+		}
+		if (opts.setns.net != -1)
+			close(opts.setns.net);
+		if (opts.setns.ns != -1)
+			close(opts.setns.ns);
+		if (opts.setns.ipc != -1)
+			close(opts.setns.ipc);
+		if (opts.setns.uts != -1)
+			close(opts.setns.uts);
+		if (opts.setns.user != -1)
+			close(opts.setns.user);
+		if (opts.setns.cgroup != -1)
+			close(opts.setns.cgroup);
+#ifdef CLONE_NEWTIME
+		if (opts.setns.time != -1)
+			close(opts.setns.time);
+#endif
+		close(pipes[1]);
+		close(pipes[2]);
+		close(userns_pipe[1]);
+		close(userns_pipe[2]);
+		if (exec_ack[1] >= 0) {
+			close(exec_ack[1]);
+			exec_ack[1] = -1;
+		}
+		if (exec_ack[0] >= 0) {
+			exec_ack_uloop.fd = exec_ack[0];
+			uloop_fd_add(&exec_ack_uloop, ULOOP_READ);
+		}
+		if (read(pipes[0], sig_buf, 1) < 1) {
+			child_status = 0;
+			if (waitpid(jail_process.pid, &child_status, 0) == jail_process.pid &&
+			    WIFSIGNALED(child_status))
+				ERROR("can't read from child: killed by signal %d\n", WTERMSIG(child_status));
+			else if (WIFEXITED(child_status))
+				ERROR("can't read from child: exited %d\n", WEXITSTATUS(child_status));
+			else
+				ERROR("can't read from child\n");
+			free_and_exit(-1);
+		}
+		close(pipes[0]);
+		set_oom_score_adj();
+
+		if (opts.ocibundle) {
+			if (cgroups_configure())
+				free_and_exit(ENOTSUP);
+
+			cgroups_attach_pid(jail_process.pid);
+		}
+
+		if (jail_idmap_active()) {
+			num_idmap_fds = jail_idmap_build(opts.extroot,
+							 opts.uidmappings, opts.gidmappings,
+							 idmap_fds, JAIL_IDMAP_MAX_FDS);
+			if (num_idmap_fds < 0) {
+				ERROR("failed to build idmapped jail mounts\n");
+				free_and_exit(-1);
+			}
+
+			jail_chown_writable_surfaces();
+		}
+
+		if ((opts.namespace & CLONE_NEWNET) && opts.name && opts.ocibundle &&
+		    run_uxc_net("up")) {
+			ERROR("uxc-net failed to configure the container network\n");
+			free_and_exit(EXIT_FAILURE);
+		}
+
+		if ((opts.namespace & CLONE_NEWNET) && opts.name)
+			jail_network_attach(parent_ctx, opts.name, jail_process.pid);
+
+		if ((opts.namespace & CLONE_NEWNET) && opts.private_ubus) {
+			opts.jail_network_started = true;
+			if (jail_network_start(parent_ctx, opts.name, jail_process.pid,
+					       opts.private_netifd)) {
+				jail_reason_set("jail.network", EIO);
+				free_and_exit(EXIT_FAILURE);
+			}
+		}
+
+		if (opts.netdevices &&
+		    ((opts.namespace & CLONE_NEWNET) || opts.setns.net != -1) &&
+		    move_netdevs_into_jail(jail_process.pid))
+			free_and_exit(-1);
+
+		if (jail_writepid(jail_process.pid)) {
+			ERROR("failed to write pidfile: %m\n");
+			free_and_exit(-1);
+		}
+	} else if (jail_process.pid == 0) {
+		/* fork child process */
+		free_and_exit(exec_jail(NULL));
+	} else {
+		ERROR("failed to clone/fork: %m\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
+	clock_gettime(CLOCK_REALTIME, &jail_created);
+	jail_created_uptime = uptime_get();
+	jail_oci_state = OCI_STATE_CREATED;
+
+	run_hooks(opts.hooks.prestart, post_prestart);
+}
+
 static struct uloop_timeout post_main_timeout = {
 	.cb = post_main,
 };
-static int pidns_fd;
-static void post_create_runtime(void);
-
-struct env_e {
-	struct list_head list;
-	char *envarg;
-};
-
 int main(int argc, char **argv)
 {
 	uid_t uid = getuid();
@@ -7104,7 +8116,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-
 	if (!opts.extroot && (opts.user || opts.group)) {
 		int precheck_uid, precheck_gid, precheck_grgid;
 
@@ -7235,1056 +8246,4 @@ int main(int argc, char **argv)
 errout:
 	free_and_exit(ret);
 	return ret;
-}
-
-static void post_prestart(void)
-{
-	if (hook_chain_failed) {
-		ERROR("prestart hook failed; aborting container\n");
-		jail_reason_set("hooks.prestart", ECANCELED);
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (jail_reaped) {
-		poststop();
-		return;
-	}
-
-	run_hooks(opts.hooks.createRuntime, post_create_runtime);
-}
-
-static int run_uxc_net(const char *action)
-{
-	char *argv[] = { "/sbin/uxc-net", opts.name, (char *)action, opts.ocibundle,
-			 opts.datadir, NULL };
-	pid_t pid;
-	int status;
-
-	if (!opts.ocibundle || !opts.name)
-		return 0;
-
-	pid = fork();
-	if (pid == 0) {
-		execv(argv[0], argv);
-		ERROR("failed to execv uxc-net: %m\n");
-		_exit(127);
-	} else if (pid < 0) {
-		ERROR("uxc-net fork error: %m\n");
-		return -1;
-	}
-
-	while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
-
-	return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
-}
-
-static void netifd_restart_cb(struct ubus_context *ctx, struct ubus_event_handler *ev,
-			      const char *type, struct blob_attr *msg)
-{
-	static const struct blobmsg_policy pol = {
-		.name = "path", .type = BLOBMSG_TYPE_STRING
-	};
-	struct blob_attr *tb;
-
-	if (!msg)
-		return;
-
-	blobmsg_parse(&pol, 1, &tb, blob_data(msg), blob_len(msg));
-	if (!tb || strcmp(blobmsg_get_string(tb), "network.interface"))
-		return;
-
-	if (!jail_running || jail_stop_requested || netifd_restart_pending)
-		return;
-
-	INFO("netifd restarted, restarting the container\n");
-	netifd_restart_pending = true;
-	if (jail_pidfd_send_signal(SIGTERM)) {
-		ERROR("cannot stop the container for the restart: %m\n");
-		netifd_restart_pending = false;
-		return;
-	}
-	uloop_timeout_set(&jail_process_timeout, jail_stop_timeout_ms());
-}
-
-static void netifd_restart_watch(void)
-{
-	if (!(opts.namespace & CLONE_NEWNET) || !opts.ocibundle || !opts.name)
-		return;
-
-	if (ubus_register_event_handler(parent_ctx, &netifd_restart_handler, "ubus.object.add"))
-		WARNING("cannot watch for netifd restarts\n");
-}
-
-static void post_main(struct uloop_timeout *t)
-{
-	int child_status;
-	int nsret;
-
-	if (apply_rlimits()) {
-		ERROR("error applying resource limits\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (opts.name)
-		prctl(PR_SET_NAME, opts.name, NULL, NULL, NULL);
-
-	if (pipe(&pipes[0]) < 0)
-		free_and_exit(-1);
-
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, &pipes[2]) < 0)
-		free_and_exit(-1);
-
-	if (pipe2(&userns_pipe[0], O_CLOEXEC) < 0 || pipe2(&userns_pipe[2], O_CLOEXEC) < 0)
-		free_and_exit(-1);
-
-	parent_pidfd = syscall(SYS_pidfd_open, getpid(), 0);
-	if (parent_pidfd < 0) {
-		ERROR("pidfd_open() failed: %m\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (pipe2(exec_ack, O_CLOEXEC) < 0)
-		free_and_exit(-1);
-
-	if (opts.ocibundle)
-		cgroups_create();
-
-	if (has_namespaces()) {
-		if (opts.namespace & CLONE_NEWNS) {
-			if (!opts.extroot && (opts.user || opts.group)) {
-				add_mount_bind("/etc/passwd", 1, -1);
-				add_mount_bind("/etc/group", 1, -1);
-			}
-
-#if defined(__GLIBC__)
-			if (!opts.extroot)
-				add_mount_bind("/etc/nsswitch.conf", 1, -1);
-#endif
-			if (opts.setns.ns == -1) {
-				if (!(opts.namespace & CLONE_NEWNET)) {
-					add_mount_bind("/etc/resolv.conf", 1, 0);
-				} else if (opts.private_netifd) {
-					char hostdir[PATH_MAX], hostresolv[PATH_MAX];
-					int hostresolvfd;
-
-					snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
-					if (mkdir_p(hostdir, 0755)) {
-						ERROR("mkdir(%s) failed: %m\n", hostdir);
-						free_and_exit(-1);
-					}
-					snprintf(hostresolv, PATH_MAX, "%s/resolv.conf.auto", hostdir);
-					hostresolvfd = open(hostresolv, O_WRONLY | O_CREAT, 0644);
-					if (hostresolvfd >= 0)
-						close(hostresolvfd);
-					add_mount(hostdir, "/dev/resolv.conf.d", NULL,
-						MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, 0);
-				}
-			}
-			/* default mounts */
-			add_mount(NULL, "/dev", "tmpfs", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, "size=1M", -1);
-			add_mount("shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0,
-				  "mode=1777,size=10%", -1);
-			{
-				const char *ptsopts = jail_has_userns() ?
-					"newinstance,ptmxmode=0666,mode=0620,gid=0" :
-					"newinstance,ptmxmode=0666,mode=0620,gid=5";
-
-				add_mount(NULL, "/dev/pts", "devpts", MS_NOATIME | MS_NOEXEC | MS_NOSUID, 0, ptsopts, 0);
-			}
-
-			bool defer_userns = userns_deferred();
-
-			if (defer_userns)
-				add_mount(PROCD_NOAFILE, JAIL_NOAFILE, NULL,
-					  MS_BIND | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV, 0, NULL, -1);
-
-			if (opts.procfs || opts.ocibundle) {
-				add_mount("proc", "/proc", "proc",
-					  detect_atime_flag("/proc") | MS_NODEV | MS_NOEXEC | MS_NOSUID, 0, NULL, -1);
-
-				/*
-				 * hack to make /proc/sys/net read-write while the rest of /proc/sys is read-only
-				 * which cannot be expressed with OCI spec, but happends to be very useful.
-				 * Only apply it if '/proc/sys' is not already listed as mount, maskedPath or
-				 * readonlyPath.
-				 * If not running in a new network namespace, only make /proc/sys read-only.
-				 * If running in a new network namespace, temporarily stash (ie. mount-bind)
-				 * /proc/sys/net into (totally unrelated, but surely existing) /proc/self/net.
-				 * Then we mount-bind /proc/sys read-only and then mount-move /proc/self/net into
-				 * /proc/sys/net.
-				 * Mounts are established in the order they are added, so the three
-				 * steps are registered in exactly the order they have to happen in.
-				 *
-				 * A jail that defers its own CLONE_NEWUSER applies this (and all other
-				 * default masking below) itself in phase 2, once it regains its own
-				 * mount namespace: a mount locked here, while still privileged, can
-				 * never be replaced by that same, now less-privileged phase, since a
-				 * locked mount stays present underneath anything mounted over it and
-				 * still counts against the kernel's mount-visibility check for any
-				 * nested runtime's own /proc mount.
-				 */
-				if (!defer_userns && !mount_is_defined("/proc/sys")) {
-					if (opts.namespace & CLONE_NEWNET)
-						add_mount_inner("/proc/sys/net", "/proc/self/net", NULL, MS_BIND, 0, NULL, -1);
-
-					if (!add_mount(NULL, "/proc/sys", NULL, MS_BIND | MS_RDONLY, 0, NULL, -1) &&
-					    (opts.namespace & CLONE_NEWNET))
-						add_mount_inner("/proc/self/net", "/proc/sys/net", NULL, MS_MOVE, 0, NULL, -1);
-				}
-
-			}
-			if (opts.sysfs || opts.ocibundle)
-				add_mount("sysfs", "/sys", "sysfs",
-					  detect_atime_flag("/sys") | MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY, 0, NULL, -1);
-
-			if (!opts.ocibundle && !defer_userns) {
-				if (opts.procfs &&
-				    (mask_default_paths(proc_mask_critical, true) ||
-				     mask_default_paths(proc_mask_optional, false)))
-					free_and_exit(-1);
-				if (opts.sysfs && mask_default_paths(sys_mask_critical, true))
-					free_and_exit(-1);
-			}
-
-		}
-
-		if (opts.setns.pid != -1) {
-			pidns_fd = ns_open_pid("pid", getpid());
-			nsret = setns_open(CLONE_NEWPID);
-			if (nsret) {
-				ERROR("failed to join pid namespace: %s\n",
-				      strerror(nsret));
-				free_and_exit(EXIT_FAILURE);
-			}
-		} else {
-			pidns_fd = -1;
-		}
-
-		if ((opts.namespace & CLONE_NEWTIME) && opts.setns.time == -1 &&
-		    access("/proc/self/ns/time", F_OK)) {
-			ERROR("kernel lacks time namespace support\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-
-		if ((opts.namespace & CLONE_NEWNS) && prepare_jail_dev()) {
-			ERROR("prepare_jail_dev() failed\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-
-		if (jail_has_userns()) {
-			if (opts.overlaydir) {
-				if (chown(opts.overlaydir, opts.root_map_uid, opts.root_map_uid)) {
-					ERROR("chown(%s, %d, %d) failed: %m\n",
-					      opts.overlaydir, opts.root_map_uid, opts.root_map_uid);
-					free_and_exit(EXIT_FAILURE);
-				}
-			}
-			if (prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP)) {
-				ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
-				free_and_exit(EXIT_FAILURE);
-			}
-			if (seteuid(opts.root_map_uid)) {
-				ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
-				free_and_exit(EXIT_FAILURE);
-			}
-		}
-
-		if (opts.console) {
-			char *slave_name;
-			int parent_master;
-
-			parent_master = posix_openpt(O_RDWR | O_NOCTTY);
-			if (parent_master < 0) {
-				ERROR("posix_openpt: %m\n");
-				free_and_exit(-1);
-			}
-			if (grantpt(parent_master) || unlockpt(parent_master) ||
-			    !(slave_name = ptsname(parent_master))) {
-				ERROR("grantpt/unlockpt/ptsname failed\n");
-				close(parent_master);
-				free_and_exit(-1);
-			}
-			if (opts.console_height && opts.console_width) {
-				struct winsize ws = {
-					.ws_row = opts.console_height,
-					.ws_col = opts.console_width,
-				};
-				ioctl(parent_master, TIOCSWINSZ, &ws);
-			}
-			strncpy(console_slave_name, slave_name, sizeof(console_slave_name) - 1);
-			console_slave_name[sizeof(console_slave_name) - 1] = '\0';
-			if (opts.console_socket) {
-				if (send_console_fd(opts.console_socket, parent_master, slave_name)) {
-					ERROR("send_console_fd failed\n");
-					close(parent_master);
-					free_and_exit(-1);
-				}
-				close(parent_master);
-			} else {
-				console_fd = parent_master;
-				if (jail_has_userns() && seteuid(0)) {
-					ERROR("seteuid(0) failed: %m\n");
-					free_and_exit(EXIT_FAILURE);
-				}
-				pass_console(console_fd);
-				if (jail_has_userns() && seteuid(opts.root_map_uid)) {
-					ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
-					free_and_exit(EXIT_FAILURE);
-				}
-			}
-		}
-
-		/*
-		 * CLONE_NEWUSER is excluded here; the child creates its own
-		 * later, in enter_userns(). See exec_jail() for why.
-		 */
-		int init_cgroup_fd = -1;
-		struct clone_args cargs = {
-			.flags = (opts.namespace & ~(CLONE_NEWCGROUP | CLONE_NEWTIME |
-						     (userns_deferred() ? CLONE_NEWUSER : 0))) | CLONE_PIDFD,
-			.pidfd = (__u64)(uintptr_t)&jail_process_pidfd,
-			.exit_signal = SIGCHLD,
-		};
-
-		if (opts.ocibundle) {
-			init_cgroup_fd = cgroups_open_dir();
-			if (init_cgroup_fd >= 0) {
-				cargs.flags |= CLONE_INTO_CGROUP;
-				cargs.cgroup = (__u64)init_cgroup_fd;
-			}
-		}
-
-		/* a clone-time userns cannot mount sysfs of a foreign netns */
-		if ((opts.namespace & CLONE_NEWUSER) && !userns_deferred() &&
-		    !(opts.namespace & CLONE_NEWNET) && premount_sysfs())
-			WARNING("cannot mount sysfs for the jail: %m\n");
-
-		prime_jail_mount(opts.extroot);
-		prime_jail_mount(opts.overlaydir);
-		for (size_t i = 0; i < (size_t)num_volume_sources; i++)
-			prime_jail_mount(volume_sources[i]);
-
-		jail_process.pid = jail_clone3(&cargs);
-		if (init_cgroup_fd >= 0)
-			close(init_cgroup_fd);
-	} else {
-		jail_process.pid = fork();
-	}
-
-	if (jail_process.pid > 0) {
-		/* parent process */
-		char sig_buf[1];
-
-		close(parent_pidfd);
-		jail_process.cb = jail_process_handler;
-		uloop_process_add(&jail_process);
-		jail_running = 1;
-		if (seteuid(0)) {
-			ERROR("seteuid(%d) failed: %m\n", opts.root_map_uid);
-			free_and_exit(EXIT_FAILURE);
-		}
-
-		prctl(PR_SET_SECUREBITS, 0);
-
-		if (jail_stop_requested) {
-			INFO("stop requested before the jail was started\n");
-			jail_pidfd_send_signal(SIGKILL);
-			while (waitpid(jail_process.pid, NULL, 0) < 0 &&
-			       errno == EINTR);
-			uloop_process_delete(&jail_process);
-			jail_running = 0;
-			free_and_exit(128 + SIGTERM);
-		}
-
-		if (pidns_fd != -1) {
-			setns(pidns_fd, CLONE_NEWPID);
-			close(pidns_fd);
-		}
-		if (opts.setns.net != -1)
-			close(opts.setns.net);
-		if (opts.setns.ns != -1)
-			close(opts.setns.ns);
-		if (opts.setns.ipc != -1)
-			close(opts.setns.ipc);
-		if (opts.setns.uts != -1)
-			close(opts.setns.uts);
-		if (opts.setns.user != -1)
-			close(opts.setns.user);
-		if (opts.setns.cgroup != -1)
-			close(opts.setns.cgroup);
-#ifdef CLONE_NEWTIME
-		if (opts.setns.time != -1)
-			close(opts.setns.time);
-#endif
-		close(pipes[1]);
-		close(pipes[2]);
-		close(userns_pipe[1]);
-		close(userns_pipe[2]);
-		if (exec_ack[1] >= 0) {
-			close(exec_ack[1]);
-			exec_ack[1] = -1;
-		}
-		if (exec_ack[0] >= 0) {
-			exec_ack_uloop.fd = exec_ack[0];
-			uloop_fd_add(&exec_ack_uloop, ULOOP_READ);
-		}
-		if (read(pipes[0], sig_buf, 1) < 1) {
-			child_status = 0;
-			if (waitpid(jail_process.pid, &child_status, 0) == jail_process.pid &&
-			    WIFSIGNALED(child_status))
-				ERROR("can't read from child: killed by signal %d\n", WTERMSIG(child_status));
-			else if (WIFEXITED(child_status))
-				ERROR("can't read from child: exited %d\n", WEXITSTATUS(child_status));
-			else
-				ERROR("can't read from child\n");
-			free_and_exit(-1);
-		}
-		close(pipes[0]);
-		set_oom_score_adj();
-
-		if (opts.ocibundle) {
-			if (cgroups_configure())
-				free_and_exit(ENOTSUP);
-
-			cgroups_attach_pid(jail_process.pid);
-		}
-
-		if (jail_idmap_active()) {
-			num_idmap_fds = jail_idmap_build(opts.extroot,
-							 opts.uidmappings, opts.gidmappings,
-							 idmap_fds, JAIL_IDMAP_MAX_FDS);
-			if (num_idmap_fds < 0) {
-				ERROR("failed to build idmapped jail mounts\n");
-				free_and_exit(-1);
-			}
-
-			jail_chown_writable_surfaces();
-		}
-
-		if ((opts.namespace & CLONE_NEWNET) && opts.name && opts.ocibundle &&
-		    run_uxc_net("up")) {
-			ERROR("uxc-net failed to configure the container network\n");
-			free_and_exit(EXIT_FAILURE);
-		}
-
-		if ((opts.namespace & CLONE_NEWNET) && opts.name)
-			jail_network_attach(parent_ctx, opts.name, jail_process.pid);
-
-		if ((opts.namespace & CLONE_NEWNET) && opts.private_ubus) {
-			opts.jail_network_started = true;
-			if (jail_network_start(parent_ctx, opts.name, jail_process.pid,
-					       opts.private_netifd)) {
-				jail_reason_set("jail.network", EIO);
-				free_and_exit(EXIT_FAILURE);
-			}
-		}
-
-		if (opts.netdevices &&
-		    ((opts.namespace & CLONE_NEWNET) || opts.setns.net != -1) &&
-		    move_netdevs_into_jail(jail_process.pid))
-			free_and_exit(-1);
-
-		if (jail_writepid(jail_process.pid)) {
-			ERROR("failed to write pidfile: %m\n");
-			free_and_exit(-1);
-		}
-	} else if (jail_process.pid == 0) {
-		/* fork child process */
-		free_and_exit(exec_jail(NULL));
-	} else {
-		ERROR("failed to clone/fork: %m\n");
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	clock_gettime(CLOCK_REALTIME, &jail_created);
-	jail_created_uptime = uptime_get();
-	jail_oci_state = OCI_STATE_CREATED;
-
-	run_hooks(opts.hooks.prestart, post_prestart);
-}
-
-static void jail_write_last_exit(void)
-{
-	char path[PATH_MAX];
-	uid_t euid;
-	char *s;
-	int rc;
-
-	if (!opts.statedir || jail_restarting())
-		return;
-
-	if (snprintf(path, sizeof(path), "%s/last-exit", opts.statedir) >=
-	    (int)sizeof(path))
-		return;
-
-	s = blobmsg_format_json(notify_buf.head, true);
-	if (!s)
-		return;
-
-	euid = geteuid();
-	if (euid && seteuid(0))
-		ERROR("seteuid(0) failed: %m\n");
-
-	rc = file_write_atomic(path, s, strlen(s), 0644);
-	if (euid && seteuid(euid))
-		ERROR("seteuid(%d) failed: %m\n", euid);
-
-	free(s);
-	if (rc < 0)
-		ERROR("cannot write %s: %s\n", path, strerror(-rc));
-}
-
-static bool instance_event_build(const char *event)
-{
-	char boot_id[40];
-
-	if (!opts.ocibundle || !opts.name)
-		return false;
-
-	blob_buf_init(&notify_buf, 0);
-	blobmsg_add_string(&notify_buf, "service", opts.name);
-	blobmsg_add_string(&notify_buf, "instance", opts.name);
-	blobmsg_add_u32(&notify_buf, "pid", getpid());
-	if (opts.incarnation)
-		blobmsg_add_u64(&notify_buf, "incarnation", opts.incarnation);
-	if (opts.started_by)
-		blobmsg_add_string(&notify_buf, "started_by", opts.started_by);
-	if (!strcmp(event, "instance.stopped") ||
-	    !strcmp(event, "instance.create_failed")) {
-		if (jail_reason)
-			blobmsg_add_string(&notify_buf, "reason", jail_reason);
-		if (jail_reason && jail_reason_errno)
-			blobmsg_add_u32(&notify_buf, "errno",
-					jail_reason_errno);
-		if (jail_reaped)
-			blobmsg_add_u32(&notify_buf, "exit_code",
-					jail_return_code);
-		if (jail_stop_requested)
-			blobmsg_add_u8(&notify_buf, "requested", 1);
-		if (jail_exec_acked)
-			blobmsg_add_u8(&notify_buf, "started", 1);
-		if (jail_stop_escalated)
-			blobmsg_add_u8(&notify_buf, "escalated", 1);
-		if (jail_created_uptime)
-			blobmsg_add_u64(&notify_buf, "created", jail_created_uptime);
-		blobmsg_add_u64(&notify_buf, "stopped_at", uptime_get());
-		if (boot_id_get(boot_id, sizeof(boot_id)))
-			blobmsg_add_string(&notify_buf, "boot_id", boot_id);
-	}
-
-	return true;
-}
-
-static void emit_instance_event(const char *event)
-{
-	if (!instance_event_build(event))
-		return;
-
-	if (!strcmp(event, "instance.stopped") && !exit_from_child &&
-	    !cgroups_destroyed()) {
-		ERROR("instance.stopped emitted before the cgroup was destroyed\n");
-		cgroups_destroy();
-	}
-
-	if (!strcmp(event, "instance.stopped") ||
-	    !strcmp(event, "instance.create_failed"))
-		jail_write_last_exit();
-
-	if (parent_ctx)
-		ubus_send_event(parent_ctx, event, notify_buf.head);
-}
-
-static void post_poststart(void);
-static void poststart_dispatch(bool executed)
-{
-	if (!poststart_pending)
-		return;
-
-	poststart_pending = false;
-
-	if (executed) {
-		run_hooks(opts.hooks.poststart, post_poststart);
-		return;
-	}
-
-	if (jail_reaped)
-		poststop();
-}
-
-static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
-{
-	int exec_errno = 0;
-	ssize_t n;
-
-	do {
-		n = read(fd->fd, exec_ack_buf + exec_ack_len,
-			 sizeof(exec_ack_buf) - exec_ack_len);
-		if (n > 0)
-			exec_ack_len += n;
-	} while (n > 0 && exec_ack_len < sizeof(exec_ack_buf));
-
-	if (n < 0 && fd->registered)
-		return;
-
-	uloop_fd_delete(fd);
-	close(fd->fd);
-	exec_ack[0] = -1;
-
-	if (jail_dev_staged) {
-		umount2(jail_dev, MNT_DETACH);
-		rmdir(jail_dev);
-		jail_dev_staged = false;
-	}
-
-	if (!exec_ack_len) {
-		INFO("the jail exited before its entrypoint was executed\n");
-		poststart_dispatch(false);
-		return;
-	}
-
-	if (exec_ack_buf[0] == EXEC_ACK_HOOK) {
-		jail_reason_set("hooks.startContainer", ECANCELED);
-		poststart_dispatch(false);
-		return;
-	}
-
-	if (exec_ack_buf[0] != EXEC_ACK_EXEC) {
-		ERROR("container.start: unexpected exec acknowledgement\n");
-		poststart_dispatch(false);
-		return;
-	}
-
-	if (exec_ack_len == 1) {
-		jail_exec_acked = true;
-		emit_instance_event("instance.running");
-		poststart_dispatch(true);
-		return;
-	}
-
-	if (exec_ack_len == sizeof(exec_ack_buf))
-		memcpy(&exec_errno, exec_ack_buf + 1, sizeof(exec_errno));
-
-	ERROR("container.start: cannot execute the entrypoint: %s\n",
-	      exec_errno ? strerror(exec_errno) : "reason not reported");
-	jail_reason_set("process.args", exec_errno ?: ENOEXEC);
-	poststart_dispatch(false);
-}
-
-static void post_create_runtime(void)
-{
-	if (hook_chain_failed) {
-		ERROR("createRuntime hook failed; aborting container\n");
-		jail_reason_set("hooks.createRuntime", ECANCELED);
-		free_and_exit(EXIT_FAILURE);
-	}
-
-	if (jail_reaped) {
-		poststop();
-		return;
-	}
-
-	if (sock_send_fds(pipes[3], 'O', idmap_fds, num_idmap_fds) < 0) {
-		ERROR("can't write to child\n");
-		free_and_exit(-1);
-	}
-
-	while (num_idmap_fds > 0)
-		close(idmap_fds[--num_idmap_fds]);
-
-	if ((opts.namespace & CLONE_NEWUSER) && opts.setns.user == -1) {
-		char ubuf[1];
-
-		if (xread_byte(userns_pipe[0], ubuf) < 1) {
-			ERROR("can't read from child\n");
-			free_and_exit(-1);
-		}
-		close(userns_pipe[0]);
-
-		if (write_setgroups(jail_process.pid, true)) {
-			ERROR("can't write setgroups\n");
-			free_and_exit(-1);
-		}
-		if (!opts.uidmap) {
-			bool has_gr = (opts.gr_gid != -1);
-			int primary_gid = has_gr ? opts.gr_gid :
-				((opts.pw_uid != -1) ? opts.pw_gid : 65534);
-			int target_uid = (opts.pw_uid != -1) ? opts.pw_uid : 65534;
-
-			if (write_single_uid_gid_map(jail_process.pid, 0, target_uid)) {
-				ERROR("failed to map uid %d into the jail's user "
-				      "namespace (mapping a uid other than your own "
-				      "requires CAP_SETUID, typically real root; use "
-				      "-U with your own account, run as a privileged "
-				      "user, or supply an explicit --uidmap)\n",
-				      target_uid);
-				free_and_exit(-1);
-			}
-
-			if (opts.additional_gids && opts.num_additional_gids) {
-				char *gidmap = build_group_gidmap(primary_gid);
-
-				if (gidmap) {
-					if (write_uid_gid_map(jail_process.pid, 1, gidmap)) {
-						ERROR("failed to map supplementary groups for "
-						      "%s into the jail's user namespace "
-						      "(mapping a gid other than your own "
-						      "requires CAP_SETGID, typically real "
-						      "root)\n", opts.user);
-						free(gidmap);
-						free_and_exit(-1);
-					}
-					free(gidmap);
-				} else {
-					WARNING("failed to build supplementary group map for "
-						"%s; falling back to primary gid only\n", opts.user);
-					if (write_single_uid_gid_map(jail_process.pid, 1, primary_gid)) {
-						ERROR("failed to map gid %d into the jail's "
-						      "user namespace (mapping a gid other "
-						      "than your own requires CAP_SETGID, "
-						      "typically real root)\n", primary_gid);
-						free_and_exit(-1);
-					}
-				}
-			} else {
-				if (write_single_uid_gid_map(jail_process.pid, 1, primary_gid)) {
-					ERROR("failed to map gid %d into the jail's user "
-					      "namespace (mapping a gid other than your "
-					      "own requires CAP_SETGID, typically real "
-					      "root)\n", primary_gid);
-					free_and_exit(-1);
-				}
-			}
-		} else {
-			if (write_uid_gid_map(jail_process.pid, 0, opts.uidmap)) {
-				ERROR("failed to write uidmap (check --uidmap values "
-				      "and privileges)\n");
-				free_and_exit(-1);
-			}
-			if (opts.gidmap && write_uid_gid_map(jail_process.pid, 1, opts.gidmap)) {
-				ERROR("failed to write gidmap (check --gidmap values "
-				      "and privileges)\n");
-				free_and_exit(-1);
-			}
-		}
-
-		ubuf[0] = 'O';
-		if (xwrite_byte(userns_pipe[3], ubuf[0]) < 0) {
-			ERROR("can't write to child\n");
-			free_and_exit(-1);
-		}
-		close(userns_pipe[3]);
-	} else {
-		close(userns_pipe[0]);
-		close(userns_pipe[3]);
-	}
-
-	jail_create_done = true;
-	emit_instance_event("instance.ready");
-
-	if (opts.ocibundle && !opts.immediately)
-		uloop_run(); /* wait for 'start' command via ubus */
-	else
-		pipe_send_start_container(NULL);
-}
-
-static bool jail_inproc_seccomp(void)
-{
-	if (seccomp_oci_needs_inproc())
-		return true;
-
-	return opts.ocibundle && !opts.no_new_privs && opts.seccomp_mode == SECCOMP_MODE_ENFORCE;
-}
-
-static bool jail_ptrace_seccomp(void)
-{
-	if (opts.seccomp_mode == SECCOMP_MODE_TRACE)
-		return true;
-
-	return opts.ociseccomp && !jail_inproc_seccomp();
-}
-
-static void jail_seccomp_run(void)
-{
-	struct seccomp_trace_opts t = {
-		.mode = opts.seccomp_mode,
-		.name = opts.name ? opts.name : "trace",
-		.log_fd = -1,
-		.main_boundary = (opts.seccomp_mode == SECCOMP_MODE_TRACE),
-		.dedup = 0,
-	};
-	int fd = -1;
-
-	if (opts.seccomp_log) {
-		fd = open(opts.seccomp_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-		if (fd < 0)
-			ERROR("seccomp-trace: cannot open log %s: %m\n", opts.seccomp_log);
-		t.log_fd = fd;
-	}
-
-	seccomp_trace_run(jail_process.pid, &t);
-
-	if (fd >= 0)
-		close(fd);
-
-	free_and_exit(0);
-}
-
-static bool seccomp_target_is_static(pid_t pid)
-{
-	unsigned long pair[2];
-	bool dynamic = false;
-	char path[32];
-	FILE *f;
-
-	snprintf(path, sizeof(path), "/proc/%d/auxv", (int)pid);
-	f = fopen(path, "rb");
-	if (!f)
-		return false;
-
-	while (fread(pair, sizeof(pair), 1, f) == 1) {
-		if (pair[0] == 0)
-			break;
-		if (pair[0] == 7 && pair[1])
-			dynamic = true;
-	}
-	fclose(f);
-	return !dynamic;
-}
-
-static bool seccomp_main_trackable(pid_t pid)
-{
-	unsigned long at_entry, lsm;
-	int main_argidx;
-
-	if (seccomp_marker_addrs(pid, &at_entry, &lsm, &main_argidx))
-		return false;
-
-	return lsm != 0;
-}
-
-static int jail_seccomp_handshake(void)
-{
-	struct sock_fprog *aprog;
-	int status, rc, mrc;
-
-	if (!jail_ptrace_seccomp())
-		return 0;
-
-	while (waitpid(jail_process.pid, &status, 0) < 0) {
-		if (errno == EINTR)
-			continue;
-		ERROR("seccomp-inject: waitpid: %m\n");
-		return -1;
-	}
-
-	if (!WIFSTOPPED(status)) {
-		if (WIFEXITED(status))
-			ERROR("seccomp-inject: jail exited (code %d) before entrypoint exec\n", WEXITSTATUS(status));
-		else if (WIFSIGNALED(status))
-			ERROR("seccomp-inject: jail killed by signal %d before entrypoint exec\n", WTERMSIG(status));
-		else
-			ERROR("seccomp-inject: jail exited before entrypoint exec\n");
-		uloop_process_delete(&jail_process);
-		jail_process_handler(&jail_process, status);
-		return -1;
-	}
-
-	if (opts.seccomp_mode == SECCOMP_MODE_TRACE) {
-		jail_exec_acked = true;
-		emit_instance_event("instance.running");
-		jail_seccomp_run();
-	}
-
-	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE &&
-	    seccomp_target_is_static(jail_process.pid)) {
-		if (opts.ociseccomp_init &&
-		    seccomp_main_trackable(jail_process.pid)) {
-			if (seccomp_inject(jail_process.pid, opts.ociseccomp_init)) {
-				ERROR("seccomp-inject: failed to arm init filter\n");
-				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-				return -1;
-			}
-			if (seccomp_run_to_main(jail_process.pid)) {
-				ERROR("seccomp-inject: failed to reach main\n");
-				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-				return -1;
-			}
-			if (opts.ociseccomp_delta_main &&
-			    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_main)) {
-				ERROR("seccomp-inject: failed to arm main delta\n");
-				ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-				return -1;
-			}
-		} else if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
-			ERROR("seccomp-inject: failed to arm filter\n");
-			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-			return -1;
-		}
-		if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
-			ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
-			return -1;
-		}
-		return 0;
-	}
-
-	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE && !opts.ociseccomp_linker) {
-		if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
-			ERROR("seccomp-inject: failed to arm filter\n");
-			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-			return -1;
-		}
-		if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
-			ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
-			return -1;
-		}
-		return 0;
-	}
-
-	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE && opts.ociseccomp_linker &&
-	    seccomp_inject(jail_process.pid, opts.ociseccomp_linker)) {
-		ERROR("seccomp-inject: failed to arm linker filter\n");
-		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-		return -1;
-	}
-
-	if (seccomp_run_to_entry(jail_process.pid)) {
-		ERROR("seccomp-inject: failed to reach entry point\n");
-		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-		return -1;
-	}
-
-	if (opts.seccomp_mode == SECCOMP_MODE_AUDIT ||
-	    opts.seccomp_mode == SECCOMP_MODE_COMPLAIN) {
-		aprog = seccomp_oci_audit_filter(opts.ociseccomp);
-		if (!aprog) {
-			ERROR("seccomp-trace: failed to build audit filter\n");
-			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-			return -1;
-		}
-		rc = seccomp_inject(jail_process.pid, aprog);
-		free(aprog->filter);
-		free(aprog);
-		if (rc) {
-			ERROR("seccomp-trace: failed to arm audit filter\n");
-			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-			return -1;
-		}
-		jail_seccomp_run();
-	}
-
-	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE) {
-		if (opts.ociseccomp_delta_entry &&
-		    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_entry)) {
-			ERROR("seccomp-inject: failed to arm entry delta\n");
-			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-			return -1;
-		}
-	} else if (opts.ociseccomp_init &&
-		   seccomp_inject(jail_process.pid, opts.ociseccomp_init)) {
-		ERROR("seccomp-inject: failed to arm init filter\n");
-		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-		return -1;
-	}
-
-	mrc = seccomp_run_to_main_from_entry(jail_process.pid);
-	if (mrc < 0) {
-		ERROR("seccomp-inject: failed to reach main\n");
-		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-		return -1;
-	}
-
-	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE) {
-		if (opts.ociseccomp_delta_main &&
-		    seccomp_inject(jail_process.pid, opts.ociseccomp_delta_main)) {
-			ERROR("seccomp-inject: failed to arm main delta\n");
-			ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-			return -1;
-		}
-	} else if (seccomp_inject(jail_process.pid, opts.ociseccomp)) {
-		ERROR("seccomp-inject: failed to arm filter\n");
-		ptrace(PTRACE_KILL, jail_process.pid, 0, 0);
-		return -1;
-	}
-
-	if (ptrace(PTRACE_DETACH, jail_process.pid, 0, 0)) {
-		ERROR("seccomp-inject: PTRACE_DETACH: %m\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-static void pipe_send_start_container(struct uloop_timeout *t)
-{
-	char sig_buf[1];
-
-	jail_oci_state = OCI_STATE_RUNNING;
-	sig_buf[0] = '!';
-	if (write(pipes[3], sig_buf, 1) < 0) {
-		ERROR("can't write to child\n");
-		free_and_exit(-1);
-	}
-	close(pipes[3]);
-
-	if (jail_seccomp_handshake()) {
-		if (!jail_reaped)
-			free_and_exit(-1);
-
-		return;
-	}
-
-	poststart_pending = true;
-}
-
-static void post_poststart(void)
-{
-	if (hook_chain_failed) {
-		ERROR("poststart hook failed; stopping container\n");
-		jail_reason_set("hooks.poststart", ECANCELED);
-	} else if (!jail_reaped) {
-		netifd_restart_watch();
-		uloop_run(); /* idle here while jail is running */
-	}
-
-	if (jail_running) {
-		DEBUG("killing jail process\n");
-		jail_pidfd_send_signal(SIGTERM);
-		uloop_timeout_set(&jail_process_timeout, 1000);
-		uloop_run();
-	}
-
-	poststop();
-}
-
-static void poststop(void)
-{
-	jail_oci_state = OCI_STATE_STOPPED;
-
-	if (jail_restarting())
-		jail_reason_set("jail.restart", 0);
-	else
-		notify_signal(opts.notify_fd);
-
-	if (opts.jail_network_started) {
-		jail_network_teardown();
-		opts.jail_network_started = false;
-	}
-	if ((opts.namespace & CLONE_NEWNET) && opts.name && opts.ocibundle)
-		run_uxc_net("down");
-
-	if (opts.ocibundle && container_registered)
-		cgroups_destroy();
-
-	stop_announced = true;
-	emit_instance_event(container_registered ? "instance.stopped" :
-						  "instance.create_failed");
-
-	/* a restart re-execs in place, so no delete will ever follow it */
-	if (opts.ocibundle && container_registered && !jail_restarting() &&
-	    !delete_requested) {
-		delete_awaited = true;
-		return;
-	}
-
-	poststop_hooks();
 }
