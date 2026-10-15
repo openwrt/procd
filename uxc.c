@@ -2063,22 +2063,22 @@ static void mkdir_path(const char *path, mode_t mode)
 	mkdir(tmp, mode);
 }
 
-static bool shared_secret(const char *root, const char *scope, char *out,
-			  size_t outlen)
+static int shared_secret(const char *root, const char *scope, const char *seed,
+			 char *out, size_t outlen)
 {
 	char dir[PATH_MAX], path[PATH_MAX], lockpath[PATH_MAX];
 	const char *p;
 	int lockfd;
 	FILE *f;
 	size_t n;
-	bool ok = false;
+	int ret = -1;
 
 	if (!scope || !*scope || *scope == '/' || strstr(scope, ".."))
-		return false;
+		return -1;
 	for (p = scope; *p; p++)
 		if (!isalnum((unsigned char)*p) && *p != '/' && *p != '-' &&
 		    *p != '_' && *p != '.')
-			return false;
+			return -1;
 
 	snprintf(dir, sizeof(dir), "%s/%s", root, scope);
 	snprintf(path, sizeof(path), "%s/value", dir);
@@ -2087,7 +2087,7 @@ static bool shared_secret(const char *root, const char *scope, char *out,
 	mkdir_path(root, 0700);
 	lockfd = open(lockpath, O_CREAT | O_RDWR, 0600);
 	if (lockfd < 0)
-		return false;
+		return -1;
 	flock(lockfd, LOCK_EX);
 
 	f = fopen(path, "r");
@@ -2097,9 +2097,12 @@ static bool shared_secret(const char *root, const char *scope, char *out,
 		out[n] = '\0';
 		while (n && (out[n - 1] == '\n' || out[n - 1] == '\r'))
 			out[--n] = '\0';
-		ok = (out[0] != '\0');
+		ret = out[0] ? 0 : -1;
 	} else {
-		gen_secret(out, outlen);
+		if (seed)
+			snprintf(out, outlen, "%s", seed);
+		else
+			gen_secret(out, outlen);
 		if (out[0]) {
 			mkdir_path(dir, 0700);
 			f = fopen(path, "w");
@@ -2107,31 +2110,35 @@ static bool shared_secret(const char *root, const char *scope, char *out,
 				fchmod(fileno(f), 0600);
 				fprintf(f, "%s", out);
 				fclose(f);
-				ok = true;
+				ret = 1;
 			}
 		}
 	}
 
 	flock(lockfd, LOCK_UN);
 	close(lockfd);
-	return ok;
+	return ret;
 }
 
-static bool envfile_has_key(const char *path, const char *key)
+static bool envfile_value(const char *path, const char *key, char *out, size_t len)
 {
-	char line[4096];
 	size_t klen = strlen(key);
 	bool found = false;
+	char line[4096];
 	FILE *f;
 
 	f = fopen(path, "r");
 	if (!f)
 		return false;
-	while (fgets(line, sizeof(line), f))
-		if (!strncmp(line, key, klen) && line[klen] == '=') {
-			found = true;
-			break;
-		}
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, key, klen) || line[klen] != '=')
+			continue;
+
+		line[strcspn(line, "\n")] = '\0';
+		snprintf(out, len, "%s", line + klen + 1);
+		found = true;
+		break;
+	}
 	fclose(f);
 	return found;
 }
@@ -2209,11 +2216,12 @@ static int provision_copy_path(const char *name, const char *dest, char *out, si
 
 static void materialise_initenv(const char *name, struct blob_attr *initenv)
 {
-	char dir[PATH_MAX], path[PATH_MAX], secret[64];
-	char secrets[PATH_MAX];
+	char dir[PATH_MAX], path[PATH_MAX], scope[PATH_MAX];
+	char current[4096], secrets[PATH_MAX], secret[64];
 	struct blob_attr *cur;
 	const char *key, *val;
-	int rem;
+	int rem, created;
+	bool have;
 	FILE *f;
 
 	if (store_dir(name, STORE_STATE, dir, sizeof(dir)) ||
@@ -2226,17 +2234,24 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING)
 			continue;
 		key = blobmsg_name(cur);
-		if (!key || !*key || envfile_has_key(path, key))
+		if (!key || !*key)
 			continue;
 
+		have = envfile_value(path, key, current, sizeof(current));
 		val = blobmsg_get_string(cur);
+		created = 0;
 		if (!strcmp(val, "generate")) {
-			gen_secret(secret, sizeof(secret));
-			if (!secret[0])
+			snprintf(scope, sizeof(scope), "%s/%s", name, key);
+			created = shared_secret(secrets, scope, have ? current : NULL, secret,
+						sizeof(secret));
+			if (created < 0 || have)
 				continue;
 			val = secret;
+		} else if (have) {
+			continue;
 		} else if (!strncmp(val, "generate@", 9)) {
-			if (!shared_secret(secrets, val + 9, secret, sizeof(secret)))
+			created = shared_secret(secrets, val + 9, NULL, secret, sizeof(secret));
+			if (created < 0)
 				continue;
 			val = secret;
 		}
@@ -2250,7 +2265,7 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 		fprintf(f, "%s=%s\n", key, val);
 		fclose(f);
 
-		if (val == secret)
+		if (created > 0)
 			fprintf(stderr, "uxc: generated %s for container %s\n", key, name);
 	}
 }
@@ -6035,9 +6050,25 @@ static bool reconcile_volume_owned(const char *name, const char *vol)
 	return true;
 }
 
-static void reconcile_kept_volumes(const char *name)
+static void secrets_purge(const char *path)
+{
+	if (tree_purge(path))
+		fprintf(stderr, "uxc: warning: could not remove the secrets in %s\n", path);
+}
+
+static void reconcile_kept_hint(const char *name, bool *first)
+{
+	if (*first)
+		fprintf(stderr, "uxc: container '%s' removed; its data volumes and generated "
+			"secrets were kept and are reused on reinstall. To delete them, run:\n",
+			name);
+	*first = false;
+}
+
+static void reconcile_kept_volumes(const char *base, const char *name)
 {
 	struct blob_attr *tb[__UVOL_ENTRY_MAX];
+	char root[PATH_MAX], secrets[PATH_MAX];
 	struct blob_attr *vols, *cur;
 	bool first = true;
 	const char *vol;
@@ -6054,12 +6085,19 @@ static void reconcile_kept_volumes(const char *name)
 		if (!reconcile_volume_owned(name, vol))
 			continue;
 
-		if (first)
-			fprintf(stderr, "uxc: container '%s' removed; persistent data volumes "
-				"were kept. To delete this data, run:\n", name);
+		reconcile_kept_hint(name, &first);
 		fprintf(stderr, "  uvol remove %s\n", vol);
-		first = false;
 	}
+
+	if (store_root(base, STORE_SECRETS, root, sizeof(root)))
+		return;
+
+	snprintf(secrets, sizeof(secrets), "%s/%s", root, name);
+	if (access(secrets, F_OK))
+		return;
+
+	reconcile_kept_hint(name, &first);
+	fprintf(stderr, "  rm -rf %s\n", secrets);
 }
 
 static int reconcile_purge(const char *base, const char *name, const char *statedir)
@@ -6139,7 +6177,7 @@ static int reconcile_base(const char *base, int *purged)
 			ret = -EIO;
 			continue;
 		}
-		reconcile_kept_volumes(name);
+		reconcile_kept_volumes(base, name);
 		++*purged;
 	}
 
@@ -6171,7 +6209,7 @@ static int uxc_reconcile(void)
 
 static int uxc_delete(char *name, bool force, bool volumes)
 {
-	char provdir[PATH_MAX], rundir[PATH_MAX];
+	char provdir[PATH_MAX], secdir[PATH_MAX], rundir[PATH_MAX];
 	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
 	static struct blob_buf req, vols;
@@ -6192,6 +6230,7 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	cfname = blobmsg_name(found);
 
 	ret = store_dir(name, STORE_PROVISION, provdir, sizeof(provdir)) ?:
+	      store_dir(name, STORE_SECRETS, secdir, sizeof(secdir)) ?:
 	      rundir_path(name, NULL, rundir, sizeof(rundir));
 	if (ret)
 		return ret;
@@ -6270,8 +6309,10 @@ static int uxc_delete(char *name, bool force, bool volumes)
 				overlay.volume);
 	}
 
-	if (!ret && volumes)
+	if (!ret && volumes) {
 		reap_data_volumes(name, blob_data(vols.head));
+		secrets_purge(secdir);
+	}
 
 errout:
 	blob_buf_free(&vols);
