@@ -539,6 +539,7 @@ static void usage(void) {
 	printf("\tstate <conf>\t\t\t\tget state of container <conf>\n");
 	printf("\tkill [--signal <sig>] [--all] <conf> [<sig>]\tsignal <conf> (no signal: graceful stop); --all+KILL: whole cgroup\n");
 	printf("\trestart <conf>\t\t\t\tstop <conf> if running, then re-create and start it\n");
+	printf("\trespawn-reset <conf> [<count>]\t\tset the respawn retry count of <conf>\n");
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
 	printf("\tdisable <conf>\t\t\t\tdon't start container <conf> on boot\n");
 	printf("\tset <conf> [--autostart 0|1] [--pid-file <path>]\n");
@@ -5523,7 +5524,7 @@ static int respawn_arg_add(struct blob_buf *buf, char *arg)
 	return 0;
 }
 
-static int stop_timeout_arg_add(struct blob_buf *buf, const char *arg)
+static int u32_arg_parse(const char *arg, uint32_t *out)
 {
 	unsigned long long n;
 	char *end;
@@ -5535,9 +5536,50 @@ static int stop_timeout_arg_add(struct blob_buf *buf, const char *arg)
 	if (*end || n > UINT32_MAX)
 		return -EINVAL;
 
+	*out = n;
+
+	return 0;
+}
+
+static int stop_timeout_arg_add(struct blob_buf *buf, const char *arg)
+{
+	uint32_t n;
+
+	if (u32_arg_parse(arg, &n))
+		return -EINVAL;
+
 	blobmsg_add_u32(buf, "stop-timeout", n);
 
 	return 0;
+}
+
+static int uxc_respawn_reset(const char *name, const char *arg)
+{
+	struct blob_attr *tb[__CONF_MAX];
+	static struct blob_buf req;
+	uint32_t count = 0;
+	uint32_t id;
+	int ret;
+
+	if (arg && (u32_arg_parse(arg, &count) || count > INT_MAX))
+		return -EINVAL;
+
+	if (!registration_find(name, tb))
+		return -ENOENT;
+
+	if (ubus_lookup_id(ctx, "container", &id))
+		return -EIO;
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "name", name);
+	blobmsg_add_u32(&req, "count", count);
+	ret = ubus_invoke(ctx, id, "respawn_reset", req.head, NULL, NULL, 3000);
+	blob_buf_free(&req);
+
+	if (ret == UBUS_STATUS_NOT_FOUND)
+		return -ENOENT;
+
+	return ret ? -EIO : 0;
 }
 
 static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
@@ -6429,6 +6471,10 @@ next_global:
 		if (verb_argc != 2)
 			goto usage_out;
 		ret = uxc_restart(verb_argv[1], systemd_cgroup);
+	} else if (!strcmp(verb, "respawn-reset")) {
+		if (verb_argc != 2 && verb_argc != 3)
+			goto usage_out;
+		ret = uxc_respawn_reset(verb_argv[1], verb_argc == 3 ? verb_argv[2] : NULL);
 	} else if (!strcmp(verb, "enable")) {
 		if (verb_argc != 2)
 			goto usage_out;
