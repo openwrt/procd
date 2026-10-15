@@ -245,6 +245,7 @@ static char **volume_sources;
 static int num_volume_sources;
 
 #define EXEC_ACK_EXEC	'X'
+#define EXEC_ACK_HOOK	'H'
 static int exec_ack[2] = { -1, -1 };
 static char exec_ack_buf[1 + sizeof(int)];
 static size_t exec_ack_len;
@@ -1801,6 +1802,17 @@ static int timens_create(void);
 #endif
 static int remask_after_unshare(void);
 static void remount_proc_sys_after_unshare(void);
+static void hook_chain_check(const char *chain, int ack_fd)
+{
+	if (!hook_chain_failed)
+		return;
+
+	ERROR("%s hook failed; aborting container\n", chain);
+	if (ack_fd >= 0)
+		xwrite_byte(ack_fd, EXEC_ACK_HOOK);
+	free_and_exit(EXIT_FAILURE);
+}
+
 static void enter_jail_fs(void)
 {
 	if (chdir(jail_root)) {
@@ -1885,6 +1897,8 @@ static int userns_become_root(void)
 static void enter_userns(void)
 {
 	int ret;
+
+	hook_chain_check("createContainer", -1);
 
 	if (!userns_deferred()) {
 		post_jail_fs();
@@ -3365,6 +3379,8 @@ static void post_start_hook(void)
 	struct sock_fprog *seccomp_prog = opts.ociseccomp_linker ?: opts.ociseccomp;
 	int pw_uid, pw_gid, gr_gid;
 	int exec_errno;
+
+	hook_chain_check("startContainer", exec_ack[1]);
 
 	if (opts.scheduler.set && applyOCIprocessscheduler())
 		free_and_exit(EXIT_FAILURE);
@@ -7824,6 +7840,12 @@ static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 
 	if (!exec_ack_len) {
 		INFO("the jail exited before its entrypoint was executed\n");
+		poststart_dispatch(false);
+		return;
+	}
+
+	if (exec_ack_buf[0] == EXEC_ACK_HOOK) {
+		jail_reason_set("hooks.startContainer", ECANCELED);
 		poststart_dispatch(false);
 		return;
 	}
