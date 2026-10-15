@@ -245,8 +245,7 @@ static long inj_ret(const inj_regs *r)
 	return r->uregs[0];
 }
 
-static void inj_clear_restart(inj_regs *r) __attribute__((unused));
-static void inj_clear_restart(inj_regs *r)
+static void __attribute__((unused)) inj_clear_restart(inj_regs *r)
 {
 	(void)r;
 }

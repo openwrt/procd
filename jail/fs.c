@@ -360,33 +360,6 @@ int sys_mount_setattr(int dfd, const char *path, unsigned flags, struct ujail_mo
 struct avl_tree mounts;
 static LIST_HEAD(mounts_order);
 
-/* same masking as do_mount()'s is_mask branch, applied immediately
- * against an absolute path instead of queued through jail_root.
- *
- * UJAIL_NOAFILE lives under the pre-pivot root, gone by the time this
- * runs; JAIL_NOAFILE, a locked bind of procd's read-only noafile
- * queued for deferred-userns jails, is used instead. */
-int mask_path_now(const char *path)
-{
-	struct stat s;
-
-	if (stat(path, &s))
-		return 0; /* doesn't exist, nothing to mask */
-
-	if (S_ISDIR(s.st_mode)) {
-		if (mount("none", path, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000"))
-			return -1;
-	} else {
-		if (mount(JAIL_NOAFILE, path, "bind", MS_BIND, NULL))
-			return -1;
-		if (remount_readonly(path, MS_NOSUID | MS_NOEXEC | MS_NODEV))
-			return -1;
-	}
-
-	DEBUG("masked path %s\n", path);
-	return 0;
-}
-
 static void mountinfo_unescape(char *s)
 {
 	char *r = s, *w = s;
@@ -475,6 +448,33 @@ int remount_readonly(const char *path, unsigned long flags)
 	return mount(NULL, path, NULL, flags, NULL);
 }
 
+/* same masking as do_mount()'s is_mask branch, applied immediately
+ * against an absolute path instead of queued through jail_root.
+ *
+ * UJAIL_NOAFILE lives under the pre-pivot root, gone by the time this
+ * runs; JAIL_NOAFILE, a locked bind of procd's read-only noafile
+ * queued for deferred-userns jails, is used instead. */
+int mask_path_now(const char *path)
+{
+	struct stat s;
+
+	if (stat(path, &s))
+		return 0; /* doesn't exist, nothing to mask */
+
+	if (S_ISDIR(s.st_mode)) {
+		if (mount("none", path, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000"))
+			return -1;
+	} else {
+		if (mount(JAIL_NOAFILE, path, "bind", MS_BIND, NULL))
+			return -1;
+		if (remount_readonly(path, MS_NOSUID | MS_NOEXEC | MS_NODEV))
+			return -1;
+	}
+
+	DEBUG("masked path %s\n", path);
+	return 0;
+}
+
 int bind_remount_readonly(const char *path, unsigned long flags)
 {
 	if (mount(path, path, "bind", MS_BIND | (flags & MS_REC), NULL))
@@ -488,205 +488,6 @@ static bool fs_userns;
 void jail_fs_set_userns(bool enabled)
 {
 	fs_userns = enabled;
-}
-
-static bool mount_opts_has(const char *opts, const char *needle);
-static bool mount_opts_gid_unmapped(const char *opts);
-static void mount_opts_drop(const char *opts, const char *key, char *buf, size_t len);
-
-static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
-		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner,
-		    int source_fd)
-{
-	struct stat s;
-	char new[PATH_MAX];
-	char tmpfs_data[512];
-	char devpts_data[512];
-	const char *mount_data;
-	char *source = (char *)orig_source;
-	int fd, err, ret = 0;
-	bool is_bind = (orig_mountflags & MS_BIND);
-	bool is_mask = (source == (void *)(-1));
-	bool use_fd = false;
-	unsigned long mountflags = orig_mountflags;
-
-	assert(!(inner && is_mask));
-	assert(!(inner && !orig_source));
-
-	if (source && is_bind && stat(source, &s)) {
-		if (source_fd >= 0 && !fstatat(source_fd, "", &s, AT_EMPTY_PATH)) {
-			use_fd = true;
-		} else {
-			if (error)
-				ERROR("stat(%s) failed: %m\n", source);
-			return error;
-		}
-	}
-
-	if (inner)
-		if (asprintf(&source, "%s%s", root, orig_source) < 0)
-			return ENOMEM;
-
-	snprintf(new, sizeof(new), "%s%s", root, target?target:source);
-
-	if (is_mask) {
-		if (stat(new, &s))
-			return 0; /* doesn't exists, nothing to mask */
-
-		if (S_ISDIR(s.st_mode)) {/* use empty 0-sized tmpfs for directories */
-			err = mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000");
-		} else {
-			/* mount-bind 0-sized file having mode 000 */
-			err = mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL);
-			if (!err)
-				err = remount_readonly(new, MS_NOSUID | MS_NOEXEC | MS_NODEV);
-		}
-
-		if (err) {
-			if (error)
-				ERROR("failed to mask %s: %m\n", new);
-			else
-				WARNING("could not mask optional path %s: %m\n",
-					new);
-			return error;
-		}
-
-		DEBUG("masked path %s\n", new);
-		return 0;
-	}
-
-
-	if (!is_bind || (source && S_ISDIR(s.st_mode))) {
-		mkdir_p(new, 0755);
-	} else if (is_bind && source) {
-		const char *target_rel = target ? target : source;
-		struct open_how how = {
-			.flags = O_CREAT | O_WRONLY | O_TRUNC | O_EXCL | O_CLOEXEC,
-			.mode = 0644,
-			.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
-		};
-
-		assert(target_rel);
-		mkdir_p(dirname(new), 0755);
-		snprintf(new, sizeof(new), "%s%s", root, target?target:source);
-		while (*target_rel == '/')
-			++target_rel;
-		fd = (jailroot_dirfd >= 0)
-		     ? sys_openat2(jailroot_dirfd, target_rel, &how, sizeof(how))
-		     : open(new, O_CREAT|O_WRONLY|O_TRUNC|O_EXCL|O_CLOEXEC, 0644);
-		if (fd >= 0)
-			close(fd);
-
-		if (error && fd < 0 && errno != EEXIST) {
-			ERROR("failed to create mount target %s: %m\n", new);
-
-			ret = errno;
-			goto free_source_out;
-		}
-	}
-
-	if (is_bind) {
-		if (use_fd) {
-			if (sys_move_mount(source_fd, "", AT_FDCWD, new, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
-				if (error)
-					ERROR("move_mount(%s -> %s): %m\n", source, new);
-				ret = error;
-				goto free_source_out;
-			}
-		} else if (mount(source?:new, new, filesystemtype?:"bind", MS_BIND | (mountflags & MS_REC), optstr)) {
-			if (error)
-				ERROR("failed to mount -B %s %s: %m\n", source, new);
-
-			ret = error;
-			goto free_source_out;
-		}
-		mountflags |= MS_REMOUNT;
-	}
-
-	mount_data = optstr;
-	if (filesystemtype && !strcmp(filesystemtype, "devpts") && fs_userns &&
-	    mount_opts_gid_unmapped(optstr)) {
-		mount_opts_drop(optstr, "gid=", devpts_data, sizeof(devpts_data));
-		mount_data = devpts_data;
-	}
-
-	if (filesystemtype && !strcmp(filesystemtype, "tmpfs") && !fs_userns &&
-	    !mount_opts_has(optstr ?: "", "swap") && !mount_opts_has(optstr ?: "", "noswap")) {
-		if (optstr && *optstr)
-			snprintf(tmpfs_data, sizeof(tmpfs_data), "%s,noswap", optstr);
-		else
-			snprintf(tmpfs_data, sizeof(tmpfs_data), "noswap");
-		mount_data = tmpfs_data;
-	}
-
-	const char *hack_fstype = ((!filesystemtype || strcmp(filesystemtype, "cgroup"))?filesystemtype:"cgroup2");
-	if (mount(source?:(is_bind?new:NULL), new, hack_fstype?:"none", mountflags, mount_data)) {
-		int mount_errno = errno;
-
-		if ((mountflags & MS_REMOUNT) && mount_errno == EPERM) {
-			/* Not a heuristic: re-read the kernel-enforced flags from
-			 * mountinfo and only proceed once the security-relevant
-			 * ones (ro/nosuid/nodev/noexec) are confirmed in effect. */
-			unsigned long retry_flags = mountflags | mountinfo_current_flags(new);
-
-			if (retry_flags != mountflags &&
-			    !mount(source?:(is_bind?new:NULL), new, hack_fstype?:"none", retry_flags, mount_data))
-				goto mount_ok;
-
-			unsigned long lockable_flags = MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC;
-			unsigned long wanted = orig_mountflags & lockable_flags;
-			unsigned long got = mountinfo_current_flags(new) & lockable_flags;
-
-			if ((wanted & ~got) == 0) {
-				WARNING("remount(%s) to apply flags failed: %s (tolerated - "
-				"the flags actually in effect already satisfy the "
-				"request; expected under CLONE_NEWUSER for host-owned "
-				"bind sources)\n", new, strerror(mount_errno));
-				goto mount_ok;
-			}
-
-			if (error) {
-				errno = mount_errno;
-				ERROR("failed to enforce mount restrictions on %s %s: %m "
-				      "(missing flags: %s%s%s%s)\n", source, new,
-				      (wanted & ~got & MS_RDONLY) ? "ro " : "",
-				      (wanted & ~got & MS_NOSUID) ? "nosuid " : "",
-				      (wanted & ~got & MS_NODEV) ? "nodev " : "",
-				      (wanted & ~got & MS_NOEXEC) ? "noexec " : "");
-				ret = error;
-				goto free_source_out;
-			}
-
-			WARNING("remount(%s) to apply mount restrictions failed and could not "
-				"be verified in effect; continuing best-effort since "
-				"this mount was not marked as critical\n", new);
-			goto mount_ok;
-		}
-
-		errno = mount_errno;
-		if (error)
-			ERROR("failed to mount %s %s: %m\n", source, new);
-
-		ret = error;
-		goto free_source_out;
-	}
-
-mount_ok:
-	DEBUG("mount %s%s %s (%s)\n", (mountflags & MS_BIND)?"-B ":"", source, new,
-	      (mountflags & MS_RDONLY)?"ro":"rw");
-
-	if (propflags && mount("none", new, "none", propflags, NULL)) {
-		if (error)
-			ERROR("failed to mount --make-... %s \n", new);
-
-		ret = error;
-	}
-
-free_source_out:
-	if (inner)
-		free(source);
-
-	return ret;
 }
 
 static bool nullable_str_eq(const char *a, const char *b)
@@ -1162,6 +963,200 @@ static bool mount_opts_has(const char *opts, const char *needle)
 		p = end + 1;
 	}
 	return false;
+}
+
+static int do_mount(const char *root, const char *orig_source, const char *target, const char *filesystemtype,
+		    unsigned long orig_mountflags, unsigned long propflags, const char *optstr, int error, bool inner,
+		    int source_fd)
+{
+	struct stat s;
+	char new[PATH_MAX];
+	char tmpfs_data[512];
+	char devpts_data[512];
+	const char *mount_data;
+	char *source = (char *)orig_source;
+	int fd, err, ret = 0;
+	bool is_bind = (orig_mountflags & MS_BIND);
+	bool is_mask = (source == (void *)(-1));
+	bool use_fd = false;
+	unsigned long mountflags = orig_mountflags;
+
+	assert(!(inner && is_mask));
+	assert(!(inner && !orig_source));
+
+	if (source && is_bind && stat(source, &s)) {
+		if (source_fd >= 0 && !fstatat(source_fd, "", &s, AT_EMPTY_PATH)) {
+			use_fd = true;
+		} else {
+			if (error)
+				ERROR("stat(%s) failed: %m\n", source);
+			return error;
+		}
+	}
+
+	if (inner)
+		if (asprintf(&source, "%s%s", root, orig_source) < 0)
+			return ENOMEM;
+
+	snprintf(new, sizeof(new), "%s%s", root, target?target:source);
+
+	if (is_mask) {
+		if (stat(new, &s))
+			return 0; /* doesn't exists, nothing to mask */
+
+		if (S_ISDIR(s.st_mode)) {/* use empty 0-sized tmpfs for directories */
+			err = mount("none", new, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RELATIME, "size=0,mode=000");
+		} else {
+			/* mount-bind 0-sized file having mode 000 */
+			err = mount(UJAIL_NOAFILE, new, "bind", MS_BIND, NULL);
+			if (!err)
+				err = remount_readonly(new, MS_NOSUID | MS_NOEXEC | MS_NODEV);
+		}
+
+		if (err) {
+			if (error)
+				ERROR("failed to mask %s: %m\n", new);
+			else
+				WARNING("could not mask optional path %s: %m\n",
+					new);
+			return error;
+		}
+
+		DEBUG("masked path %s\n", new);
+		return 0;
+	}
+
+	if (!is_bind || (source && S_ISDIR(s.st_mode))) {
+		mkdir_p(new, 0755);
+	} else if (is_bind && source) {
+		const char *target_rel = target ? target : source;
+		struct open_how how = {
+			.flags = O_CREAT | O_WRONLY | O_TRUNC | O_EXCL | O_CLOEXEC,
+			.mode = 0644,
+			.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+		};
+
+		assert(target_rel);
+		mkdir_p(dirname(new), 0755);
+		snprintf(new, sizeof(new), "%s%s", root, target?target:source);
+		while (*target_rel == '/')
+			++target_rel;
+		fd = (jailroot_dirfd >= 0)
+		     ? sys_openat2(jailroot_dirfd, target_rel, &how, sizeof(how))
+		     : open(new, O_CREAT|O_WRONLY|O_TRUNC|O_EXCL|O_CLOEXEC, 0644);
+		if (fd >= 0)
+			close(fd);
+
+		if (error && fd < 0 && errno != EEXIST) {
+			ERROR("failed to create mount target %s: %m\n", new);
+
+			ret = errno;
+			goto free_source_out;
+		}
+	}
+
+	if (is_bind) {
+		if (use_fd) {
+			if (sys_move_mount(source_fd, "", AT_FDCWD, new, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
+				if (error)
+					ERROR("move_mount(%s -> %s): %m\n", source, new);
+				ret = error;
+				goto free_source_out;
+			}
+		} else if (mount(source?:new, new, filesystemtype?:"bind", MS_BIND | (mountflags & MS_REC), optstr)) {
+			if (error)
+				ERROR("failed to mount -B %s %s: %m\n", source, new);
+
+			ret = error;
+			goto free_source_out;
+		}
+		mountflags |= MS_REMOUNT;
+	}
+
+	mount_data = optstr;
+	if (filesystemtype && !strcmp(filesystemtype, "devpts") && fs_userns &&
+	    mount_opts_gid_unmapped(optstr)) {
+		mount_opts_drop(optstr, "gid=", devpts_data, sizeof(devpts_data));
+		mount_data = devpts_data;
+	}
+
+	if (filesystemtype && !strcmp(filesystemtype, "tmpfs") && !fs_userns &&
+	    !mount_opts_has(optstr ?: "", "swap") && !mount_opts_has(optstr ?: "", "noswap")) {
+		if (optstr && *optstr)
+			snprintf(tmpfs_data, sizeof(tmpfs_data), "%s,noswap", optstr);
+		else
+			snprintf(tmpfs_data, sizeof(tmpfs_data), "noswap");
+		mount_data = tmpfs_data;
+	}
+
+	const char *hack_fstype = ((!filesystemtype || strcmp(filesystemtype, "cgroup"))?filesystemtype:"cgroup2");
+	if (mount(source?:(is_bind?new:NULL), new, hack_fstype?:"none", mountflags, mount_data)) {
+		int mount_errno = errno;
+
+		if ((mountflags & MS_REMOUNT) && mount_errno == EPERM) {
+			/* Not a heuristic: re-read the kernel-enforced flags from
+			 * mountinfo and only proceed once the security-relevant
+			 * ones (ro/nosuid/nodev/noexec) are confirmed in effect. */
+			unsigned long retry_flags = mountflags | mountinfo_current_flags(new);
+
+			if (retry_flags != mountflags &&
+			    !mount(source?:(is_bind?new:NULL), new, hack_fstype?:"none", retry_flags, mount_data))
+				goto mount_ok;
+
+			unsigned long lockable_flags = MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC;
+			unsigned long wanted = orig_mountflags & lockable_flags;
+			unsigned long got = mountinfo_current_flags(new) & lockable_flags;
+
+			if ((wanted & ~got) == 0) {
+				WARNING("remount(%s) to apply flags failed: %s (tolerated - "
+				"the flags actually in effect already satisfy the "
+				"request; expected under CLONE_NEWUSER for host-owned "
+				"bind sources)\n", new, strerror(mount_errno));
+				goto mount_ok;
+			}
+
+			if (error) {
+				errno = mount_errno;
+				ERROR("failed to enforce mount restrictions on %s %s: %m "
+				      "(missing flags: %s%s%s%s)\n", source, new,
+				      (wanted & ~got & MS_RDONLY) ? "ro " : "",
+				      (wanted & ~got & MS_NOSUID) ? "nosuid " : "",
+				      (wanted & ~got & MS_NODEV) ? "nodev " : "",
+				      (wanted & ~got & MS_NOEXEC) ? "noexec " : "");
+				ret = error;
+				goto free_source_out;
+			}
+
+			WARNING("remount(%s) to apply mount restrictions failed and could not "
+				"be verified in effect; continuing best-effort since "
+				"this mount was not marked as critical\n", new);
+			goto mount_ok;
+		}
+
+		errno = mount_errno;
+		if (error)
+			ERROR("failed to mount %s %s: %m\n", source, new);
+
+		ret = error;
+		goto free_source_out;
+	}
+
+mount_ok:
+	DEBUG("mount %s%s %s (%s)\n", (mountflags & MS_BIND)?"-B ":"", source, new,
+	      (mountflags & MS_RDONLY)?"ro":"rw");
+
+	if (propflags && mount("none", new, "none", propflags, NULL)) {
+		if (error)
+			ERROR("failed to mount --make-... %s \n", new);
+
+		ret = error;
+	}
+
+free_source_out:
+	if (inner)
+		free(source);
+
+	return ret;
 }
 
 int parseOCImount(struct blob_attr *msg)
