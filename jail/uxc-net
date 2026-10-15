@@ -437,6 +437,44 @@ let zone_of = function(token) {
 	return token;
 };
 
+let port_range = function(s) {
+	let m = match(s ?? "", /^([0-9]+)(-([0-9]+))?$/);
+	let lo, hi;
+
+	if (!m)
+		return null;
+	lo = +m[1];
+	hi = (m[3] != null) ? +m[3] : lo;
+	if (lo < 1 || hi > 65535 || lo > hi)
+		return null;
+	return (lo == hi) ? sprintf("%d", lo) : sprintf("%d-%d", lo, hi);
+};
+
+let ingress_parse = function(entry) {
+	let m = match(entry, /^((vpn|container):[A-Za-z0-9_.]*[A-Za-z_.][A-Za-z0-9_.]*|[A-Za-z0-9_]+):([0-9-]+)(:([0-9-]+))?(\/(tcp|udp))?$/);
+	let zone, proto, ext, dst;
+
+	if (m) {
+		zone = m[1];
+		proto = m[7] ?? "tcp";
+		ext = port_range(m[3]);
+		dst = (m[5] != null) ? port_range(m[5]) : ext;
+	} else {
+		m = match(entry, /^((vpn|container):[A-Za-z0-9_.]+|[A-Za-z0-9_]+):(tcp|udp)\/([0-9-]+)$/);
+		if (!m)
+			return null;
+		zone = m[1];
+		proto = m[3];
+		ext = dst = port_range(m[4]);
+	}
+
+	if (!ext || !dst)
+		return null;
+	if (ext != dst && (index(ext, "-") >= 0 || index(dst, "-") >= 0))
+		return null;
+	return { zone, proto, ext, dst };
+};
+
 
 let ip2int = function(s) {
 	let p = split(s ?? "", ".");
@@ -847,7 +885,7 @@ let fw_specs = function(name, ann, net, proto6) {
 
 	sub = csv(ann["org.openwrt.network.ingress"]);
 	for (i = 0; i < length(sub); i++) {
-		m = match(sub[i], /^([A-Za-z0-9_:]+):(tcp|udp)\/([0-9]+(-[0-9]+)?)$/);
+		m = ingress_parse(sub[i]);
 		if (!m) {
 			warn(sprintf("uxc-net: ignoring bad ingress '%s'\n", sub[i]));
 			continue;
@@ -855,12 +893,12 @@ let fw_specs = function(name, ann, net, proto6) {
 		push(list, {
 			type: "redirect",
 			name: czone + "-in" + i,
-			src: zone_of(m[1]),
+			src: zone_of(m.zone),
 			dest: czone,
-			proto: m[2],
-			src_dport: m[3],
+			proto: m.proto,
+			src_dport: m.ext,
 			dest_ip: net.container,
-			dest_port: m[3],
+			dest_port: m.dst,
 			target: "DNAT",
 		});
 	}
