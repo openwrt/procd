@@ -2589,12 +2589,24 @@ static int parseOCIenvarray(struct blob_attr *msg, char ***envp)
 	return 0;
 }
 
+static int envp_find_key(char **arr, int n, const char *entry)
+{
+	size_t klen = strchr(entry, '=') - entry + 1;
+	int i;
+
+	for (i = 0; i < n; i++)
+		if (!strncmp(arr[i], entry, klen))
+			return i;
+
+	return -1;
+}
+
 static int append_envfile(char ***envp, const char *path)
 {
 	char line[4096];
 	char **arr = *envp;
-	char *nl;
-	int n = 0;
+	char *nl, *dup;
+	int i, n = 0;
 	FILE *f;
 
 	f = fopen(path, "r");
@@ -2611,6 +2623,20 @@ static int append_envfile(char ***envp, const char *path)
 
 		if (line[0] == '\0' || line[0] == '#' || !strchr(line, '='))
 			continue;
+
+		i = envp_find_key(arr, n, line);
+		if (i >= 0) {
+			dup = strdup(line);
+			if (!dup) {
+				*envp = arr;
+				fclose(f);
+				return ENOMEM;
+			}
+
+			free(arr[i]);
+			arr[i] = dup;
+			continue;
+		}
 
 		arr = realloc(arr, (n + 2) * sizeof(char *));
 		if (!arr) {
