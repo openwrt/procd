@@ -162,6 +162,7 @@ enum {
 	JAIL_ATTR_STOP_TIMEOUT,
 	JAIL_ATTR_STATEDIR,
 	JAIL_ATTR_DATADIR,
+	JAIL_ATTR_RESOURCES,
 	JAIL_ATTR_STARTED_BY,
 	__JAIL_ATTR_MAX,
 };
@@ -191,6 +192,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_STOP_TIMEOUT] = { "stop_timeout", BLOBMSG_TYPE_INT32 },
 	[JAIL_ATTR_STATEDIR] = { "statedir", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_DATADIR] = { "datadir", BLOBMSG_TYPE_STRING },
+	[JAIL_ATTR_RESOURCES] = { "resources", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_STARTED_BY] = { "started_by", BLOBMSG_TYPE_STRING },
 };
 
@@ -475,6 +477,11 @@ jail_run(struct service_instance *in, char **argv)
 	if (jail->datadir) {
 		argv[argc++] = "-K";
 		argv[argc++] = jail->datadir;
+	}
+
+	if (jail->resources) {
+		argv[argc++] = "-W";
+		argv[argc++] = jail->resources;
 	}
 
 	if (jail->started_by) {
@@ -1549,6 +1556,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->jail.datadir, in_new->jail.datadir))
 		return true;
 
+	if (string_changed(in->jail.resources, in_new->jail.resources))
+		return true;
+
 	if (in->jail.stop_timeout != in_new->jail.stop_timeout)
 		return true;
 
@@ -1750,6 +1760,11 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 
 	if (tb[JAIL_ATTR_DATADIR] && *blobmsg_get_string(tb[JAIL_ATTR_DATADIR])) {
 		jail->datadir = strdup(blobmsg_get_string(tb[JAIL_ATTR_DATADIR]));
+		jail->argc += 2;
+	}
+
+	if (tb[JAIL_ATTR_RESOURCES] && *blobmsg_get_string(tb[JAIL_ATTR_RESOURCES])) {
+		jail->resources = strdup(blobmsg_get_string(tb[JAIL_ATTR_RESOURCES]));
 		jail->argc += 2;
 	}
 
@@ -2184,6 +2199,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	instance_config_move_strdup(&in->jail.envfile, in_src->jail.envfile);
 	instance_config_move_strdup(&in->jail.statedir, in_src->jail.statedir);
 	instance_config_move_strdup(&in->jail.datadir, in_src->jail.datadir);
+	instance_config_move_strdup(&in->jail.resources, in_src->jail.resources);
 	instance_config_move_strdup(&in->jail.started_by, in_src->jail.started_by);
 
 	free(in->config);
@@ -2299,6 +2315,7 @@ instance_free(struct service_instance *in)
 	free(in->jail.envfile);
 	free(in->jail.statedir);
 	free(in->jail.datadir);
+	free(in->jail.resources);
 	free(in->jail.started_by);
 	free(in->seccomp);
 	free(in->seccomp_mode);
@@ -2501,6 +2518,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 
 			if (in->jail.datadir)
 				blobmsg_add_string(b, "datadir", in->jail.datadir);
+
+			if (in->jail.resources)
+				blobmsg_add_string(b, "resources", in->jail.resources);
 
 			if (in->jail.started_by)
 				blobmsg_add_string(b, "started_by", in->jail.started_by);
