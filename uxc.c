@@ -4602,9 +4602,12 @@ static int uxc_start(const char *name, bool console)
 				"reach running state\n", name);
 		return -ETIMEDOUT;
 	}
-	if (wait_state.result == UXC_WAIT_STOPPED && wait_state.reason[0])
-		fprintf(stderr, "uxc: %s stopped before running: %s\n", name,
-			uxc_wait_why(&wait_state));
+	if (wait_state.result == UXC_WAIT_STOPPED) {
+		fprintf(stderr, "uxc: start %s failed: %s\n", name,
+			uxc_wait_why(&wait_state) ?:
+				"the container exited before its entrypoint ran");
+		return -EIO;
+	}
 
 	return 0;
 }
