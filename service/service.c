@@ -242,6 +242,19 @@ static const struct blobmsg_policy service_del_attrs[__SERVICE_DEL_ATTR_MAX] = {
 };
 
 enum {
+	RESPAWN_RESET_ATTR_NAME,
+	RESPAWN_RESET_ATTR_INSTANCE,
+	RESPAWN_RESET_ATTR_COUNT,
+	__RESPAWN_RESET_ATTR_MAX,
+};
+
+static const struct blobmsg_policy respawn_reset_attrs[__RESPAWN_RESET_ATTR_MAX] = {
+	[RESPAWN_RESET_ATTR_NAME] = { "name", BLOBMSG_TYPE_STRING },
+	[RESPAWN_RESET_ATTR_INSTANCE] = { "instance", BLOBMSG_TYPE_STRING },
+	[RESPAWN_RESET_ATTR_COUNT] = { "count", BLOBMSG_TYPE_INT32 },
+};
+
+enum {
 	SERVICE_LIST_ATTR_NAME,
 	SERVICE_LIST_ATTR_VERBOSE,
 	__SERVICE_LIST_ATTR_MAX,
@@ -1246,12 +1259,48 @@ container_handle_respawn_cancel(struct ubus_context *ctx, struct ubus_object *ob
 	return ret;
 }
 
+static int
+container_handle_respawn_reset(struct ubus_context *ctx, struct ubus_object *obj,
+			       struct ubus_request_data *req, const char *method,
+			       struct blob_attr *msg)
+{
+	struct blob_attr *tb[__RESPAWN_RESET_ATTR_MAX], *cur;
+	int ret = UBUS_STATUS_NOT_FOUND;
+	struct service_instance *in;
+	struct service *s;
+	uint32_t count;
+
+	blobmsg_parse(respawn_reset_attrs, __RESPAWN_RESET_ATTR_MAX, tb, blobmsg_data(msg),
+		      blobmsg_data_len(msg));
+
+	cur = tb[RESPAWN_RESET_ATTR_NAME];
+	if (!cur)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	s = avl_find_element(&containers, blobmsg_data(cur), s, avl);
+	if (!s)
+		return UBUS_STATUS_NOT_FOUND;
+
+	count = tb[RESPAWN_RESET_ATTR_COUNT] ? blobmsg_get_u32(tb[RESPAWN_RESET_ATTR_COUNT]) : 0;
+	cur = tb[RESPAWN_RESET_ATTR_INSTANCE];
+	vlist_for_each_element(&s->instances, in, node) {
+		if (cur && strcmp(in->name, blobmsg_data(cur)))
+			continue;
+
+		in->respawn_count = count;
+		ret = UBUS_STATUS_OK;
+	}
+
+	return ret;
+}
+
 static struct ubus_method container_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
 	UBUS_METHOD("list", service_handle_list, service_list_attrs),
 	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
 	UBUS_METHOD("respawn_cancel", container_handle_respawn_cancel, service_del_attrs),
+	UBUS_METHOD("respawn_reset", container_handle_respawn_reset, respawn_reset_attrs),
 	UBUS_METHOD("state", service_handle_state, service_state_attrs),
 	UBUS_METHOD_NOARG("get_features", container_handle_features),
 	UBUS_METHOD("console_set", container_handle_console, container_console_policy),
