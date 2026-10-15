@@ -57,6 +57,9 @@
 #define UXC_VOL_CONFDIR "/tmp/run/uvol/.meta/uxc"
 #define UXC_VOL_SECRETDIR "/tmp/run/uvol/.meta/secrets"
 #define UXC_RUN_DIR "/tmp/run/uxc"
+#define UXC_VOL_PROVISIONDIR "/tmp/run/uvol/.meta/provision"
+#define PROVISION_STAGE_SUFFIX ".new"
+#define HOSTS_FILE_DEST "/etc/hosts"
 
 static bool verbose = false;
 static bool json_output = false;
@@ -97,6 +100,7 @@ enum {
 	OPT_MODULE_VERSION,
 	OPT_DATA_VOLUME,
 	OPT_ENV,
+	OPT_PROVISION,
 	OPT_RESPAWN,
 	OPT_STOP_TIMEOUT,
 	OPT_UNSET,
@@ -162,6 +166,7 @@ static const struct option set_opts[] = {
 	{"module-version",	required_argument,	0,	OPT_MODULE_VERSION	},
 	{"mounts",		required_argument,	0,	OPT_MOUNTS		},
 	{"pid-file",		required_argument,	0,	OPT_PID_FILE		},
+	{"provision",		required_argument,	0,	OPT_PROVISION		},
 	{"resources",		required_argument,	0,	OPT_RESOURCES		},
 	{"respawn",		required_argument,	0,	OPT_RESPAWN		},
 	{"stop-timeout",	required_argument,	0,	OPT_STOP_TIMEOUT	},
@@ -529,12 +534,13 @@ static void usage(void) {
 	printf("\t\t[--data-volume <vol>:<mnt>[:<size>]]... [--env <KEY>=<value>]...\n");
 	printf("\t\t[--respawn enable=0|1[,min=N,max=N,multiplier=N,"
 	       "max-retries=N,reset-period=N]]\n");
+	printf("\t\t[--provision <file>:<dst>[:secret]]...\n");
 	printf("\t\t[--stop-timeout <seconds>] [--resources <file>]\n");
 	printf("\t\t[--unset <key>]...\t\t\tedit the settings of <conf> in one rewrite\n");
 	printf("\t\t\t\t\t\t--unset keys: autostart pidfile temp-overlay-size\n");
 	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
 	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol> env env=<KEY> respawn\n");
-	printf("\t\t\t\t\t\tstop-timeout resources\n");
+	printf("\t\t\t\t\t\tprovision provision=<dst> stop-timeout resources\n");
 	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
@@ -847,17 +853,20 @@ static void *blob_container_open(struct blob_buf *out, const char *name, int typ
 
 enum {
 	STORE_STATE,
+	STORE_PROVISION,
 	STORE_SECRETS,
 	__STORE_MAX,
 };
 
 static const char *const store_vol[__STORE_MAX] = {
 	[STORE_STATE] = UXC_VOL_CONFDIR "/state",
+	[STORE_PROVISION] = UXC_VOL_PROVISIONDIR,
 	[STORE_SECRETS] = UXC_VOL_SECRETDIR,
 };
 
 static const char *const store_sub[__STORE_MAX] = {
 	[STORE_STATE] = "state",
+	[STORE_PROVISION] = "provision",
 	[STORE_SECRETS] = "secrets",
 };
 
@@ -2134,6 +2143,44 @@ static int statedir_prepare(const char *name, char *out, size_t len)
 	return 0;
 }
 
+static int provision_copy_path(const char *name, const char *dest, char *out, size_t len)
+{
+	static const char hex[] = "0123456789abcdef";
+	const unsigned char *p;
+	size_t n, base;
+	int ret;
+
+	ret = store_dir(name, STORE_PROVISION, out, len);
+	if (ret)
+		return ret;
+
+	n = strlen(out);
+	if (n + 1 >= len)
+		return -ENAMETOOLONG;
+
+	out[n++] = '/';
+	base = n;
+	for (p = (const unsigned char *)dest; *p; p++) {
+		if (n + 4 > len)
+			return -ENAMETOOLONG;
+
+		if (isalnum(*p) || *p == '.' || *p == '-') {
+			out[n++] = *p;
+			continue;
+		}
+
+		out[n++] = '_';
+		out[n++] = hex[*p >> 4];
+		out[n++] = hex[*p & 0xf];
+	}
+	out[n] = '\0';
+
+	if (n == base || n - base > NAME_MAX - strlen(PROVISION_STAGE_SUFFIX))
+		return -ENAMETOOLONG;
+
+	return 0;
+}
+
 static void materialise_initenv(const char *name, struct blob_attr *initenv)
 {
 	char dir[PATH_MAX], path[PATH_MAX], secret[64];
@@ -3222,6 +3269,161 @@ static void overlay_resolve(struct blob_attr **tb, struct settings *us, const ch
 	o->volume = name;
 }
 
+static bool provision_dest_valid(const char *dest)
+{
+	const char *p, *end;
+	size_t len;
+
+	if (dest[0] != '/' || !dest[1])
+		return false;
+
+	for (p = dest + 1; ; p = end + 1) {
+		end = strchrnul(p, '/');
+		len = end - p;
+		if (!len || (len == 1 && p[0] == '.') || (len == 2 && !strncmp(p, "..", 2)))
+			return false;
+
+		if (!*end)
+			return true;
+	}
+}
+
+static bool provision_shadowed(struct blob_attr **reg_tb, const char *dest)
+{
+	if (settings_array_find(reg_tb[CONF_PROVISION], "destination", dest))
+		return true;
+
+	return reg_tb[CONF_HOSTS_FILE] && !strcmp(dest, HOSTS_FILE_DEST);
+}
+
+static int provision_entry_check(const char *name, struct blob_attr **ptb,
+				 struct blob_attr **reg_tb)
+{
+	char path[PATH_MAX];
+	const char *dest;
+
+	if (!ptb[PROV_SOURCE] || !ptb[PROV_DESTINATION])
+		return -EINVAL;
+
+	dest = blobmsg_get_string(ptb[PROV_DESTINATION]);
+	if (!provision_dest_valid(dest))
+		return -EINVAL;
+
+	if (provision_shadowed(reg_tb, dest))
+		return -EEXIST;
+
+	if (provision_copy_path(name, dest, path, sizeof(path)) ||
+	    strcmp(path, blobmsg_get_string(ptb[PROV_SOURCE])))
+		return -EPERM;
+
+	return 0;
+}
+
+static int provision_validate(const struct settings_key *key, struct blob_attr *value,
+			      struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	struct blob_attr *ptb[__PROV_MAX];
+	struct blob_attr *cur;
+	int rem, ret;
+
+	blobmsg_for_each_attr(cur, value, rem) {
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_TABLE)
+			return -EINVAL;
+
+		blobmsg_parse(prov_policy, __PROV_MAX, ptb, blobmsg_data(cur), blobmsg_len(cur));
+		ret = provision_entry_check(name, ptb, reg_tb);
+		if (ret)
+			return ret;
+
+		if (settings_array_find(value, "destination",
+					blobmsg_get_string(ptb[PROV_DESTINATION])) != cur)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static void provision_copy_remove(const char *name, const char *dest)
+{
+	char path[PATH_MAX];
+
+	if (!provision_copy_path(name, dest, path, sizeof(path)))
+		unlink(path);
+}
+
+static int provision_commit(const struct settings_key *key, struct blob_attr *value,
+			    struct blob_attr **reg_tb, struct settings *us, const char *name)
+{
+	struct blob_attr *cur, *old;
+	const char *id;
+	int rem;
+
+	if (blobmsg_type(value) != BLOBMSG_TYPE_STRING)
+		return 0;
+
+	id = strchr(blobmsg_get_string(value), '=');
+	if (id) {
+		provision_copy_remove(name, id + 1);
+		return 0;
+	}
+
+	old = us ? us->tb[CONF_PROVISION] : NULL;
+	blobmsg_for_each_attr(cur, old, rem) {
+		id = settings_entry_id(cur, "destination");
+		if (id)
+			provision_copy_remove(name, id);
+	}
+
+	return 0;
+}
+
+static void provision_bind_add(struct blob_buf *req, struct blob_attr **ptb)
+{
+	char provbind[2 * PATH_MAX];
+	bool secret;
+
+	secret = ptb[PROV_SECRET] && blobmsg_get_bool(ptb[PROV_SECRET]);
+	snprintf(provbind, sizeof(provbind), "%s:%s",
+		 blobmsg_get_string(ptb[PROV_SOURCE]),
+		 blobmsg_get_string(ptb[PROV_DESTINATION]));
+	blobmsg_add_string(req, provbind, secret ? "3" : "4");
+}
+
+static int provision_binds_add(const char *name, struct blob_attr **reg_tb,
+			       struct blob_attr *set, struct blob_buf *req)
+{
+	struct blob_attr *ptb[__PROV_MAX];
+	struct blob_attr *cur;
+	int rem, ret;
+
+	blobmsg_for_each_attr(cur, reg_tb[CONF_PROVISION], rem) {
+		blobmsg_parse(prov_policy, __PROV_MAX, ptb, blobmsg_data(cur), blobmsg_len(cur));
+		if (ptb[PROV_SOURCE] && ptb[PROV_DESTINATION])
+			provision_bind_add(req, ptb);
+	}
+
+	blobmsg_for_each_attr(cur, set, rem) {
+		blobmsg_parse(prov_policy, __PROV_MAX, ptb, blobmsg_data(cur), blobmsg_len(cur));
+		ret = provision_entry_check(name, ptb, reg_tb);
+		if (ret == -EEXIST) {
+			fprintf(stderr,
+				"uxc: %s: provision of %s is shadowed by the registration\n",
+				name, blobmsg_get_string(ptb[PROV_DESTINATION]));
+			continue;
+		}
+
+		if (ret) {
+			fprintf(stderr, "uxc: %s: refusing a provision entry: %s\n", name,
+				strerror(-ret));
+			return ret;
+		}
+
+		provision_bind_add(req, ptb);
+	}
+
+	return 0;
+}
+
 static const struct settings_key settings_keys[] = {
 	{ .name = "autostart", .type = BLOBMSG_TYPE_BOOL },
 	{ .name = "pidfile", .type = BLOBMSG_TYPE_STRING, .validate = abspath_validate },
@@ -3235,6 +3437,9 @@ static const struct settings_key settings_keys[] = {
 	  .type = BLOBMSG_TYPE_ARRAY, .validate = data_volumes_validate,
 	  .unset = data_volumes_unset_check, .commit = data_volumes_commit },
 	{ .name = "env", .entry = "env", .type = BLOBMSG_TYPE_TABLE, .validate = env_validate },
+	{ .name = "provision", .entry = "provision", .entry_key = "destination",
+	  .type = BLOBMSG_TYPE_ARRAY, .validate = provision_validate,
+	  .commit = provision_commit },
 	{ .name = "respawn", .entry = "respawn", .type = BLOBMSG_TYPE_TABLE,
 	  .validate = respawn_validate, .check = respawn_check },
 	{ .name = "stop-timeout", .type = BLOBMSG_TYPE_INT32,
@@ -3765,14 +3970,12 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      const char *started_by)
 {
 	char *path = NULL, *jailname = NULL, *pidfile = NULL;
-	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct runtime_state *rsstate = NULL;
-	struct blob_attr *ptb[__PROV_MAX];
 	struct settings *usettings = NULL;
 	struct uxc_wait_state wait_state;
+	struct blob_attr *tb[__CONF_MAX];
 	static struct blob_buf vols;
 	struct overlay_spec overlay;
-	char provbind[2 * PATH_MAX];
 	static struct blob_buf req;
 	const char *imgvol = NULL;
 	char *seccomp_log = NULL;
@@ -3781,8 +3984,8 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	void *in, *ins, *j, *m;
 	char dir[PATH_MAX];
 	char reason[128];
-	int rem, ret = 0;
 	int notify_fd;
+	int ret = 0;
 	uint32_t id;
 	int err;
 
@@ -3878,22 +4081,17 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		return ret;
 	}
 	if (tb[CONF_HOSTS_FILE]) {
-		snprintf(hostsbind, sizeof(hostsbind), "%s:/etc/hosts",
+		snprintf(hostsbind, sizeof(hostsbind), "%s:" HOSTS_FILE_DEST,
 			 blobmsg_get_string(tb[CONF_HOSTS_FILE]));
 		blobmsg_add_string(&req, hostsbind, "4");
 	}
-	if (tb[CONF_PROVISION]) {
-		blobmsg_for_each_attr(cur, tb[CONF_PROVISION], rem) {
-			blobmsg_parse(prov_policy, __PROV_MAX, ptb,
-				      blobmsg_data(cur), blobmsg_len(cur));
-			if (!ptb[PROV_SOURCE] || !ptb[PROV_DESTINATION])
-				continue;
-			snprintf(provbind, sizeof(provbind), "%s:%s",
-				 blobmsg_get_string(ptb[PROV_SOURCE]),
-				 blobmsg_get_string(ptb[PROV_DESTINATION]));
-			blobmsg_add_string(&req, provbind,
-					   (ptb[PROV_SECRET] && blobmsg_get_bool(ptb[PROV_SECRET])) ? "3" : "4");
-		}
+	ret = provision_binds_add(name, tb,
+				  usettings ? usettings->tb[CONF_PROVISION] : NULL, &req);
+	if (ret) {
+		blobmsg_close_table(&req, m);
+		blob_buf_free(&req);
+		last_exit_write(name, started_by, "uxc.provision", -ret);
+		return ret;
 	}
 	blobmsg_close_table(&req, m);
 
@@ -4051,13 +4249,13 @@ static void container_info_volumes_add(struct blob_buf *b, const char *name,
 	blob_buf_free(&merged);
 }
 
-static void container_info_provision_add(struct blob_buf *b, struct blob_attr *prov)
+static void container_info_provision_entries(struct blob_buf *b, struct blob_attr *prov,
+					     struct blob_attr **reg_tb, const char *from)
 {
 	struct blob_attr *cur, *ptb[__PROV_MAX];
-	void *a, *t;
+	void *t;
 	int rem;
 
-	a = blobmsg_open_array(b, "provision");
 	blobmsg_for_each_attr(cur, prov, rem) {
 		blobmsg_parse(prov_policy, __PROV_MAX, ptb, blobmsg_data(cur), blobmsg_len(cur));
 		if (!ptb[PROV_SOURCE] || !ptb[PROV_DESTINATION])
@@ -4067,9 +4265,21 @@ static void container_info_provision_add(struct blob_buf *b, struct blob_attr *p
 		blobmsg_add_blob(b, ptb[PROV_SOURCE]);
 		blobmsg_add_blob(b, ptb[PROV_DESTINATION]);
 		blobmsg_add_u8(b, "secret", ptb[PROV_SECRET] && blobmsg_get_bool(ptb[PROV_SECRET]));
-		blobmsg_add_string(b, "from", "registration");
+		blobmsg_add_string(b, "from", from);
+		if (reg_tb && provision_shadowed(reg_tb, blobmsg_get_string(ptb[PROV_DESTINATION])))
+			blobmsg_add_u8(b, "shadowed", 1);
 		blobmsg_close_table(b, t);
 	}
+}
+
+static void container_info_provision_add(struct blob_buf *b, struct blob_attr **reg_tb,
+					 struct blob_attr *set)
+{
+	void *a;
+
+	a = blobmsg_open_array(b, "provision");
+	container_info_provision_entries(b, reg_tb[CONF_PROVISION], NULL, "registration");
+	container_info_provision_entries(b, set, reg_tb, "settings");
 	blobmsg_close_array(b, a);
 }
 
@@ -4286,7 +4496,7 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 
 	container_info_volumes_add(b, name, tb[CONF_DATA_VOLUMES],
 				   us ? us->tb[CONF_DATA_VOLUMES] : NULL);
-	container_info_provision_add(b, tb[CONF_PROVISION]);
+	container_info_provision_add(b, tb, us ? us->tb[CONF_PROVISION] : NULL);
 
 	if (tb[CONF_HOSTS_FILE])
 		blobmsg_add_blob(b, tb[CONF_HOSTS_FILE]);
@@ -4927,6 +5137,200 @@ static int env_arg_add(struct blob_buf *buf, char *arg)
 	return 0;
 }
 
+static int provision_file_check(struct blob_buf *files, const char *dest,
+				const char *file, bool secret)
+{
+	struct stat sb;
+	int fd, err;
+	void *t;
+
+	fd = open(file, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0 || fstat(fd, &sb)) {
+		err = errno;
+		fprintf(stderr, "uxc: cannot read %s: %s\n", file, strerror(err));
+		if (fd >= 0)
+			close(fd);
+		return -err;
+	}
+	close(fd);
+
+	if (!S_ISREG(sb.st_mode)) {
+		fprintf(stderr, "uxc: %s is not a regular file\n", file);
+		return S_ISDIR(sb.st_mode) ? -EISDIR : -EINVAL;
+	}
+
+	t = blobmsg_open_table(files, dest);
+	blobmsg_add_string(files, "file", file);
+	blobmsg_add_u32(files, "mode", secret ? 0600 : 0644);
+	blobmsg_close_table(files, t);
+
+	return 0;
+}
+
+static int provision_arg_add(struct blob_buf *buf, struct blob_buf *files,
+			     const char *name, char *arg)
+{
+	char path[PATH_MAX];
+	bool secret = false;
+	char *dest, *flag;
+	void *t;
+	int ret;
+
+	dest = strchr(arg, ':');
+	if (!dest || dest == arg || dest[1] != '/')
+		return -EINVAL;
+
+	*dest++ = '\0';
+	flag = strrchr(dest, ':');
+	if (flag) {
+		if (strcmp(flag, ":secret"))
+			return -EINVAL;
+
+		*flag = '\0';
+		secret = true;
+	}
+
+	ret = provision_copy_path(name, dest, path, sizeof(path));
+	if (ret)
+		return ret;
+
+	ret = provision_file_check(files, dest, arg, secret);
+	if (ret)
+		return ret;
+
+	t = blobmsg_open_table(buf, NULL);
+	blobmsg_add_string(buf, "source", path);
+	blobmsg_add_string(buf, "destination", dest);
+	if (secret)
+		blobmsg_add_u8(buf, "secret", 1);
+	blobmsg_close_table(buf, t);
+
+	return 0;
+}
+
+static int provision_file_copy(const char *src, const char *dst, mode_t mode)
+{
+	char buf[BUFSIZ];
+	int in, out, err;
+	ssize_t n;
+
+	in = open(src, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	if (in < 0)
+		return -errno;
+
+	out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, mode);
+	if (out < 0) {
+		err = errno;
+		close(in);
+		return -err;
+	}
+
+	err = fchmod(out, mode) ? errno : 0;
+	while (!err) {
+		n = read(in, buf, sizeof(buf));
+		if (n < 0 && errno == EINTR)
+			continue;
+
+		if (n <= 0) {
+			err = n ? errno : 0;
+			break;
+		}
+
+		err = fd_write_all(out, buf, n);
+	}
+
+	if (close(out) && !err)
+		err = errno;
+	close(in);
+
+	if (err)
+		unlink(dst);
+
+	return -err;
+}
+
+static int provision_stage_path(const char *name, const char *dest, char *out, size_t len)
+{
+	int ret;
+
+	ret = provision_copy_path(name, dest, out, len);
+	if (ret)
+		return ret;
+
+	if (strlen(out) + strlen(PROVISION_STAGE_SUFFIX) >= len)
+		return -ENAMETOOLONG;
+
+	strcat(out, PROVISION_STAGE_SUFFIX);
+
+	return 0;
+}
+
+static void provision_copies_finish(const char *name, struct blob_attr *files, bool keep,
+				    int *err)
+{
+	char staged[PATH_MAX], path[PATH_MAX];
+	struct blob_attr *cur;
+	int rem;
+
+	blobmsg_for_each_attr(cur, files, rem) {
+		if (provision_stage_path(name, blobmsg_name(cur), staged, sizeof(staged)) ||
+		    provision_copy_path(name, blobmsg_name(cur), path, sizeof(path)))
+			continue;
+
+		if (!keep) {
+			unlink(staged);
+			continue;
+		}
+
+		if (rename(staged, path) && !*err)
+			*err = -errno;
+	}
+}
+
+static int provision_copies_stage(const char *name, struct blob_attr *files)
+{
+	static const struct blobmsg_policy pol[2] = {
+		{ .name = "file", .type = BLOBMSG_TYPE_STRING },
+		{ .name = "mode", .type = BLOBMSG_TYPE_INT32 },
+	};
+	char root[PATH_MAX], dir[PATH_MAX], staged[PATH_MAX];
+	struct blob_attr *cur, *tb[2];
+	int rem, ret = 0;
+
+	blobmsg_for_each_attr(cur, files, rem) {
+		ret = store_root_find(name, STORE_PROVISION, root, sizeof(root));
+		if (!ret && mkdir(root, 0700) && errno != EEXIST)
+			ret = -errno;
+
+		if (!ret)
+			ret = store_dir(name, STORE_PROVISION, dir, sizeof(dir));
+		if (!ret && mkdir(dir, 0700) && errno != EEXIST)
+			ret = -errno;
+
+		blobmsg_parse(pol, 2, tb, blobmsg_data(cur), blobmsg_len(cur));
+		if (!ret && (!tb[0] || !tb[1]))
+			ret = -EINVAL;
+
+		if (!ret)
+			ret = provision_stage_path(name, blobmsg_name(cur), staged, sizeof(staged));
+
+		if (!ret)
+			ret = provision_file_copy(blobmsg_get_string(tb[0]), staged,
+						  blobmsg_get_u32(tb[1]));
+
+		if (ret)
+			break;
+	}
+
+	if (ret) {
+		fprintf(stderr, "uxc: cannot stage the provisioned files of %s: %s\n", name,
+			strerror(-ret));
+		provision_copies_finish(name, files, false, &ret);
+	}
+
+	return ret;
+}
+
 static int respawn_arg_add(struct blob_buf *buf, char *arg)
 {
 	char *key, *val, *end, *next;
@@ -5283,6 +5687,36 @@ static int tree_purge(const char *path)
 	return nftw(path, purge_cb, 16, FTW_DEPTH | FTW_PHYS) ? -EIO : 0;
 }
 
+static void provision_dir_purge(const char *name, const char *path)
+{
+	if (tree_purge(path))
+		fprintf(stderr, "uxc: could not remove the provisioned files of %s\n", name);
+}
+
+static void reconcile_provision(const char *base)
+{
+	char root[PATH_MAX], glob_pat[PATH_MAX];
+	const char *name;
+	glob_t gl;
+	size_t i;
+
+	if (store_root(base, STORE_PROVISION, root, sizeof(root)))
+		return;
+
+	snprintf(glob_pat, sizeof(glob_pat), "%s/*", root);
+	if (glob(glob_pat, GLOB_NOSORT, NULL, &gl))
+		return;
+
+	for (i = 0; i < gl.gl_pathc; i++) {
+		name = strrchr(gl.gl_pathv[i], '/');
+		name = name ? name + 1 : gl.gl_pathv[i];
+		if (!uxc_registered(name))
+			provision_dir_purge(name, gl.gl_pathv[i]);
+	}
+
+	globfree(&gl);
+}
+
 static int reconcile_purge(const char *base, const char *name, const char *statedir)
 {
 	char path[PATH_MAX];
@@ -5306,6 +5740,8 @@ static int reconcile_base(const char *base, int *purged)
 	const char *name;
 	int i, ret = 0;
 	glob_t gl;
+
+	reconcile_provision(base);
 
 	if (store_root(base, STORE_STATE, root, sizeof(root)))
 		return 0;
@@ -5354,6 +5790,7 @@ static int uxc_reconcile(void)
 
 static int uxc_delete(char *name, bool force, bool volumes)
 {
+	char provdir[PATH_MAX], rundir[PATH_MAX];
 	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
 	static struct blob_buf req, vols;
@@ -5361,7 +5798,6 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	struct overlay_spec overlay;
 	const char *sfname = NULL;
 	struct blob_attr *found;
-	char rundir[PATH_MAX];
 	const char *cfname;
 	struct stat sb;
 	uint32_t id;
@@ -5374,7 +5810,8 @@ static int uxc_delete(char *name, bool force, bool volumes)
 
 	cfname = blobmsg_name(found);
 
-	ret = rundir_path(name, NULL, rundir, sizeof(rundir));
+	ret = store_dir(name, STORE_PROVISION, provdir, sizeof(provdir)) ?:
+	      rundir_path(name, NULL, rundir, sizeof(rundir));
 	if (ret)
 		return ret;
 
@@ -5438,10 +5875,13 @@ static int uxc_delete(char *name, bool force, bool volumes)
 		goto errout;
 	}
 
-	if (unlink(cfname) == -1)
+	if (unlink(cfname) == -1) {
 		ret = -errno;
-	else if (tree_purge(rundir))
-		fprintf(stderr, "uxc: could not remove the run-time state of %s\n", name);
+	} else {
+		provision_dir_purge(name, provdir);
+		if (tree_purge(rundir))
+			fprintf(stderr, "uxc: could not remove the run-time state of %s\n", name);
+	}
 
 	if (!ret && volumes && overlay.volume) {
 		if (run_uvol("remove", overlay.volume))
@@ -5507,9 +5947,10 @@ static void patch_members_add(struct blob_buf *patch, const char *name,
 }
 
 static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
-			  struct blob_buf *unset, const char **name)
+			  struct blob_buf *unset, struct blob_buf *files,
+			  const char **name)
 {
-	static struct blob_buf vols, envs, respawn, resources;
+	static struct blob_buf vols, envs, provs, respawn, resources;
 	int c, ret = 0;
 
 	if (argc < 2 || argv[1][0] == '-')
@@ -5521,6 +5962,7 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 
 	blob_buf_init(&vols, 0);
 	blob_buf_init(&envs, 0);
+	blob_buf_init(&provs, 0);
 	blob_buf_init(&respawn, 0);
 	blob_buf_init(&resources, 0);
 	while (!ret && (c = getopt_long(argc, argv, "+", set_opts, NULL)) != -1) {
@@ -5552,6 +5994,9 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 		case OPT_ENV:
 			ret = env_arg_add(&envs, optarg);
 			break;
+		case OPT_PROVISION:
+			ret = provision_arg_add(&provs, files, *name, optarg);
+			break;
 		case OPT_RESPAWN:
 			ret = respawn_arg_add(&respawn, optarg);
 			break;
@@ -5577,12 +6022,14 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 	if (!ret) {
 		patch_members_add(patch, "data-volumes", vols.head, BLOBMSG_TYPE_ARRAY);
 		patch_members_add(patch, "env", envs.head, BLOBMSG_TYPE_TABLE);
+		patch_members_add(patch, "provision", provs.head, BLOBMSG_TYPE_ARRAY);
 		patch_members_add(patch, "respawn", respawn.head, BLOBMSG_TYPE_TABLE);
 		patch_members_add(patch, "resources", resources.head, BLOBMSG_TYPE_TABLE);
 	}
 
 	blob_buf_free(&vols);
 	blob_buf_free(&envs);
+	blob_buf_free(&provs);
 	blob_buf_free(&respawn);
 	blob_buf_free(&resources);
 
@@ -5591,7 +6038,7 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 
 int main(int argc, char **argv)
 {
-	static struct blob_buf set_patch, set_unset;
+	static struct blob_buf set_patch, set_unset, set_files;
 	int ret = -EINVAL;
 	const char *verb;
 	const char *log_path = NULL;
@@ -5834,14 +6281,25 @@ next_global:
 	} else if (!strcmp(verb, "set")) {
 		blob_buf_init(&set_patch, 0);
 		blob_buf_init(&set_unset, 0);
-		if (set_args_parse(verb_argc, verb_argv, &set_patch, &set_unset, &set_name)) {
+		blob_buf_init(&set_files, 0);
+		ret = set_args_parse(verb_argc, verb_argv, &set_patch, &set_unset,
+				     &set_files, &set_name);
+		if (ret) {
 			blob_buf_free(&set_patch);
 			blob_buf_free(&set_unset);
+			blob_buf_free(&set_files);
+			if (ret != -EINVAL)
+				goto runtime_out;
 			goto usage_out;
 		}
-		ret = settings_edit(set_name, set_patch.head, set_unset.head);
+		ret = provision_copies_stage(set_name, set_files.head);
+		if (!ret) {
+			ret = settings_edit(set_name, set_patch.head, set_unset.head);
+			provision_copies_finish(set_name, set_files.head, ret >= 0, &ret);
+		}
 		blob_buf_free(&set_patch);
 		blob_buf_free(&set_unset);
+		blob_buf_free(&set_files);
 		if (ret > 0)
 			ret = 0;
 	} else if (!strcmp(verb, "delete")) {

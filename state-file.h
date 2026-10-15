@@ -22,10 +22,25 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+static inline int fd_write_all(int fd, const char *buf, size_t len)
+{
+	ssize_t ret;
+
+	while (len) {
+		ret = write(fd, buf, len);
+		if (ret < 0)
+			return errno;
+
+		buf += ret;
+		len -= ret;
+	}
+
+	return 0;
+}
+
 static inline int file_write_atomic(const char *path, const char *buf, size_t len, mode_t mode)
 {
 	char tmp[PATH_MAX];
-	ssize_t ret;
 	int fd, err;
 
 	if (snprintf(tmp, sizeof(tmp), "%s.XXXXXX", path) >= (int)sizeof(tmp))
@@ -39,16 +54,8 @@ static inline int file_write_atomic(const char *path, const char *buf, size_t le
 	if (fchmod(fd, mode))
 		err = errno;
 
-	while (!err && len) {
-		ret = write(fd, buf, len);
-		if (ret < 0) {
-			err = errno;
-			break;
-		}
-
-		buf += ret;
-		len -= ret;
-	}
+	if (!err)
+		err = fd_write_all(fd, buf, len);
 
 	if (close(fd) && !err)
 		err = errno;
