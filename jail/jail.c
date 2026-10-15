@@ -246,6 +246,8 @@ static int num_volume_sources;
 
 #define EXEC_ACK_EXEC	'X'
 #define EXEC_ACK_HOOK	'H'
+#define CREATE_ACK_DONE	'C'
+#define CREATE_ACK_HOOK	'H'
 static int exec_ack[2] = { -1, -1 };
 static char exec_ack_buf[1 + sizeof(int)];
 static size_t exec_ack_len;
@@ -5920,14 +5922,14 @@ static void free_and_exit(int ret)
 	exit(ret);
 }
 
-static void hook_chain_check(const char *chain, int ack_fd)
+static void hook_chain_check(const char *chain, int ack_fd, char ack)
 {
 	if (!hook_chain_failed)
 		return;
 
 	ERROR("%s hook failed; aborting container\n", chain);
-	if (ack_fd >= 0)
-		xwrite_byte(ack_fd, EXEC_ACK_HOOK);
+	if (!jail_stop_requested)
+		xwrite_byte(ack_fd, ack);
 	free_and_exit(EXIT_FAILURE);
 }
 
@@ -6209,7 +6211,7 @@ static void post_start_hook(void)
 	int pw_uid, pw_gid, gr_gid;
 	int exec_errno;
 
-	hook_chain_check("startContainer", exec_ack[1]);
+	hook_chain_check("startContainer", exec_ack[1], EXEC_ACK_HOOK);
 
 	if (opts.scheduler.set && applyOCIprocessscheduler())
 		free_and_exit(EXIT_FAILURE);
@@ -6390,6 +6392,11 @@ static void post_jail_fs(void)
 		free_and_exit(EXIT_FAILURE);
 	}
 
+	if (xwrite_byte(pipes[2], CREATE_ACK_DONE) < 1) {
+		ERROR("can't write to parent\n");
+		free_and_exit(EXIT_FAILURE);
+	}
+
 	do {
 		if (jail_stop_requested)
 			free_and_exit(128 + SIGTERM);
@@ -6413,7 +6420,7 @@ static void enter_userns(void)
 {
 	int ret;
 
-	hook_chain_check("createContainer", -1);
+	hook_chain_check("createContainer", pipes[2], CREATE_ACK_HOOK);
 
 	if (!userns_deferred()) {
 		post_jail_fs();
@@ -7091,6 +7098,20 @@ static struct ubus_object container_object = {
 	.n_methods = ARRAY_SIZE(container_methods),
 };
 
+static bool jail_child_created(void)
+{
+	char buf[1] = { 0 };
+
+	xread_byte(pipes[3], buf);
+	if (buf[0] == CREATE_ACK_DONE)
+		return true;
+
+	if (buf[0] == CREATE_ACK_HOOK)
+		jail_reason_set("hooks.createContainer", ECANCELED);
+
+	return false;
+}
+
 static void post_create_runtime(void)
 {
 	if (hook_chain_failed) {
@@ -7117,7 +7138,8 @@ static void post_create_runtime(void)
 
 		if (xread_byte(userns_pipe[0], ubuf) < 1) {
 			ERROR("can't read from child\n");
-			free_and_exit(-1);
+			jail_child_created();
+			return;
 		}
 		close(userns_pipe[0]);
 
@@ -7197,6 +7219,18 @@ static void post_create_runtime(void)
 	} else {
 		close(userns_pipe[0]);
 		close(userns_pipe[3]);
+	}
+
+	if (!jail_child_created()) {
+		ERROR("the jail exited before it was created\n");
+		return;
+	}
+
+	if (jail_stop_requested) {
+		jail_pidfd_send_signal(SIGTERM);
+		close(pipes[3]);
+		pipes[3] = -1;
+		return;
 	}
 
 	jail_create_done = true;
@@ -7339,7 +7373,7 @@ static void post_main(struct uloop_timeout *t)
 	if (pipe(&pipes[0]) < 0)
 		free_and_exit(-1);
 
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, &pipes[2]) < 0)
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, &pipes[2]) < 0)
 		free_and_exit(-1);
 
 	if (pipe2(&userns_pipe[0], O_CLOEXEC) < 0 || pipe2(&userns_pipe[2], O_CLOEXEC) < 0)
