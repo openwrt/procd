@@ -104,7 +104,7 @@
 #define PR_MDWE_NO_INHERIT (1UL << 1)
 #endif
 
-#define OPT_ARGS	"a:A:b:cC:d:De:EfFg:G:h:iI:j:J:k:K:lm:M:n:NoO:pP:q:r:R:sS:uU:V:w:" \
+#define OPT_ARGS	"a:A:b:cC:d:De:EfFg:G:h:iI:j:J:k:K:lm:M:n:NoO:pP:q:r:R:sS:uU:V:w:W:" \
 		"x:X:t:T:yY:Z"
 
 #define JAIL_MAX_CREDENTIALS	16
@@ -215,6 +215,7 @@ static struct {
 	char *statedir;
 	char *datadir;
 	char *started_by;
+	char *resources;
 	struct {
 		bool set;
 		uint32_t policy;
@@ -276,6 +277,9 @@ static char **restart_argv;
 static const char *jail_reason;
 static char jail_reason_owned[64];
 static int jail_reason_errno;
+
+static char jail_resources_refused[64];
+static int jail_resources_errno;
 
 /*
  * The deepest field the runtime spec defines is four levels below the
@@ -1973,6 +1977,7 @@ static void usage(void)
 	fprintf(stderr, "  -a <fd>\tsend SIGCHLD through inherited pidfd <fd> once the container is gone\n");
 	fprintf(stderr, "  -A <num>\ttag the lifecycle events of this run with incarnation <num>\n");
 	fprintf(stderr, "  -g <origin>\ttag the lifecycle events with start origin <origin>\n");
+	fprintf(stderr, "  -W <file>\tlinux.resources override within the bundle's limits\n");
 	fprintf(stderr, "  -X <dir>\tstate directory for the last exit record\n");
 	fprintf(stderr, "  -K <dir>\tpersistent directory handed to uxc-net\n");
 	fprintf(stderr, "\nWarning: by default root inside the jail is the same\n\
@@ -5860,6 +5865,10 @@ static bool instance_event_build(const char *event)
 		blobmsg_add_u64(&notify_buf, "incarnation", opts.incarnation);
 	if (opts.started_by)
 		blobmsg_add_string(&notify_buf, "started_by", opts.started_by);
+	if (!strcmp(event, "instance.ready") && jail_resources_refused[0]) {
+		blobmsg_add_string(&notify_buf, "resources_refused", jail_resources_refused);
+		blobmsg_add_u32(&notify_buf, "resources_errno", jail_resources_errno);
+	}
 	if (!strcmp(event, "instance.stopped") ||
 	    !strcmp(event, "instance.create_failed")) {
 		if (jail_reason)
@@ -7776,6 +7785,53 @@ static void post_main(struct uloop_timeout *t)
 static struct uloop_timeout post_main_timeout = {
 	.cb = post_main,
 };
+
+static void jail_resources_refuse(const char *field, int err)
+{
+	WARNING("resources override refused: %s: %s\n", field, strerror(err));
+	snprintf(jail_resources_refused, sizeof(jail_resources_refused), "%s", field);
+	jail_resources_errno = err;
+}
+
+static void jail_resources_override(void)
+{
+	const struct blob_attr *prev_root = jail_oci_root_get();
+	const char *prev_reason = jail_reason;
+	int prev_errno = jail_reason_errno;
+	static struct blob_buf b;
+	const char *refused;
+	int rc;
+
+	if (!opts.resources || !cgroups_initialized())
+		return;
+
+	if (access(opts.resources, F_OK) && errno == ENOENT)
+		return;
+
+	blob_buf_init(&b, 0);
+	if (!blobmsg_add_json_from_file(&b, opts.resources)) {
+		jail_resources_refuse("linux.resources", EINVAL);
+		blob_buf_free(&b);
+		return;
+	}
+
+	cgroups_update_begin();
+	jail_oci_root_restore(b.head);
+	rc = parseOCIlinuxcgroups(b.head, false);
+	jail_oci_root_restore(prev_root);
+	jail_reason_restore(prev_reason, prev_errno);
+	if (rc) {
+		cgroups_update_rollback();
+		jail_resources_refuse("linux.resources", rc);
+	} else {
+		rc = cgroups_update_check(&refused);
+		if (rc)
+			jail_resources_refuse(refused, rc);
+	}
+
+	blob_buf_free(&b);
+}
+
 int main(int argc, char **argv)
 {
 	uid_t uid = getuid();
@@ -8001,6 +8057,9 @@ int main(int argc, char **argv)
 		case 'g':
 			opts.started_by = optarg;
 			break;
+		case 'W':
+			opts.resources = optarg;
+			break;
 		case 'X':
 			opts.statedir = optarg;
 			break;
@@ -8133,6 +8192,8 @@ int main(int argc, char **argv)
 
 		/* stdout and stderr belong to the container, not to us */
 		ulog_open(ULOG_SYSLOG, LOG_DAEMON, "jail");
+
+		jail_resources_override();
 	}
 
 	if (opts.setns.ns != -1 && (opts.namespace & CLONE_NEWNS)) {
