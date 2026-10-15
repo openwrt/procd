@@ -1194,10 +1194,14 @@ instance_start(struct service_instance *in)
 static void
 instance_stdio(struct ustream *s, int prio, struct service_instance *in)
 {
-	char *newline, *str, *arg0, ident[32];
+	char *newline, *str, ident[32];
+	const char *arg0;
 	int len;
 
-	arg0 = basename(blobmsg_data(blobmsg_data(in->command)));
+	if (in->command)
+		arg0 = basename(blobmsg_data(blobmsg_data(in->command)));
+	else
+		arg0 = in->name;
 	snprintf(ident, sizeof(ident), "%s[%d]", arg0, in->proc.pid);
 	ulog_open(ULOG_SYSLOG, in->syslog_facility, ident);
 
