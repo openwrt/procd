@@ -515,30 +515,35 @@ static void uxc_wait_disarm(void)
 	active_wait = NULL;
 }
 
-static void usage(void) {
+static void usage(void)
+{
 	printf("syntax: uxc [global options] <command> [parameters ...]\n");
 	printf("global options:\n");
 	printf("\t[--debug|-v] [--log <path>] [--log-format <text|json>]\n");
 	printf("\t[--root <dir>] [--rootless[=auto|true|false]]\n");
 	printf("\t[--systemd-cgroup] [--criu <path>]\n");
 	printf("commands:\n");
-	printf("\tlist [--json|--format json] [--quiet]\tlist all configured containers (runc-compatible)\n");
+	printf("\tlist [--json|--format json] [--quiet]\t"
+	       "list all configured containers (runc-compatible)\n");
 	printf("\tattach <conf>\t\t\t\tattach to container console\n");
 	printf("\tcreate <conf>\t\t\t\t(re-)create <conf>\n");
 	printf("\t\t[--bundle <path>]\t\t\tOCI bundle at <path>\n");
 	printf("\t\t[--pid-file <path>]\t\t\twrite container PID to <path>\n");
 	printf("\t\t[--console-socket <path>]\t\tAF_UNIX socket to receive the PTY master fd\n");
-	printf("\t\t[--no-pivot|--no-new-keyring|--preserve-fds <N>] runc-compat, currently ignored\n");
+	printf("\t\t[--no-pivot|--no-new-keyring|--preserve-fds <N>] "
+	       "runc-compat, currently ignored\n");
 	printf("\t\t[--autostart]\t\t\t\tstart on boot\n");
 	printf("\t\t[--temp-overlay-size <size>]\t\tuse tmpfs overlay with {size}\n");
 	printf("\t\t[--write-overlay-path <path>]\t\tuse overlay on {path}\n");
 	printf("\t\t[--mounts <v1>,<v2>,...,<vN>]\t\trequire filesystems to be available\n");
 	printf("\tstart [--console] <conf>\t\tstart container <conf>\n");
 	printf("\ttrace <conf>\t\t\t\trun <conf> logging every syscall (seccomp trace)\n");
-	printf("\taudit <conf>\t\t\t\trun <conf> enforcing its seccomp filter and logging denials\n");
+	printf("\taudit <conf>\t\t\t\t"
+	       "run <conf> enforcing its seccomp filter and logging denials\n");
 	printf("\tcomplain <conf>\t\t\t\trun <conf> permitting but logging seccomp denials\n");
 	printf("\tstate <conf>\t\t\t\tget state of container <conf>\n");
-	printf("\tkill [--signal <sig>] [--all] <conf> [<sig>]\tsignal <conf> (no signal: graceful stop); --all+KILL: whole cgroup\n");
+	printf("\tkill [--signal <sig>] [--all] <conf> [<sig>]\t"
+	       "signal <conf> (no signal: graceful stop); --all+KILL: whole cgroup\n");
 	printf("\trestart <conf>\t\t\t\tstop <conf> if running, then re-create and start it\n");
 	printf("\trespawn-reset <conf> [<count>]\t\tset the respawn retry count of <conf>\n");
 	printf("\tenable <conf>\t\t\t\tstart container <conf> on boot\n");
@@ -556,15 +561,18 @@ static void usage(void) {
 	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
 	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol> env env=<KEY> respawn\n");
 	printf("\t\t\t\t\t\tprovision provision=<dst> stop-timeout resources\n");
-	printf("\tdelete <conf> [--force] [--volumes]\tdelete <conf>; --volumes also reaps its rw state and per-container volumes\n");
-	printf("\treconcile\t\t\t\treap orphaned state of containers whose package was removed (data volumes kept)\n");
+	printf("\tdelete <conf> [--force] [--volumes]\t"
+	       "delete <conf>; --volumes also reaps its rw state and per-container volumes\n");
+	printf("\treconcile\t\t\t\t"
+	       "reap orphaned state of containers whose package was removed (data volumes kept)\n");
 	printf("\tdisable-all\t\t\t\tstop every container and refuse creates until enable-all\n");
 	printf("\tenable-all\t\t\t\tallow creates again and start the autostart containers\n");
 	printf("\tpause <conf>\t\t\t\tfreeze every process in container <conf>'s cgroup\n");
 	printf("\tresume <conf>\t\t\t\tthaw a previously paused container <conf>\n");
 	printf("\texec <conf> [--process <file>] [-d] [-p <pid-file>] [-- cmd args]\n");
 	printf("\t\t\t\t\t\trun a command inside running container <conf>\n");
-	printf("\tupdate <conf> --resources <file>\tapply linux.resources from <file> to running container <conf>\n");
+	printf("\tupdate <conf> --resources <file>\t"
+	       "apply linux.resources from <file> to running container <conf>\n");
 }
 
 enum {
@@ -652,12 +660,12 @@ static const struct blobmsg_policy prov_policy[__PROV_MAX] = {
 static int conf_load(bool load_settings)
 {
 	int gl_flags = GLOB_NOESCAPE | GLOB_MARK;
-	int j, res;
-	glob_t gl;
+	struct blob_buf *target;
+	struct stat sb;
 	char *globstr;
 	void *c, *o;
-	struct stat sb;
-	struct blob_buf *target;
+	int j, res;
+	glob_t gl;
 
 	if (asprintf(&globstr, "%s/%s*.json", confdir, load_settings?"settings/":"") == -1)
 		return -ENOMEM;
@@ -670,7 +678,8 @@ static int conf_load(bool load_settings)
 
 	if (!stat(UXC_VOL_CONFDIR, &sb)) {
 		if (sb.st_mode & S_IFDIR) {
-			if (asprintf(&globstr, "%s/%s*.json",  UXC_VOL_CONFDIR, load_settings?"settings/":"") == -1)
+			if (asprintf(&globstr, "%s/%s*.json", UXC_VOL_CONFDIR,
+				     load_settings ? "settings/" : "") == -1)
 				return -ENOMEM;
 
 			res = glob(globstr, gl_flags, NULL, &gl);
@@ -748,7 +757,8 @@ static int settings_add(void)
 
 		err = avl_insert(&settings, &s->avl);
 		if (err) {
-			fprintf(stderr, "error adding settings for %s\n", blobmsg_get_string(tb[CONF_NAME]));
+			fprintf(stderr, "error adding settings for %s\n",
+				blobmsg_get_string(tb[CONF_NAME]));
 			free(s);
 		}
 	}
@@ -1098,8 +1108,8 @@ static void ocistate_cb(struct ubus_request *req, int type, struct blob_attr *ms
 
 static void get_ocistate(struct blob_attr **ocistate, const char *name)
 {
-	char *objname;
 	unsigned int id;
+	char *objname;
 	int ret;
 	*ocistate = NULL;
 
@@ -1117,12 +1127,12 @@ static void get_ocistate(struct blob_attr **ocistate, const char *name)
 static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 {
 	struct blob_attr *cur, *curi, *tl[__LIST_MAX], *ti[__INSTANCE_MAX], *tj[__JAIL_MAX];
-	int rem, remi;
 	const char *container_name, *instance_name, *jail_name;
-	bool running;
+	struct runtime_state *rs;
 	uint64_t incarnation;
 	int pid, exitcode;
-	struct runtime_state *rs;
+	int rem, remi;
+	bool running;
 
 	blobmsg_for_each_attr(cur, msg, rem) {
 		container_name = blobmsg_name(cur);
@@ -1132,12 +1142,15 @@ static void list_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 
 		blobmsg_for_each_attr(curi, tl[LIST_INSTANCES], remi) {
 			instance_name = blobmsg_name(curi);
-			blobmsg_parse(instance_policy, __INSTANCE_MAX, ti, blobmsg_data(curi), blobmsg_len(curi));
+			blobmsg_parse(instance_policy, __INSTANCE_MAX, ti,
+				      blobmsg_data(curi), blobmsg_len(curi));
 
 			if (!ti[INSTANCE_JAIL])
 				continue;
 
-			blobmsg_parse(jail_policy, __JAIL_MAX, tj, blobmsg_data(ti[INSTANCE_JAIL]), blobmsg_len(ti[INSTANCE_JAIL]));
+			blobmsg_parse(jail_policy, __JAIL_MAX, tj,
+				      blobmsg_data(ti[INSTANCE_JAIL]),
+				      blobmsg_len(ti[INSTANCE_JAIL]));
 			if (!tj[JAIL_NAME])
 				continue;
 
@@ -1323,8 +1336,8 @@ struct uvol_reply {
 
 static void uvol_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 {
-	struct blob_attr *tb[__UVOL_MAX];
 	struct uvol_reply *reply = req->priv;
+	struct blob_attr *tb[__UVOL_MAX];
 
 	if (!msg)
 		return;
@@ -1380,9 +1393,9 @@ static bool uvol_ubus_available(void)
 
 static int uvol_timeout(void)
 {
+	int secs = UVOL_EXEC_TIMEOUT_DEFAULT;
 	static struct blob_buf req;
 	static int timeout_ms;
-	int secs = UVOL_EXEC_TIMEOUT_DEFAULT;
 	uint32_t id;
 
 	if (timeout_ms)
@@ -1570,8 +1583,8 @@ static const char *uvol_volume_name(const char *path)
 
 static int run_uvol_argv(char *const argv[])
 {
-	pid_t pid;
 	int status;
+	pid_t pid;
 
 	pid = fork();
 	if (pid == 0) {
@@ -1581,7 +1594,8 @@ static int run_uvol_argv(char *const argv[])
 		return -errno;
 	}
 
-	while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
 
 	if (!WIFEXITED(status))
 		return -EIO;
@@ -1604,16 +1618,17 @@ static int run_uvol(const char *action, const char *vol)
 
 static int run_uvol_create(const char *vol, long long size, const char *mode)
 {
-	char sizebytes[32];
 	char *argv[] = { "/usr/sbin/uvol", "create", (char *)vol,
-			 sizebytes, (char *)mode, NULL };
+			 NULL, (char *)mode, NULL };
 	static struct blob_buf req;
 	struct uvol_reply reply;
+	char sizebytes[32];
 
 	if (uvol_name_check(vol))
 		return -EINVAL;
 
 	snprintf(sizebytes, sizeof(sizebytes), "%lld", size);
+	argv[3] = sizebytes;
 
 	if (!uvol_ubus_available())
 		return run_uvol_argv(argv);
@@ -1631,15 +1646,16 @@ static int run_uvol_create(const char *vol, long long size, const char *mode)
 
 static int run_uvol_resize(const char *vol, long long size)
 {
-	char sizebytes[32];
-	char *argv[] = { "/usr/sbin/uvol", "resize", (char *)vol, sizebytes, NULL };
+	char *argv[] = { "/usr/sbin/uvol", "resize", (char *)vol, NULL, NULL };
 	static struct blob_buf req;
 	struct uvol_reply reply;
+	char sizebytes[32];
 
 	if (uvol_name_check(vol))
 		return -EINVAL;
 
 	snprintf(sizebytes, sizeof(sizebytes), "%lld", size);
+	argv[3] = sizebytes;
 
 	if (!uvol_ubus_available())
 		return run_uvol_argv(argv);
@@ -1695,8 +1711,8 @@ static bool uvol_backend_pending(void)
 
 static long long parse_size_bytes(const char *s)
 {
-	char *end;
 	long long v;
+	char *end;
 
 	if (!s)
 		return -1;
@@ -1870,8 +1886,8 @@ static inline int setup_tios(int fd, struct termios *oldtios)
 
 static void client_cb(struct ustream *s, int bytes)
 {
-	char *buf;
 	int len, rv;
+	char *buf;
 
 	do {
 		buf = ustream_get_read_buf(s, &len);
@@ -1890,8 +1906,8 @@ static void client_cb(struct ustream *s, int bytes)
 
 static void local_cb(struct ustream *s, int bytes)
 {
-	char *buf;
 	int len, rv;
+	char *buf;
 
 	do {
 		buf = ustream_get_read_buf(s, &len);
@@ -1913,12 +1929,12 @@ static void local_cb(struct ustream *s, int bytes)
 
 static int uxc_attach(const char *container_name)
 {
-	struct ubus_context *ctx;
-	uint32_t id;
-	static struct blob_buf req;
 	int client_fd = -1, server_fd = -1, tty_fd = -1;
+	static struct blob_buf req;
 	struct termios oldtermios;
+	struct ubus_context *ctx;
 	bool tty_raw = false;
+	uint32_t id;
 	int rc;
 
 	ctx = ubus_connect(NULL);
@@ -2068,10 +2084,10 @@ static int shared_secret(const char *root, const char *scope, const char *seed,
 {
 	char dir[PATH_MAX], path[PATH_MAX], lockpath[PATH_MAX];
 	const char *p;
-	int lockfd;
-	FILE *f;
-	size_t n;
 	int ret = -1;
+	int lockfd;
+	size_t n;
+	FILE *f;
 
 	if (!scope || !*scope || *scope == '/' || strstr(scope, ".."))
 		return -1;
@@ -2548,7 +2564,8 @@ static int uxc_invoker_pidfd(void)
 	ppid = getppid();
 	fd = syscall(SYS_pidfd_open, ppid, 0);
 	if (fd < 0) {
-		fprintf(stderr, "uxc: warning: cannot watch the invoker, it will not be notified: %s\n",
+		fprintf(stderr,
+			"uxc: warning: cannot watch the invoker, it will not be notified: %s\n",
 			strerror(errno));
 		return -1;
 	}
@@ -4137,6 +4154,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	int notify_fd;
 	int ret = 0;
 	uint32_t id;
+	char *tmp;
 
 	ret = containers_disabled_refuse(name);
 	if (ret)
@@ -4274,7 +4292,6 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	blobmsg_close_table(&req, ins);
 
 	if (verbose) {
-		char *tmp;
 		tmp = blobmsg_format_json_indent(req.head, true, 1);
 		if (!tmp)
 			return -ENOMEM;
@@ -4329,7 +4346,9 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		return -EIO;
 	}
 	if (wait_state.result == UXC_WAIT_UNSET) {
-		fprintf(stderr, "uxc: create %s failed: the container did not reach created state\n", name);
+		fprintf(stderr,
+			"uxc: create %s failed: the container did not reach created state\n",
+			name);
 		uxc_instance_drop(name);
 		return -ETIMEDOUT;
 	}
@@ -4815,9 +4834,9 @@ static void netinfo_str(struct blob_attr *netinfo, char *out, size_t outlen)
 	struct blob_attr *tn[__NET_MAX], *ti[__NET_IF_MAX];
 	struct blob_attr *curif, *curaddr;
 	const char *ifname;
-	size_t len = 0;
 	int remif, remaddr;
 	int ifcount = 0;
+	size_t len = 0;
 
 	snprintf(out, outlen, "-");
 	if (!netinfo)
@@ -4859,20 +4878,156 @@ static void netinfo_str(struct blob_attr *netinfo, char *out, size_t outlen)
 	}
 }
 
+struct list_widths {
+	size_t created;
+	size_t status;
+	size_t bundle;
+	size_t owner;
+	size_t pid;
+	size_t id;
+};
+
+struct list_row {
+	char created_buf[sizeof("YYYY-MM-DDThh:mm:ssZ")];
+	struct blob_attr *ts[__STATE_MAX];
+	struct runtime_state *rs;
+	const char *created;
+	const char *status;
+	const char *bundle;
+	const char *rootfs;
+	const char *name;
+	char pid_str[12];
+	int pid;
+};
+
+static void list_row_get(struct list_row *row, struct blob_attr **tb)
+{
+	struct blob_attr **ts = row->ts;
+	const char *ocistatus = NULL;
+
+	memset(row, 0, sizeof(*row));
+	row->name = blobmsg_get_string(tb[CONF_NAME]);
+	row->bundle = blobmsg_get_string(tb[CONF_PATH]);
+	row->created = "-";
+	row->rs = avl_find_element(&runtime, row->name, row->rs, avl);
+
+	if (row->rs && row->rs->ocistate) {
+		blobmsg_parse(state_policy, __STATE_MAX, ts,
+			      blobmsg_data(row->rs->ocistate),
+			      blobmsg_len(row->rs->ocistate));
+		if (ts[STATE_STATUS])
+			ocistatus = blobmsg_get_string(ts[STATE_STATUS]);
+		if (ts[STATE_PID])
+			row->pid = blobmsg_get_u32(ts[STATE_PID]);
+		if (ts[STATE_BUNDLE])
+			row->bundle = blobmsg_get_string(ts[STATE_BUNDLE]);
+		if (ts[STATE_CREATED] &&
+		    calendar_format(blobmsg_cast_u64(ts[STATE_CREATED]),
+				    row->created_buf, sizeof(row->created_buf)))
+			row->created = row->created_buf;
+		if (ts[STATE_ROOTFS])
+			row->rootfs = blobmsg_get_string(ts[STATE_ROOTFS]);
+	}
+
+	if (ocistatus)
+		row->status = ocistatus;
+	else if (row->rs)
+		row->status = row->rs->running ? "creating" : "stopped";
+	else
+		row->status = "uninitialized";
+
+	if (row->pid > 0)
+		snprintf(row->pid_str, sizeof(row->pid_str), "%d", row->pid);
+	else
+		snprintf(row->pid_str, sizeof(row->pid_str), "%s", "-");
+}
+
+static size_t width_max(size_t width, const char *s)
+{
+	size_t len = strlen(s);
+
+	return (len > width) ? len : width;
+}
+
+static void list_widths_update(struct list_widths *w, const struct list_row *row)
+{
+	w->id = width_max(w->id, row->name);
+	w->pid = width_max(w->pid, row->pid_str);
+	w->status = width_max(w->status, row->status);
+	w->bundle = width_max(w->bundle, row->bundle);
+	w->created = width_max(w->created, row->created);
+}
+
+static void list_header_print(const struct list_widths *w)
+{
+	printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n",
+	       (int)w->id, "ID", (int)w->pid, "PID",
+	       (int)w->status, "STATUS", (int)w->bundle, "BUNDLE",
+	       (int)w->created, "CREATED", (int)w->owner, "OWNER",
+	       "NET");
+}
+
+static void list_row_print(const struct list_widths *w, const struct list_row *row)
+{
+	char netstr[512];
+
+	netinfo_str(row->ts[STATE_NETWORK], netstr, sizeof(netstr));
+	printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n",
+	       (int)w->id, row->name, (int)w->pid, row->pid_str,
+	       (int)w->status, row->status, (int)w->bundle, row->bundle,
+	       (int)w->created, row->created, (int)w->owner, "root",
+	       netstr);
+}
+
+static void list_row_json_add(struct blob_buf *buf, const struct list_row *row,
+			      struct blob_attr *reg, struct blob_attr **tb)
+{
+	struct settings *usettings = NULL;
+	void *obj, *ann;
+
+	obj = blobmsg_open_table(buf, "");
+	blobmsg_add_string(buf, "ociVersion", OCI_VERSION_STRING);
+	blobmsg_add_string(buf, "id", row->name);
+	if (row->pid > 0)
+		blobmsg_add_u32(buf, "pid", row->pid);
+	blobmsg_add_string(buf, "status", row->status);
+	blobmsg_add_string(buf, "bundle", row->bundle);
+	if (row->ts[STATE_ANNOTATIONS]) {
+		blobmsg_add_blob(buf, row->ts[STATE_ANNOTATIONS]);
+	} else {
+		ann = blobmsg_open_table(buf, "annotations");
+		blobmsg_close_table(buf, ann);
+	}
+	if (row->ts[STATE_NETWORK])
+		blobmsg_add_blob(buf, row->ts[STATE_NETWORK]);
+	if (row->rootfs)
+		blobmsg_add_string(buf, "rootfs", row->rootfs);
+
+	if (strcmp(row->created, "-"))
+		blobmsg_add_string(buf, "created", row->created);
+
+	blobmsg_add_string(buf, "owner", "root");
+	usettings = avl_find_element(&settings, row->name, usettings, avl);
+	container_info_add(buf, reg, tb, usettings, row->rs);
+	blobmsg_close_table(buf, obj);
+}
+
 static int uxc_list(void)
 {
-	size_t id_w = 2, pid_w = 3, status_w = 6, bundle_w = 6, created_w = 7, owner_w = 5;
-	struct blob_attr *cur, *tb[__CONF_MAX], *ts[__STATE_MAX], *netinfo;
-	char *name, *bundle, *ocistatus, *status, *created, *rootfs, *tmp;
-	char createdbuf[sizeof("YYYY-MM-DDThh:mm:ssZ")];
-	struct runtime_state *rsstate = NULL;
-	struct settings *usettings = NULL;
+	struct list_widths w = {
+		.id = sizeof("ID") - 1,
+		.pid = sizeof("PID") - 1,
+		.status = sizeof("STATUS") - 1,
+		.bundle = sizeof("BUNDLE") - 1,
+		.created = sizeof("CREATED") - 1,
+		.owner = sizeof("OWNER") - 1,
+	};
+	struct blob_attr *cur, *tb[__CONF_MAX];
 	static struct blob_buf buf;
-	void *arr, *obj, *ann;
-	int container_pid;
-	char netstr[512];
-	char pidstr[12];
+	struct list_row row;
 	int rem, pass;
+	void *arr;
+	char *tmp;
 
 	if (quiet_output) {
 		blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
@@ -4893,11 +5048,7 @@ static int uxc_list(void)
 
 	for (pass = json_output ? 1 : 0; pass < 2; pass++) {
 		if (pass == 1 && !json_output)
-			printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n",
-			       (int)id_w, "ID", (int)pid_w, "PID",
-			       (int)status_w, "STATUS", (int)bundle_w, "BUNDLE",
-			       (int)created_w, "CREATED", (int)owner_w, "OWNER",
-			       "NET");
+			list_header_print(&w);
 
 		blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
 			blobmsg_parse(conf_policy, __CONF_MAX, tb,
@@ -4905,82 +5056,13 @@ static int uxc_list(void)
 			if (!tb[CONF_NAME] || !tb[CONF_PATH])
 				continue;
 
-			name = blobmsg_get_string(tb[CONF_NAME]);
-			bundle = blobmsg_get_string(tb[CONF_PATH]);
-
-			ocistatus = NULL;
-			container_pid = 0;
-			created = "-";
-			rootfs = NULL;
-			netinfo = NULL;
-			rsstate = avl_find_element(&runtime, name, rsstate, avl);
-			if (rsstate && rsstate->ocistate) {
-				blobmsg_parse(state_policy, __STATE_MAX, ts,
-					      blobmsg_data(rsstate->ocistate),
-					      blobmsg_len(rsstate->ocistate));
-				if (ts[STATE_STATUS])
-					ocistatus = blobmsg_get_string(ts[STATE_STATUS]);
-				if (ts[STATE_PID])
-					container_pid = blobmsg_get_u32(ts[STATE_PID]);
-				if (ts[STATE_BUNDLE])
-					bundle = blobmsg_get_string(ts[STATE_BUNDLE]);
-				if (ts[STATE_CREATED] &&
-				    calendar_format(blobmsg_cast_u64(ts[STATE_CREATED]),
-						    createdbuf, sizeof(createdbuf)))
-					created = createdbuf;
-				rootfs = ts[STATE_ROOTFS] ? blobmsg_get_string(ts[STATE_ROOTFS]) : NULL;
-				netinfo = ts[STATE_NETWORK];
-			}
-			status = ocistatus?:(rsstate && rsstate->running)?"creating":(rsstate?"stopped":"uninitialized");
-
-			if (container_pid > 0)
-				snprintf(pidstr, sizeof(pidstr), "%d", container_pid);
+			list_row_get(&row, tb);
+			if (pass == 0)
+				list_widths_update(&w, &row);
+			else if (json_output)
+				list_row_json_add(&buf, &row, cur, tb);
 			else
-				snprintf(pidstr, sizeof(pidstr), "%s", "-");
-
-			if (pass == 0) {
-				if (strlen(name) > id_w) id_w = strlen(name);
-				if (strlen(pidstr) > pid_w) pid_w = strlen(pidstr);
-				if (strlen(status) > status_w) status_w = strlen(status);
-				if (strlen(bundle) > bundle_w) bundle_w = strlen(bundle);
-				if (strlen(created) > created_w) created_w = strlen(created);
-				continue;
-			}
-
-			if (json_output) {
-				obj = blobmsg_open_table(&buf, "");
-				blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
-				blobmsg_add_string(&buf, "id", name);
-				if (container_pid > 0)
-					blobmsg_add_u32(&buf, "pid", container_pid);
-				blobmsg_add_string(&buf, "status", status);
-				blobmsg_add_string(&buf, "bundle", bundle);
-				if (rsstate && rsstate->ocistate && ts[STATE_ANNOTATIONS]) {
-					blobmsg_add_blob(&buf, ts[STATE_ANNOTATIONS]);
-				} else {
-					ann = blobmsg_open_table(&buf, "annotations");
-					blobmsg_close_table(&buf, ann);
-				}
-				if (rsstate && rsstate->ocistate && ts[STATE_NETWORK])
-					blobmsg_add_blob(&buf, ts[STATE_NETWORK]);
-				if (rootfs)
-					blobmsg_add_string(&buf, "rootfs", rootfs);
-
-				if (strcmp(created, "-"))
-					blobmsg_add_string(&buf, "created", created);
-
-				blobmsg_add_string(&buf, "owner", "root");
-				usettings = avl_find_element(&settings, name, usettings, avl);
-				container_info_add(&buf, cur, tb, usettings, rsstate);
-				blobmsg_close_table(&buf, obj);
-			} else {
-				netinfo_str(netinfo, netstr, sizeof(netstr));
-				printf("%-*s %-*s %-*s %-*s %-*s %-*s %s\n",
-				       (int)id_w, name, (int)pid_w, pidstr,
-				       (int)status_w, status, (int)bundle_w, bundle,
-				       (int)created_w, created, (int)owner_w, "root",
-				       netstr);
-			}
+				list_row_print(&w, &row);
 		}
 	}
 
@@ -5002,8 +5084,8 @@ static int uxc_list(void)
 static int uxc_start(const char *name, bool console)
 {
 	struct uxc_wait_state wait_state;
-	char *objname;
 	unsigned int id;
+	char *objname;
 	pid_t pid;
 	int ret;
 
@@ -5067,8 +5149,8 @@ static void uxc_exec_reply_cb(struct ubus_request *req, int type, struct blob_at
 		[REPLY_STATUS] = { "status", BLOBMSG_TYPE_INT32 },
 		[REPLY_PID]    = { "pid",    BLOBMSG_TYPE_INT32 },
 	};
-	struct blob_attr *tb[__REPLY_MAX];
 	struct uxc_exec_reply *r = req->priv;
+	struct blob_attr *tb[__REPLY_MAX];
 
 	blobmsg_parse(reply_policy, __REPLY_MAX, tb, blob_data(msg), blob_len(msg));
 	if (tb[REPLY_STATUS])
@@ -5080,12 +5162,14 @@ static int uxc_exec(const char *name, const char *process_file,
 		    const char *console_socket,
 		    char **cmd_argv, int cmd_argc)
 {
-	static struct blob_buf req;
 	struct uxc_exec_reply reply = { .status = 0 };
+	static struct blob_buf req;
 	char *objname;
-	uint32_t id;
 	int notify_fd;
+	uint32_t id;
+	void *arr;
 	int ret;
+	int i;
 
 	if (tty && !console_socket) {
 		fprintf(stderr, "uxc: --tty requires --console-socket\n");
@@ -5101,9 +5185,6 @@ static int uxc_exec(const char *name, const char *process_file,
 			return -EINVAL;
 		}
 	} else {
-		void *arr;
-		int i;
-
 		if (cmd_argc < 1) {
 			fprintf(stderr, "uxc: exec requires --process or a command\n");
 			blob_buf_free(&req);
@@ -5693,7 +5774,8 @@ static int uxc_respawn_reset(const char *name, const char *arg)
 	return ret ? -EIO : 0;
 }
 
-static int uxc_set(char *name, char *path, signed char autostart, char *pidfile, char *tmprwsize, char *writepath, char *requiredmounts)
+static int uxc_set(char *name, char *path, signed char autostart, char *pidfile,
+		   char *tmprwsize, char *writepath, char *requiredmounts)
 {
 	struct settings *usettings = NULL;
 	struct blob_attr *tb[__CONF_MAX];
@@ -5782,7 +5864,8 @@ static bool checkblock(const char *uuid)
 	int rem;
 
 	blobmsg_for_each_attr(cur, blockinfo, rem) {
-		blobmsg_parse(block_info_policy, __BLOCK_INFO_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+		blobmsg_parse(block_info_policy, __BLOCK_INFO_MAX, tb,
+			      blobmsg_data(cur), blobmsg_len(cur));
 
 		if (!tb[BLOCK_INFO_UUID] || !tb[BLOCK_INFO_MOUNT])
 			continue;
@@ -5808,13 +5891,14 @@ static const struct blobmsg_policy uci_fstab_policy[__UCI_FSTAB_MAX] = {
 static const char *resolveuuid(const char *volname)
 {
 	struct blob_attr *tb[__UCI_FSTAB_MAX];
+	char *tmpvolname, *replc;
 	struct blob_attr *cur;
 	const char *mntname;
-	char *tmpvolname, *replc;
 	int rem, res;
 
 	blobmsg_for_each_attr(cur, fstabinfo, rem) {
-		blobmsg_parse(uci_fstab_policy, __UCI_FSTAB_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+		blobmsg_parse(uci_fstab_policy, __UCI_FSTAB_MAX, tb,
+			      blobmsg_data(cur), blobmsg_len(cur));
 
 		if (!tb[UCI_FSTAB_UUID])
 			continue;
@@ -5908,11 +5992,13 @@ static int uxc_boot(const char *mountpoint)
 		if (mountpoint && strncmp(blobmsg_name(cur), mountpoint, strlen(mountpoint)))
 			continue;
 
-		rsstate = avl_find_element(&runtime, blobmsg_get_string(tb[CONF_NAME]), rsstate, avl);
+		rsstate = avl_find_element(&runtime, blobmsg_get_string(tb[CONF_NAME]),
+					   rsstate, avl);
 		if (rsstate)
 			continue;
 
-		usettings = avl_find_element(&settings, blobmsg_get_string(tb[CONF_NAME]), usettings, avl);
+		usettings = avl_find_element(&settings, blobmsg_get_string(tb[CONF_NAME]),
+					     usettings, avl);
 		if (!autostart_effective(tb, usettings))
 			continue;
 
@@ -6236,7 +6322,8 @@ static int uxc_delete(char *name, bool force, bool volumes)
 		return ret;
 
 	if (tb[CONF_ORIGIN] && !strcmp(blobmsg_get_string(tb[CONF_ORIGIN]), "package")) {
-		fprintf(stderr, "uxc: %s is provided by a package; use 'apk del' to remove it\n", name);
+		fprintf(stderr, "uxc: %s is provided by a package; use 'apk del' to remove it\n",
+			name);
 		return -EPERM;
 	}
 
@@ -6470,23 +6557,346 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 	return ret;
 }
 
-int main(int argc, char **argv)
+static int usage_fail(void)
 {
-	static struct blob_buf set_patch, set_unset, set_files;
-	int ret = -EINVAL;
-	const char *verb;
-	const char *log_path = NULL;
-	const char *log_format = NULL;
-	const char *criu_path = NULL;
-	bool systemd_cgroup = false;
-	const char *set_name;
-	int verb_argc, c, i;
-	char **verb_argv;
+	usage();
+
+	return EXIT_FAILURE;
+}
+
+static int cli_list(int argc, char **argv)
+{
+	int c;
+
+	while ((c = getopt_long(argc, argv, "f:jq", list_opts, NULL)) != -1) {
+		switch (c) {
+		case 'f':
+			if (!strcmp(optarg, "json")) {
+				json_output = true;
+			} else if (!strcmp(optarg, "table")) {
+				json_output = false;
+			} else {
+				fprintf(stderr, "uxc: invalid format '%s'\n", optarg);
+				return usage_fail();
+			}
+			break;
+		case 'j':
+			json_output = true;
+			break;
+		case 'q':
+			quiet_output = true;
+			break;
+		default:
+			return usage_fail();
+		}
+	}
+	if (optind != argc)
+		return usage_fail();
+
+	return uxc_list();
+}
+
+static int cli_start(int argc, char **argv)
+{
+	bool console = false;
+	int c;
+
+	while ((c = getopt_long(argc, argv, "c", start_opts, NULL)) != -1) {
+		switch (c) {
+		case 'c':
+			console = true;
+			break;
+		default:
+			return usage_fail();
+		}
+	}
+	if (optind != argc - 1)
+		return usage_fail();
+
+	return uxc_start(argv[optind], console);
+}
+
+static int cli_kill(int argc, char **argv)
+{
+	bool signal_from_flag = false;
+	bool all = false;
+	int signal = -1;
+	int c;
+
+	while ((c = getopt_long(argc, argv, "+s:a", kill_opts, NULL)) != -1) {
+		switch (c) {
+		case 's':
+			signal = get_signum(optarg);
+			if (signal < 0)
+				return usage_fail();
+			signal_from_flag = true;
+			break;
+		case 'a':
+			all = true;
+			break;
+		default:
+			return usage_fail();
+		}
+	}
+	if (optind == argc - 2) {
+		if (signal_from_flag)
+			return usage_fail();
+		signal = get_signum(argv[optind + 1]);
+		if (signal < 0)
+			return usage_fail();
+	} else if (optind != argc - 1) {
+		return usage_fail();
+	}
+	if (all && signal != SIGKILL) {
+		fprintf(stderr, "uxc: --all is only valid with SIGKILL\n");
+		return -ENOTSUP;
+	}
+
+	return uxc_kill(argv[optind], signal, all);
+}
+
+static int cli_set(int argc, char **argv)
+{
+	static struct blob_buf patch, unset, files;
+	const char *name;
+	int ret;
+
+	blob_buf_init(&patch, 0);
+	blob_buf_init(&unset, 0);
+	blob_buf_init(&files, 0);
+	ret = set_args_parse(argc, argv, &patch, &unset, &files, &name);
+	if (ret) {
+		blob_buf_free(&patch);
+		blob_buf_free(&unset);
+		blob_buf_free(&files);
+		return (ret == -EINVAL) ? usage_fail() : ret;
+	}
+	ret = provision_copies_stage(name, files.head);
+	if (!ret) {
+		ret = settings_edit(name, patch.head, unset.head);
+		provision_copies_finish(name, files.head, ret >= 0, &ret);
+	}
+	if (ret >= 0)
+		ret = resources_file_refresh(name) ?: ret;
+	blob_buf_free(&patch);
+	blob_buf_free(&unset);
+	blob_buf_free(&files);
+
+	return (ret > 0) ? 0 : ret;
+}
+
+static int cli_delete(int argc, char **argv)
+{
+	bool volumes = false;
+	bool force = false;
+	int c;
+
+	while ((c = getopt_long(argc, argv, "fV", delete_opts, NULL)) != -1) {
+		switch (c) {
+		case 'f':
+			force = true;
+			break;
+		case 'V':
+			volumes = true;
+			break;
+		default:
+			return usage_fail();
+		}
+	}
+	if (optind != argc - 1)
+		return usage_fail();
+
+	return uxc_delete(argv[optind], force, volumes);
+}
+
+static int cli_create(int argc, char **argv, bool systemd_cgroup)
+{
+	char *tmprwsize = NULL, *writepath = NULL, *requiredmounts = NULL;
+	char *bundle = NULL, *pidfile = NULL;
+	char *console_socket = NULL;
+	signed char autostart = -1;
+	char *name;
+	int c, ret;
+
+	while ((c = getopt_long(argc, argv, "ab:m:p:t:w:",
+				create_opts, NULL)) != -1) {
+		switch (c) {
+		case 'a':
+			autostart = 1;
+			break;
+		case 'b':
+			bundle = optarg;
+			break;
+		case 'm':
+			requiredmounts = optarg;
+			break;
+		case 'p':
+			pidfile = optarg;
+			break;
+		case 't':
+			tmprwsize = optarg;
+			break;
+		case 'w':
+			writepath = optarg;
+			break;
+		case OPT_CONSOLE_SOCKET:
+			console_socket = optarg;
+			break;
+		case OPT_NO_PIVOT:
+			fprintf(stderr, "uxc: --no-pivot accepted but ignored "
+				"(ujail does not pivot_root in this mode)\n");
+			break;
+		case OPT_NO_NEW_KEYRING:
+			fprintf(stderr, "uxc: --no-new-keyring accepted but ignored "
+				"(ujail does not create kernel keyrings)\n");
+			break;
+		case OPT_PRESERVE_FDS:
+			fprintf(stderr, "uxc: --preserve-fds=%s accepted but ignored\n",
+				optarg);
+			break;
+		default:
+			return usage_fail();
+		}
+	}
+	if (optind != argc - 1)
+		return usage_fail();
+	name = argv[optind];
+
+	ret = uxc_exists(name) ?: containers_disabled_refuse(name);
+	if (ret)
+		return ret;
+
+	ret = uxc_set(name, bundle, autostart, pidfile,
+		      tmprwsize, writepath, requiredmounts);
+	if (ret < 0)
+		return ret;
+	if (ret > 0)
+		reload_conf();
+
+	return uxc_create(name, false, console_socket, systemd_cgroup, NULL,
+			  "operator");
+}
+
+static int cli_exec(int argc, char **argv)
+{
+	const char *console_socket = NULL;
+	const char *process_file = NULL;
+	const char *pid_file = NULL;
+	bool detach = false;
+	bool tty = false;
+	int cmd_start, c;
+
+	while ((c = getopt_long(argc, argv, "+dp:t", exec_opts, NULL)) != -1) {
+		switch (c) {
+		case 'd':
+			detach = true;
+			break;
+		case 'p':
+			pid_file = optarg;
+			break;
+		case 't':
+			tty = true;
+			break;
+		case OPT_PROCESS:
+			process_file = optarg;
+			break;
+		case OPT_CONSOLE_SOCKET:
+			console_socket = optarg;
+			break;
+		case OPT_PRESERVE_FDS:
+			fprintf(stderr, "uxc: --preserve-fds=%s accepted but ignored\n",
+				optarg);
+			break;
+		default:
+			return usage_fail();
+		}
+	}
+	if (optind >= argc)
+		return usage_fail();
+
+	cmd_start = optind + 1;
+	if (cmd_start < argc && !strcmp(argv[cmd_start], "--"))
+		cmd_start++;
+
+	return uxc_exec(argv[optind], process_file, pid_file, detach, tty,
+			console_socket, argv + cmd_start, argc - cmd_start);
+}
+
+static int cli_update(int argc, char **argv)
+{
+	const char *resources_file = NULL;
+	int c;
+
+	while ((c = getopt_long(argc, argv, "+", update_opts, NULL)) != -1) {
+		switch (c) {
+		case OPT_RESOURCES:
+			resources_file = optarg;
+			break;
+		default:
+			return usage_fail();
+		}
+	}
+	if (optind != argc - 1)
+		return usage_fail();
+
+	return uxc_update(argv[optind], resources_file);
+}
+
+static int cli_pause(const char *verb, int argc, char **argv)
+{
+	char *objname;
+	uint32_t id;
+	int ret;
+
+	if (argc != 2)
+		return usage_fail();
+	if (asprintf(&objname, "container.%s", argv[1]) == -1)
+		return -ENOMEM;
+
+	ret = ubus_lookup_id(ctx, objname, &id);
+	free(objname);
+	if (ret)
+		return -ENOENT;
+
+	ret = ubus_invoke(ctx, id, verb, NULL, NULL, NULL, 3000);
+
+	return ret ? -EIO : 0;
+}
+
+struct global_opts {
+	const char *log_format;
+	const char *criu_path;
+	const char *log_path;
+	bool systemd_cgroup;
+};
+
+static int global_opt_value(const char *a, const char *name, int argc,
+			    char **argv, int *i, const char **dst)
+{
+	size_t n = strlen(name);
+
+	if (!strncmp(a, name, n) && a[n] == '=') {
+		*dst = a + n + 1;
+		return 1;
+	}
+	if (strcmp(a, name))
+		return 0;
+	if (*i + 1 >= argc) {
+		fprintf(stderr, "uxc: %s requires an argument\n", a);
+		return -1;
+	}
+	*dst = argv[++(*i)];
+
+	return 1;
+}
+
+static int global_opts_parse(int argc, char **argv, struct global_opts *g)
+{
+	const char *a;
+	int i, ret;
 
 	for (i = 1; i < argc; ++i) {
-		const char *a = argv[i];
-		const char *eq;
-
+		a = argv[i];
 		if (a[0] != '-')
 			break;
 
@@ -6506,79 +6916,82 @@ int main(int argc, char **argv)
 		}
 
 		if (!strcmp(a, "--systemd-cgroup")) {
-			systemd_cgroup = true;
+			g->systemd_cgroup = true;
 			continue;
 		}
 
-		eq = strchr(a, '=');
+		ret = global_opt_value(a, "--root", argc, argv, &i, &confdir) ?:
+		      global_opt_value(a, "--log", argc, argv, &i, &g->log_path) ?:
+		      global_opt_value(a, "--log-format", argc, argv, &i, &g->log_format) ?:
+		      global_opt_value(a, "--criu", argc, argv, &i, &g->criu_path);
+		if (ret < 0)
+			return -1;
 
-#define GLOBAL_OPT_VAL(name, dst) \
-		do { \
-			size_t _n = strlen(name); \
-			if (eq && !strncmp(a, name, _n) && a[_n] == '=') { \
-				dst = eq + 1; \
-				goto next_global; \
-			} \
-			if (!strcmp(a, name)) { \
-				if (i + 1 >= argc) { \
-					fprintf(stderr, "uxc: %s requires an argument\n", a); \
-					return EXIT_FAILURE; \
-				} \
-				dst = argv[++i]; \
-				goto next_global; \
-			} \
-		} while (0)
-
-		GLOBAL_OPT_VAL("--root",       confdir);
-		GLOBAL_OPT_VAL("--log",        log_path);
-		GLOBAL_OPT_VAL("--log-format", log_format);
-		GLOBAL_OPT_VAL("--criu",       criu_path);
-#undef GLOBAL_OPT_VAL
-
-		if (eq && !strncmp(a, "--rootless=", 11))
-			continue;
-		if (!strcmp(a, "--rootless"))
+		if (ret || !strncmp(a, "--rootless=", 11) || !strcmp(a, "--rootless"))
 			continue;
 
 		fprintf(stderr, "uxc: unknown option '%s'\n", a);
 		usage();
-		return EXIT_FAILURE;
-next_global:
-		continue;
+		return -1;
 	}
 
 	if (i >= argc) {
 		usage();
-		return EXIT_FAILURE;
+		return -1;
 	}
 
-	if (log_path) {
-		int fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-		if (fd < 0) {
-			fprintf(stderr, "uxc: cannot open --log path %s: %m\n", log_path);
-			return EXIT_FAILURE;
-		}
-		stdio_fds[2] = dup(STDERR_FILENO);
-		if (stdio_fds[2] < 0) {
-			fprintf(stderr, "uxc: cannot preserve stderr: %m\n");
-			close(fd);
-			return EXIT_FAILURE;
-		}
-		if (dup2(fd, STDERR_FILENO) < 0) {
-			dprintf(fd, "uxc: dup2(--log path) failed: %m\n");
-			close(fd);
-			return EXIT_FAILURE;
-		}
+	return i;
+}
+
+static int stderr_redirect(const char *path)
+{
+	int fd;
+
+	fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0) {
+		fprintf(stderr, "uxc: cannot open --log path %s: %m\n", path);
+		return -1;
+	}
+	stdio_fds[2] = dup(STDERR_FILENO);
+	if (stdio_fds[2] < 0) {
+		fprintf(stderr, "uxc: cannot preserve stderr: %m\n");
 		close(fd);
+		return -1;
 	}
+	if (dup2(fd, STDERR_FILENO) < 0) {
+		dprintf(fd, "uxc: dup2(--log path) failed: %m\n");
+		close(fd);
+		return -1;
+	}
+	close(fd);
 
-	if (log_format && strcmp(log_format, "text"))
-		fprintf(stderr, "uxc: --log-format=%s accepted but only text output is emitted\n",
-			log_format);
+	return 0;
+}
 
-	if (criu_path)
-		fprintf(stderr, "uxc: --criu=%s accepted but ignored (no checkpoint/restore support)\n",
-			criu_path);
+int main(int argc, char **argv)
+{
+	struct global_opts g = { 0 };
+	char **verb_argv;
+	const char *verb;
+	int verb_argc;
+	int ret, i;
+
+	i = global_opts_parse(argc, argv, &g);
+	if (i <= 0)
+		return i ? EXIT_FAILURE : 0;
+
+	if (g.log_path && stderr_redirect(g.log_path))
+		return EXIT_FAILURE;
+
+	if (g.log_format && strcmp(g.log_format, "text"))
+		fprintf(stderr,
+			"uxc: --log-format=%s accepted but only text output is emitted\n",
+			g.log_format);
+
+	if (g.criu_path)
+		fprintf(stderr,
+			"uxc: --criu=%s accepted but ignored (no checkpoint/restore support)\n",
+			g.criu_path);
 
 	verb = argv[i];
 	verb_argc = argc - i;
@@ -6608,26 +7021,7 @@ next_global:
 	opterr = 1;
 
 	if (!strcmp(verb, "list")) {
-		while ((c = getopt_long(verb_argc, verb_argv, "f:jq", list_opts, NULL)) != -1) {
-			switch (c) {
-			case 'f':
-				if (!strcmp(optarg, "json")) {
-					json_output = true;
-				} else if (!strcmp(optarg, "table")) {
-					json_output = false;
-				} else {
-					fprintf(stderr, "uxc: invalid format '%s'\n", optarg);
-					goto usage_out;
-				}
-				break;
-			case 'j': json_output = true; break;
-			case 'q': quiet_output = true; break;
-			default: goto usage_out;
-			}
-		}
-		if (optind != verb_argc)
-			goto usage_out;
-		ret = uxc_list();
+		ret = cli_list(verb_argc, verb_argv);
 	} else if (!strcmp(verb, "attach")) {
 		if (verb_argc != 2)
 			goto usage_out;
@@ -6650,17 +7044,7 @@ next_global:
 			goto usage_out;
 		ret = uxc_reconcile();
 	} else if (!strcmp(verb, "start")) {
-		bool console = false;
-
-		while ((c = getopt_long(verb_argc, verb_argv, "c", start_opts, NULL)) != -1) {
-			switch (c) {
-			case 'c': console = true; break;
-			default: goto usage_out;
-			}
-		}
-		if (optind != verb_argc - 1)
-			goto usage_out;
-		ret = uxc_start(verb_argv[optind], console);
+		ret = cli_start(verb_argc, verb_argv);
 	} else if (!strcmp(verb, "trace") || !strcmp(verb, "audit") ||
 		   !strcmp(verb, "complain")) {
 		if (verb_argc != 2)
@@ -6671,43 +7055,11 @@ next_global:
 			goto usage_out;
 		ret = uxc_state(verb_argv[1]);
 	} else if (!strcmp(verb, "kill")) {
-		int signal = -1;
-		bool signal_from_flag = false;
-		bool all = false;
-
-		while ((c = getopt_long(verb_argc, verb_argv, "+s:a", kill_opts, NULL)) != -1) {
-			switch (c) {
-			case 's':
-				signal = get_signum(optarg);
-				if (signal < 0)
-					goto usage_out;
-				signal_from_flag = true;
-				break;
-			case 'a':
-				all = true;
-				break;
-			default: goto usage_out;
-			}
-		}
-		if (optind == verb_argc - 2) {
-			if (signal_from_flag)
-				goto usage_out;
-			signal = get_signum(verb_argv[optind + 1]);
-			if (signal < 0)
-				goto usage_out;
-		} else if (optind != verb_argc - 1) {
-			goto usage_out;
-		}
-		if (all && signal != SIGKILL) {
-			fprintf(stderr, "uxc: --all is only valid with SIGKILL\n");
-			ret = -ENOTSUP;
-			goto runtime_out;
-		}
-		ret = uxc_kill(verb_argv[optind], signal, all);
+		ret = cli_kill(verb_argc, verb_argv);
 	} else if (!strcmp(verb, "restart")) {
 		if (verb_argc != 2)
 			goto usage_out;
-		ret = uxc_restart(verb_argv[1], systemd_cgroup);
+		ret = uxc_restart(verb_argv[1], g.systemd_cgroup);
 	} else if (!strcmp(verb, "respawn-reset")) {
 		if (verb_argc != 2 && verb_argc != 3)
 			goto usage_out;
@@ -6725,158 +7077,17 @@ next_global:
 		if (ret > 0)
 			ret = 0;
 	} else if (!strcmp(verb, "set")) {
-		blob_buf_init(&set_patch, 0);
-		blob_buf_init(&set_unset, 0);
-		blob_buf_init(&set_files, 0);
-		ret = set_args_parse(verb_argc, verb_argv, &set_patch, &set_unset,
-				     &set_files, &set_name);
-		if (ret) {
-			blob_buf_free(&set_patch);
-			blob_buf_free(&set_unset);
-			blob_buf_free(&set_files);
-			if (ret != -EINVAL)
-				goto runtime_out;
-			goto usage_out;
-		}
-		ret = provision_copies_stage(set_name, set_files.head);
-		if (!ret) {
-			ret = settings_edit(set_name, set_patch.head, set_unset.head);
-			provision_copies_finish(set_name, set_files.head, ret >= 0, &ret);
-		}
-		if (ret >= 0)
-			ret = resources_file_refresh(set_name) ?: ret;
-		blob_buf_free(&set_patch);
-		blob_buf_free(&set_unset);
-		blob_buf_free(&set_files);
-		if (ret > 0)
-			ret = 0;
+		ret = cli_set(verb_argc, verb_argv);
 	} else if (!strcmp(verb, "delete")) {
-		bool force = false;
-		bool volumes = false;
-
-		while ((c = getopt_long(verb_argc, verb_argv, "fV", delete_opts, NULL)) != -1) {
-			switch (c) {
-			case 'f': force = true; break;
-			case 'V': volumes = true; break;
-			default: goto usage_out;
-			}
-		}
-		if (optind != verb_argc - 1)
-			goto usage_out;
-		ret = uxc_delete(verb_argv[optind], force, volumes);
+		ret = cli_delete(verb_argc, verb_argv);
 	} else if (!strcmp(verb, "create")) {
-		char *bundle = NULL, *pidfile = NULL;
-		char *tmprwsize = NULL, *writepath = NULL, *requiredmounts = NULL;
-		char *console_socket = NULL;
-		signed char autostart = -1;
-		char *name;
-
-		while ((c = getopt_long(verb_argc, verb_argv, "ab:m:p:t:w:",
-					create_opts, NULL)) != -1) {
-			switch (c) {
-			case 'a': autostart = 1; break;
-			case 'b': bundle = optarg; break;
-			case 'm': requiredmounts = optarg; break;
-			case 'p': pidfile = optarg; break;
-			case 't': tmprwsize = optarg; break;
-			case 'w': writepath = optarg; break;
-			case OPT_CONSOLE_SOCKET:
-				console_socket = optarg;
-				break;
-			case OPT_NO_PIVOT:
-				fprintf(stderr, "uxc: --no-pivot accepted but ignored (ujail does not pivot_root in this mode)\n");
-				break;
-			case OPT_NO_NEW_KEYRING:
-				fprintf(stderr, "uxc: --no-new-keyring accepted but ignored (ujail does not create kernel keyrings)\n");
-				break;
-			case OPT_PRESERVE_FDS:
-				fprintf(stderr, "uxc: --preserve-fds=%s accepted but ignored\n", optarg);
-				break;
-			default: goto usage_out;
-			}
-		}
-		if (optind != verb_argc - 1)
-			goto usage_out;
-		name = verb_argv[optind];
-
-		ret = uxc_exists(name) ?: containers_disabled_refuse(name);
-		if (ret)
-			goto runtime_out;
-
-		ret = uxc_set(name, bundle, autostart, pidfile,
-			      tmprwsize, writepath, requiredmounts);
-		if (ret < 0)
-			goto runtime_out;
-		if (ret > 0)
-			reload_conf();
-
-		ret = uxc_create(name, false, console_socket, systemd_cgroup, NULL,
-				 "operator");
+		ret = cli_create(verb_argc, verb_argv, g.systemd_cgroup);
 	} else if (!strcmp(verb, "exec")) {
-		const char *process_file = NULL;
-		const char *pid_file = NULL;
-		const char *console_socket = NULL;
-		bool detach = false;
-		bool tty = false;
-
-		while ((c = getopt_long(verb_argc, verb_argv, "+dp:t",
-					exec_opts, NULL)) != -1) {
-			switch (c) {
-			case 'd': detach = true; break;
-			case 'p': pid_file = optarg; break;
-			case 't': tty = true; break;
-			case OPT_PROCESS: process_file = optarg; break;
-			case OPT_CONSOLE_SOCKET: console_socket = optarg; break;
-			case OPT_PRESERVE_FDS:
-				fprintf(stderr, "uxc: --preserve-fds=%s accepted but ignored\n", optarg);
-				break;
-			default: goto usage_out;
-			}
-		}
-		if (optind >= verb_argc)
-			goto usage_out;
-		{
-			const char *id = verb_argv[optind];
-			int cmd_start = optind + 1;
-			if (cmd_start < verb_argc && !strcmp(verb_argv[cmd_start], "--"))
-				cmd_start++;
-			ret = uxc_exec(id, process_file, pid_file, detach, tty,
-				       console_socket,
-				       verb_argv + cmd_start,
-				       verb_argc - cmd_start);
-		}
+		ret = cli_exec(verb_argc, verb_argv);
 	} else if (!strcmp(verb, "update")) {
-		const char *resources_file = NULL;
-
-		while ((c = getopt_long(verb_argc, verb_argv, "+",
-					update_opts, NULL)) != -1) {
-			switch (c) {
-			case OPT_RESOURCES: resources_file = optarg; break;
-			default: goto usage_out;
-			}
-		}
-		if (optind != verb_argc - 1)
-			goto usage_out;
-		ret = uxc_update(verb_argv[optind], resources_file);
+		ret = cli_update(verb_argc, verb_argv);
 	} else if (!strcmp(verb, "pause") || !strcmp(verb, "resume")) {
-		char *objname;
-		uint32_t id;
-
-		if (verb_argc != 2)
-			goto usage_out;
-		if (asprintf(&objname, "container.%s", verb_argv[1]) == -1) {
-			ret = -ENOMEM;
-			goto runtime_out;
-		}
-		ret = ubus_lookup_id(ctx, objname, &id);
-		free(objname);
-		if (ret) {
-			ret = -ENOENT;
-			goto runtime_out;
-		}
-		ret = ubus_invoke(ctx, id, verb, NULL, NULL, NULL, 3000);
-		if (ret)
-			ret = -EIO;
+		ret = cli_pause(verb, verb_argc, verb_argv);
 	} else if (!strcmp(verb, "events") || !strcmp(verb, "checkpoint") ||
 		   !strcmp(verb, "restore")) {
 		fprintf(stderr, "uxc: '%s' is not supported\n", verb);
