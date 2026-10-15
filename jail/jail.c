@@ -8091,8 +8091,11 @@ static int jail_seccomp_handshake(void)
 		return -1;
 	}
 
-	if (opts.seccomp_mode == SECCOMP_MODE_TRACE)
+	if (opts.seccomp_mode == SECCOMP_MODE_TRACE) {
+		jail_exec_acked = true;
+		emit_instance_event("instance.running");
 		jail_seccomp_run();
+	}
 
 	if (opts.seccomp_mode == SECCOMP_MODE_ENFORCE &&
 	    seccomp_target_is_static(jail_process.pid)) {
