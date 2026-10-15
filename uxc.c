@@ -4132,11 +4132,23 @@ static int containers_disabled_refuse(const char *name)
 	return -EPERM;
 }
 
+static void add_reply_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	static const struct blobmsg_policy pol = { .name = "added", .type = BLOBMSG_TYPE_BOOL };
+	int *added = req->priv;
+	struct blob_attr *tb;
+
+	blobmsg_parse(&pol, 1, &tb, blob_data(msg), blob_len(msg));
+	if (tb)
+		*added = blobmsg_get_bool(tb);
+}
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode,
 		      const char *started_by)
 {
 	char *path = NULL, *jailname = NULL, *pidfile = NULL;
+	bool once = !strcmp(started_by, "boot");
 	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
 	struct uxc_wait_state wait_state;
@@ -4152,6 +4164,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	uint32_t stop_timeout;
 	uint64_t incarnation;
 	char dir[PATH_MAX];
+	int added = -1;
 	int notify_fd;
 	int ret = 0;
 	uint32_t id;
@@ -4291,6 +4304,8 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 
 	blobmsg_close_table(&req, in);
 	blobmsg_close_table(&req, ins);
+	if (once)
+		blobmsg_add_u8(&req, "once", 1);
 
 	if (verbose) {
 		tmp = blobmsg_format_json_indent(req.head, true, 1);
@@ -4318,7 +4333,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		fprintf(stderr, "uxc: warning: cannot arm instance.* watcher\n");
 
 	notify_fd = uxc_invoker_pidfd();
-	ret = ubus_invoke_fd(ctx, id, "add", req.head, NULL, NULL, 3000,
+	ret = ubus_invoke_fd(ctx, id, "add", req.head, add_reply_cb, &added, 3000,
 			     stdio_notify_fds_send(stdio_fds, notify_fd));
 	if (notify_fd >= 0)
 		close(notify_fd);
@@ -4328,6 +4343,12 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		uxc_wait_disarm();
 		last_exit_write(name, started_by, "uxc.add", EIO);
 		return -EIO;
+	}
+
+	if (once && !added) {
+		blob_buf_free(&req);
+		uxc_wait_disarm();
+		return -EALREADY;
 	}
 
 	uxc_wait_run(&wait_state, 30000);
@@ -5958,9 +5979,9 @@ static int uxc_boot(const char *mountpoint)
 {
 	struct blob_attr *cur, *tb[__CONF_MAX];
 	struct runtime_state *rsstate = NULL;
+	int rem, nvols, status, err, ret = 0;
 	struct settings *usettings = NULL;
 	static struct blob_buf req, vols;
-	int rem, nvols, status, ret = 0;
 	const char *imgvol;
 	unsigned int id;
 	char *name;
@@ -6047,7 +6068,8 @@ static int uxc_boot(const char *mountpoint)
 			continue;
 		}
 
-		if (uxc_create(name, true, NULL, false, NULL, "boot")) {
+		err = uxc_create(name, true, NULL, false, NULL, "boot");
+		if (err && err != -EALREADY) {
 			fprintf(stderr, "uxc: boot: could not start %s\n", name);
 			ret = -EIO;
 		}
