@@ -447,7 +447,7 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = in->tmpoverlaysize;
 	}
 
-	if (in->immediately)
+	if (in->immediately || (in->bundle && in->respawn_run))
 		argv[argc++] = "-i";
 
 	if (jail->pidfile) {
@@ -484,7 +484,10 @@ jail_run(struct service_instance *in, char **argv)
 		argv[argc++] = jail->resources;
 	}
 
-	if (jail->started_by) {
+	if (in->bundle && in->respawn_run) {
+		argv[argc++] = "-g";
+		argv[argc++] = "respawn";
+	} else if (jail->started_by) {
 		argv[argc++] = "-g";
 		argv[argc++] = jail->started_by;
 	}
@@ -629,6 +632,13 @@ instance_run(struct service_instance *in, int _stdout, int _stderr, int _status)
 	if (in->has_jail && in->notify_fd > -1) {
 		fcntl(in->notify_fd, F_SETFD, 0);
 		jail_argc += 2;
+	}
+
+	if (in->has_jail && in->bundle && in->respawn_run) {
+		if (!in->immediately)
+			jail_argc++;
+		if (!in->jail.started_by)
+			jail_argc += 2;
 	}
 
 	argv = alloca(sizeof(char *) * (argc + jail_argc));
@@ -878,6 +888,54 @@ instance_signal(struct service_instance *in, int sig)
 	return kill(in->proc.pid, sig);
 }
 
+static uint32_t
+instance_respawn_delay(struct service_instance *in)
+{
+	uint64_t d = in->respawn_timeout * 1000ULL;
+	uint64_t max = in->respawn_max * 1000ULL;
+	int n;
+
+	for (n = 1; n < in->respawn_count && d < max; n++)
+		d = d * in->respawn_multiplier / 1000;
+
+	return d < max ? d : max;
+}
+
+static bool
+instance_respawn_reset(struct service_instance *in, long runtime)
+{
+	if (in->respawn_on_failure && !in->respawn_threshold)
+		return false;
+
+	return runtime >= in->respawn_threshold;
+}
+
+static bool
+instance_respawn_schedule(struct service_instance *in, long runtime)
+{
+	uint32_t delay;
+
+	if (instance_respawn_reset(in, runtime))
+		in->respawn_count = in->respawn_on_failure ? 1 : 0;
+	else
+		in->respawn_count++;
+
+	if (in->respawn_count > in->respawn_retry && in->respawn_retry > 0) {
+		LOG("Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
+		    in->srv->name, in->name, in->respawn_count, runtime);
+		in->restart = in->respawn = 0;
+		service_event_instance_exit("instance.fail", in);
+		return false;
+	}
+
+	delay = instance_respawn_delay(in);
+	in->respawn_next = uptime_get() + delay / 1000;
+	service_event_instance_exit("instance.respawn", in);
+	uloop_timeout_set(&in->timeout, delay);
+
+	return true;
+}
+
 static const char *
 instance_jail_state_name(struct service_instance *in)
 {
@@ -907,11 +965,30 @@ instance_jail_status_close(struct service_instance *in)
 	in->jail_status.fd = -1;
 }
 
+static bool
+instance_jail_failed(struct service_instance *in, const struct jail_status *st)
+{
+	if (st->flags & (JAIL_STATUS_F_REQUESTED | JAIL_STATUS_F_RESTARTING))
+		return false;
+
+	if (!(st->flags & JAIL_STATUS_F_STARTED))
+		return in->respawn_run;
+
+	return !(st->flags & JAIL_STATUS_F_REAPED) || st->exit_status;
+}
+
 static void
 instance_jail_status_update(struct service_instance *in, const struct jail_status *st)
 {
 	in->jail_last = *st;
 	in->jail_state_since = uptime_get();
+
+	if (st->type != JAIL_STATUS_STOPPED || !in->bundle || !in->respawn ||
+	    !in->respawn_on_failure || in->halt || !instance_jail_failed(in, st))
+		return;
+
+	in->exit_code = (st->flags & JAIL_STATUS_F_REAPED) ? st->exit_status : EXIT_FAILURE;
+	instance_respawn_schedule(in, st->runtime);
 }
 
 static bool
@@ -974,7 +1051,10 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
+	uloop_timeout_cancel(&in->timeout);
 	in->respawn_next = 0;
+	in->respawn_run = in->respawning;
+	in->respawning = false;
 	instance_free_stdio(in);
 	if (in->_stdout.fd.fd > -2 && in->stdio_fd[1] < 0) {
 		if (pipe(opipe)) {
@@ -1166,6 +1246,15 @@ instance_stderr(struct ustream *s, int bytes)
 	               container_of(s, struct service_instance, _stderr.stream));
 }
 
+static int
+instance_term_timeout(struct service_instance *in)
+{
+	if (in->has_jail)
+		return in->term_timeout * 2;
+
+	return in->term_timeout;
+}
+
 static void
 instance_timeout(struct uloop_timeout *t)
 {
@@ -1181,6 +1270,20 @@ instance_timeout(struct uloop_timeout *t)
 
 		instance_signal(in, SIGKILL);
 	} else if (in->restart || in->respawn) {
+		if (in->respawn && in->respawn_on_failure && !in->restart) {
+			in->respawning = true;
+			in->respawn_next = 0;
+			in->respawn_last = uptime_get();
+		}
+
+		if (in->bundle && in->proc.pending) {
+			in->halt = true;
+			in->restart = true;
+			instance_signal(in, SIGTERM);
+			uloop_timeout_set(&in->timeout, instance_term_timeout(in) * 1000);
+			return;
+		}
+
 		instance_start(in);
 		rc(in->srv->name, "running");
 	}
@@ -1281,55 +1384,26 @@ instance_cgroup_wait_stop(struct service_instance *in)
 	in->cgroup_events.fd = -1;
 }
 
-static uint32_t
-instance_respawn_delay(struct service_instance *in)
-{
-	uint64_t d = in->respawn_timeout * 1000ULL;
-	uint64_t max = in->respawn_max * 1000ULL;
-	int n;
-
-	for (n = 1; n < in->respawn_count && d < max; n++)
-		d = d * in->respawn_multiplier / 1000;
-
-	return d < max ? d : max;
-}
-
 static bool
-instance_respawn_reset(struct service_instance *in, long runtime)
+instance_jail_died(struct service_instance *in)
 {
-	if (in->respawn_on_failure && !in->respawn_threshold)
-		return false;
-
-	return runtime >= in->respawn_threshold;
-}
-
-static bool
-instance_respawn_schedule(struct service_instance *in, long runtime)
-{
-	uint32_t delay;
-
-	if (in->respawn_on_failure && !in->exit_code)
+	if (in->respawn_run)
 		return true;
 
-	if (instance_respawn_reset(in, runtime))
-		in->respawn_count = in->respawn_on_failure ? 1 : 0;
-	else
-		in->respawn_count++;
+	return in->exit_signalled && in->jail_last.type == JAIL_STATUS_RUNNING;
+}
 
-	if (in->respawn_count > in->respawn_retry && in->respawn_retry > 0) {
-		LOG("Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
-		    in->srv->name, in->name, in->respawn_count, runtime);
-		in->restart = in->respawn = 0;
-		service_event_instance_exit("instance.fail", in);
-		return false;
+static bool
+instance_respawn_exit(struct service_instance *in, long runtime)
+{
+	if (in->bundle && in->respawn_on_failure && in->jail_reporting) {
+		if (in->jail_last.type == JAIL_STATUS_STOPPED || !instance_jail_died(in))
+			return true;
+	} else if (in->respawn_on_failure && !in->exit_code) {
+		return true;
 	}
 
-	delay = instance_respawn_delay(in);
-	in->respawn_next = uptime_get() + delay / 1000;
-	service_event_instance_exit("instance.respawn", in);
-	uloop_timeout_set(&in->timeout, delay);
-
-	return true;
+	return instance_respawn_schedule(in, runtime);
 }
 
 static void
@@ -1353,7 +1427,7 @@ instance_exit_done(struct service_instance *in)
 			instance_delete(in);
 	} else if (in->restart) {
 		restart = true;
-	} else if (in->respawn && !instance_respawn_schedule(in, runtime)) {
+	} else if (in->respawn && !instance_respawn_exit(in, runtime)) {
 		in->halt = 1;
 	}
 
@@ -1438,7 +1512,9 @@ instance_exit(struct uloop_process *p, int ret)
 	P_DEBUG(2, "Instance %s::%s exit with error code %d after %ld seconds\n", in->srv->name, in->name, ret, runtime);
 
 	in->exit_code = instance_exit_code(ret);
-	uloop_timeout_cancel(&in->timeout);
+	in->exit_signalled = WIFSIGNALED(ret);
+	if (!in->respawn_next || in->halt)
+		uloop_timeout_cancel(&in->timeout);
 	uloop_timeout_cancel(&in->watchdog.timeout);
 
 	if (in->jail_status.fd > -1) {
@@ -1460,15 +1536,6 @@ instance_exit(struct uloop_process *p, int ret)
 	instance_cgroup_wait(in);
 }
 
-static int
-instance_term_timeout(struct service_instance *in)
-{
-	if (in->has_jail)
-		return in->term_timeout * 2;
-
-	return in->term_timeout;
-}
-
 void
 instance_stop(struct service_instance *in, bool halt)
 {
@@ -1479,6 +1546,8 @@ instance_stop(struct service_instance *in, bool halt)
 	}
 	in->halt = halt;
 	in->restart = in->respawn = false;
+	in->respawning = false;
+	in->respawn_next = 0;
 	instance_signal(in, SIGTERM);
 	uloop_timeout_set(&in->timeout, instance_term_timeout(in) * 1000);
 }
@@ -1496,6 +1565,7 @@ instance_restart(struct service_instance *in)
 
 	in->halt = true;
 	in->restart = true;
+	in->respawning = false;
 	instance_signal(in, SIGTERM);
 	uloop_timeout_set(&in->timeout, instance_term_timeout(in) * 1000);
 }
@@ -2573,6 +2643,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 
 	if (in->respawn_next)
 		blobmsg_add_u64(b, "next_restart", in->respawn_next);
+
+	if (in->respawn_last)
+		blobmsg_add_u64(b, "last_restarted", in->respawn_last);
 
 	if (in->trace)
 		blobmsg_add_u8(b, "trace", true);

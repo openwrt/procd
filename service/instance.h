@@ -131,6 +131,10 @@ struct service_instance {
 	struct jail_status jail_last;
 	uint64_t jail_state_since;
 	bool jail_reporting;
+	bool respawning;
+	bool respawn_run;
+	bool exit_signalled;
+	uint64_t respawn_last;
 	struct uloop_timeout timeout;
 	struct uloop_timeout cgroup_timeout;
 	struct uloop_fd cgroup_events;
