@@ -1868,12 +1868,14 @@ static char** build_envp(char **ocienvp)
 
 	addenv = ocienvp;
 	while (addenv && *addenv) {
-		envp[count++] = *(addenv++);
-		if (count >= MAX_ENVP) {
-			ERROR("environment limited to %d extra records, truncating\n", MAX_ENVP);
+		if (count >= MAX_ENVP - 1) {
+			ERROR("environment limited to %d records, truncating\n", MAX_ENVP - 1);
 			break;
 		}
+		envp[count++] = *(addenv++);
 	}
+	envp[count] = NULL;
+
 	return envp;
 }
 
