@@ -91,6 +91,17 @@ static void cgroups_set(const char *key, const char *val)
 	valp->val = strdup(val);
 }
 
+static int64_t cgroups_memory_max_staged(void)
+{
+	struct cgval *valp;
+
+	valp = avl_find_element(&cgvals, "memory.max", valp, avl);
+	if (!valp || !strcmp(valp->val, "max"))
+		return -1;
+
+	return strtoll(valp->val, NULL, 10);
+}
+
 void cgroups_free(void)
 {
 	struct cgval *valp, *tmp;
@@ -1008,7 +1019,7 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg, bool is_upd
 {
 	struct blob_attr *tb[__OCI_LINUX_CGROUPS_MEMORY_MAX];
 	char tmp[32] = { 0 };
-	int64_t limit = -1, swap, reservation;
+	int64_t limit, swap = -1, reservation;
 
 	blobmsg_parse(oci_linux_cgroups_memory_policy, __OCI_LINUX_CGROUPS_MEMORY_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
@@ -1029,6 +1040,17 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg, bool is_upd
 
 	if (tb[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY])
 		return jail_unsupported(tb[OCI_LINUX_CGROUPS_MEMORY_USEHIERARCHY]);
+
+	if (tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT])
+		limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]);
+	else
+		limit = cgroups_memory_max_staged();
+
+	if (tb[OCI_LINUX_CGROUPS_MEMORY_SWAP]) {
+		swap = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_SWAP]);
+		if (swap != -1 && limit != -1 && swap < limit)
+			return EINVAL;
+	}
 
 	if (is_update && tb[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE] &&
 	    blobmsg_get_bool(tb[OCI_LINUX_CGROUPS_MEMORY_CHECKBEFOREUPDATE])) {
@@ -1061,7 +1083,6 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg, bool is_upd
 	}
 
 	if (tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]) {
-		limit = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_LIMIT]);
 		if (limit == -1)
 			strcpy(tmp, "max");
 		else
@@ -1083,14 +1104,12 @@ static int parseOCIlinuxcgroups_legacy_memory(struct blob_attr *msg, bool is_upd
 
 	/* OCI 'swap' acounts for memory+swap */
 	if (tb[OCI_LINUX_CGROUPS_MEMORY_SWAP]) {
-		swap = blobmsg_cast_s64(tb[OCI_LINUX_CGROUPS_MEMORY_SWAP]);
-
 		if (swap == -1)
 			strcpy(tmp, "max");
-		else if (limit == -1 || (limit < swap))
+		else if (limit == -1)
 			snprintf(tmp, sizeof(tmp), "%" PRId64, swap);
 		else
-			snprintf(tmp, sizeof(tmp), "%" PRId64, limit - swap);
+			snprintf(tmp, sizeof(tmp), "%" PRId64, swap - limit);
 
 		cgroups_set("memory.swap.max", tmp);
 	}
