@@ -4150,6 +4150,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	char envpath[PATH_MAX];
 	void *in, *ins, *j, *m;
 	uint32_t stop_timeout;
+	uint64_t incarnation;
 	char dir[PATH_MAX];
 	int notify_fd;
 	int ret = 0;
@@ -4346,6 +4347,11 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		return -EIO;
 	}
 	if (wait_state.result == UXC_WAIT_UNSET) {
+		incarnation = uxc_instance_incarnation(name, name);
+		if (incarnation && incarnation < wait_state.since_incarnation) {
+			fprintf(stderr, "uxc: %s already exists\n", name);
+			return -EEXIST;
+		}
 		fprintf(stderr,
 			"uxc: create %s failed: the container did not reach created state\n",
 			name);
