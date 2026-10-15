@@ -2123,6 +2123,7 @@ instance_free(struct service_instance *in)
 	free(in->jail.pidfile);
 	free(in->jail.idmap_offset);
 	free(in->jail.consolesocket);
+	free(in->jail.envfile);
 	free(in->seccomp);
 	free(in->seccomp_mode);
 	free(in->seccomp_log);
