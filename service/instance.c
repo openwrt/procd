@@ -1741,8 +1741,9 @@ instance_config_parse(struct service_instance *in)
 		uint32_t vals[3] = { 3600, 5, 5};
 
 		blobmsg_for_each_attr(cur2, tb[INSTANCE_ATTR_RESPAWN], rem) {
-			if ((i >= 3) && (blobmsg_type(cur2) == BLOBMSG_TYPE_STRING))
-				continue;
+			if (i >= 3)
+				break;
+
 			vals[i] = atoi(blobmsg_get_string(cur2));
 			i++;
 		}
