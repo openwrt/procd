@@ -122,6 +122,9 @@ function build_registration(inst) {
 		reg['overlay-size'] = img['overlay-size'];
 	if (inst.env)
 		reg.initenv = inst.env;
+	for (let k in [ 'stop-timeout', 'respawn' ])
+		if (k in img)
+			reg[k] = img[k];
 
 	let prov = [];
 	if (inst.provision || inst.secrets) {
