@@ -74,6 +74,7 @@
 #include "seccomp-trace.h"
 #include "cgroups.h"
 #include "netifd.h"
+#include "../jail-status.h"
 #include "../state-file.h"
 #include "../uptime.h"
 #include "../stdio-fds.h"
@@ -273,6 +274,7 @@ static bool delete_awaited;
 static bool delete_deferred;
 static struct ubus_request_data delete_request;
 static char **restart_argv;
+static int jail_status_fd = -1;
 
 static const char *jail_reason;
 static char jail_reason_owned[64];
@@ -1511,6 +1513,8 @@ static void jail_restart_exec(void)
 
 	INFO("restarting the container\n");
 	syscall(SYS_close_range, 3, ~0U, CLOSE_RANGE_CLOEXEC);
+	if (jail_status_fd > -1)
+		fcntl(jail_status_fd, F_SETFD, 0);
 	execv("/proc/self/exe", argv);
 	ERROR("failed to re-execute for the restart: %m\n");
 	free(argv);
@@ -2036,6 +2040,7 @@ static int jail_return_code = 0;
 static bool jail_reaped;
 static bool jail_exec_acked;
 static bool jail_stop_escalated;
+static struct timespec jail_running_since;
 static bool poststart_pending;
 
 static struct uloop_process jail_process;
@@ -5895,8 +5900,52 @@ static bool instance_event_build(const char *event)
 	return true;
 }
 
+static void jail_status_report(const char *event)
+{
+	struct jail_status st = { 0 };
+	struct timespec now;
+
+	if (jail_status_fd < 0)
+		return;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (!strcmp(event, "instance.ready")) {
+		st.type = JAIL_STATUS_CREATED;
+	} else if (!strcmp(event, "instance.running")) {
+		st.type = JAIL_STATUS_RUNNING;
+		jail_running_since = now;
+	} else if (!strcmp(event, "instance.stopped") ||
+		   !strcmp(event, "instance.create_failed")) {
+		st.type = JAIL_STATUS_STOPPED;
+	} else {
+		return;
+	}
+
+	if (jail_reaped) {
+		st.flags |= JAIL_STATUS_F_REAPED;
+		st.exit_status = jail_return_code;
+	}
+	if (jail_exec_acked) {
+		st.flags |= JAIL_STATUS_F_STARTED;
+		st.runtime = now.tv_sec - jail_running_since.tv_sec;
+	}
+	if (jail_stop_requested)
+		st.flags |= JAIL_STATUS_F_REQUESTED;
+	if (jail_stop_escalated)
+		st.flags |= JAIL_STATUS_F_ESCALATED;
+	if (jail_restarting())
+		st.flags |= JAIL_STATUS_F_RESTARTING;
+	if (container_registered)
+		st.flags |= JAIL_STATUS_F_REGISTERED;
+
+	if (send(jail_status_fd, &st, sizeof(st), MSG_NOSIGNAL) < 0)
+		DEBUG("cannot report %s to procd: %m\n", event);
+}
+
 static void emit_instance_event(const char *event)
 {
+	jail_status_report(event);
+
 	if (!instance_event_build(event))
 		return;
 
@@ -7832,6 +7881,17 @@ static void jail_resources_override(void)
 	blob_buf_free(&b);
 }
 
+static void jail_status_fd_init(void)
+{
+	struct stat st;
+
+	if (fstat(JAIL_STATUS_FD, &st) || !S_ISSOCK(st.st_mode))
+		return;
+
+	fcntl(JAIL_STATUS_FD, F_SETFD, FD_CLOEXEC);
+	jail_status_fd = JAIL_STATUS_FD;
+}
+
 int main(int argc, char **argv)
 {
 	uid_t uid = getuid();
@@ -7845,6 +7905,8 @@ int main(int argc, char **argv)
 	struct list_head envl = LIST_HEAD_INIT(envl);
 	struct env_e *enve, *tmpenve;
 	unsigned short int envn = 0, envc = 0;
+
+	jail_status_fd_init();
 
 	if (uid) {
 		ERROR("not root, aborting: %m\n");
