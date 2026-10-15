@@ -984,6 +984,7 @@ enum {
 	INSTANCE_RESPAWN_COUNT,
 	INSTANCE_NEXT_RESTART,
 	INSTANCE_LAST_RESTARTED,
+	INSTANCE_JAIL_CREATE_EXPIRED,
 	__INSTANCE_MAX,
 };
 
@@ -997,6 +998,8 @@ static const struct blobmsg_policy instance_policy[__INSTANCE_MAX] = {
 	[INSTANCE_RESPAWN_COUNT] = { .name = "respawn_count", .type = BLOBMSG_TYPE_INT32 },
 	[INSTANCE_NEXT_RESTART] = { .name = "next_restart", .type = BLOBMSG_CAST_INT64 },
 	[INSTANCE_LAST_RESTARTED] = { .name = "last_restarted", .type = BLOBMSG_CAST_INT64 },
+	[INSTANCE_JAIL_CREATE_EXPIRED] = { .name = "jail_create_expired",
+					   .type = BLOBMSG_TYPE_BOOL },
 };
 
 enum {
@@ -4529,6 +4532,17 @@ static void last_exit_add(struct blob_buf *b, const char *name, struct runtime_s
 	blob_buf_free(&buf);
 }
 
+static void container_info_create_expired_add(struct blob_buf *b, struct blob_attr *instance)
+{
+	struct blob_attr *ti[__INSTANCE_MAX], *cur;
+
+	blobmsg_parse(instance_policy, __INSTANCE_MAX, ti, blobmsg_data(instance),
+		      blobmsg_len(instance));
+	cur = ti[INSTANCE_JAIL_CREATE_EXPIRED];
+	if (cur && blobmsg_get_bool(cur))
+		blobmsg_add_u8(b, "create-expired", 1);
+}
+
 static void container_info_respawn_add(struct blob_buf *b, struct blob_attr *policy,
 				       struct runtime_state *rs)
 {
@@ -4683,6 +4697,9 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 
 	if (rs && rs->exitcode >= 0)
 		blobmsg_add_u32(b, "exit-code", rs->exitcode);
+
+	if (rs && rs->instance)
+		container_info_create_expired_add(b, rs->instance);
 
 	container_info_network_add(b, rs);
 	last_exit_add(b, name, rs);
