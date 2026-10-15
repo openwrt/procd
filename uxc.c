@@ -4444,6 +4444,27 @@ static const struct last_exit_key last_exit_keys[] = {
 	{ LAST_EXIT_STOPPED_AT, "stopped-at" },
 };
 
+static bool calendar_format(uint64_t uptime, char *buf, size_t len)
+{
+	struct timespec boot, real;
+	struct tm tm;
+	time_t when;
+
+	clock_gettime(CLOCK_BOOTTIME, &boot);
+	clock_gettime(CLOCK_REALTIME, &real);
+	when = real.tv_sec - (boot.tv_sec - (time_t)uptime);
+
+	return gmtime_r(&when, &tm) && strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
+}
+
+static void calendar_add(struct blob_buf *b, const char *name, uint64_t uptime)
+{
+	char buf[sizeof("YYYY-MM-DDThh:mm:ssZ")];
+
+	if (calendar_format(uptime, buf, sizeof(buf)))
+		blobmsg_add_string(b, name, buf);
+}
+
 static bool last_exit_current(struct blob_attr **tb, struct runtime_state *rs)
 {
 	if (!tb[LAST_EXIT_INCARNATION])
@@ -4495,6 +4516,12 @@ static void last_exit_add(struct blob_buf *b, const char *name, struct runtime_s
 		if (!cur)
 			continue;
 
+		if (last_exit_keys[i].idx == LAST_EXIT_CREATED ||
+		    last_exit_keys[i].idx == LAST_EXIT_STOPPED_AT) {
+			calendar_add(b, last_exit_keys[i].name, blobmsg_cast_u64(cur));
+			continue;
+		}
+
 		blobmsg_add_field(b, blobmsg_type(cur), last_exit_keys[i].name,
 				  blobmsg_data(cur), blobmsg_data_len(cur));
 	}
@@ -4520,11 +4547,11 @@ static void container_info_respawn_add(struct blob_buf *b, struct blob_attr *pol
 			blobmsg_add_u32(b, "retry-count",
 					blobmsg_get_u32(ti[INSTANCE_RESPAWN_COUNT]));
 		if (ti[INSTANCE_NEXT_RESTART])
-			blobmsg_add_u64(b, "next-restart",
-					blobmsg_cast_u64(ti[INSTANCE_NEXT_RESTART]));
+			calendar_add(b, "next-restart",
+				     blobmsg_cast_u64(ti[INSTANCE_NEXT_RESTART]));
 		if (ti[INSTANCE_LAST_RESTARTED])
-			blobmsg_add_u64(b, "last-restarted",
-					blobmsg_cast_u64(ti[INSTANCE_LAST_RESTARTED]));
+			calendar_add(b, "last-restarted",
+				     blobmsg_cast_u64(ti[INSTANCE_LAST_RESTARTED]));
 	}
 
 	blobmsg_close_table(b, t);
