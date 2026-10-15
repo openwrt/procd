@@ -5068,7 +5068,7 @@ static int uxc_list(void)
 
 	if (json_output) {
 		blobmsg_close_array(&buf, arr);
-		tmp = blobmsg_format_json_indent(buf.head, true, 0);
+		tmp = blobmsg_format_json_indent(blob_data(buf.head), true, 0);
 		if (!tmp) {
 			blob_buf_free(&buf);
 			return -ENOMEM;
