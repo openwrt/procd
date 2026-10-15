@@ -320,6 +320,8 @@ struct uxc_wait_state {
 	const char *object;
 	char reason[96];
 	uint64_t since_incarnation;
+	char resources_refused[64];
+	int resources_errno;
 	bool escalated;
 	int result;
 	int err;
@@ -334,6 +336,8 @@ enum {
 	UXC_WAIT_ERRNO,
 	UXC_WAIT_INCARNATION,
 	UXC_WAIT_ESCALATED,
+	UXC_WAIT_RESOURCES_REFUSED,
+	UXC_WAIT_RESOURCES_ERRNO,
 	__UXC_WAIT_INST_MAX,
 };
 
@@ -344,6 +348,8 @@ static const struct blobmsg_policy uxc_wait_inst_policy[__UXC_WAIT_INST_MAX] = {
 	[UXC_WAIT_ERRNO]       = { "errno",       BLOBMSG_TYPE_INT32 },
 	[UXC_WAIT_INCARNATION] = { "incarnation", BLOBMSG_TYPE_INT64 },
 	[UXC_WAIT_ESCALATED]   = { "escalated",   BLOBMSG_TYPE_BOOL },
+	[UXC_WAIT_RESOURCES_REFUSED] = { "resources_refused", BLOBMSG_TYPE_STRING },
+	[UXC_WAIT_RESOURCES_ERRNO]   = { "resources_errno",   BLOBMSG_TYPE_INT32 },
 };
 
 static void uxc_wait_timeout_cb(struct uloop_timeout *t)
@@ -391,6 +397,13 @@ static void uxc_wait_event_cb(struct ubus_context *uctx,
 
 	w->escalated = tb[UXC_WAIT_ESCALATED] &&
 		       blobmsg_get_bool(tb[UXC_WAIT_ESCALATED]);
+
+	if (tb[UXC_WAIT_RESOURCES_REFUSED])
+		snprintf(w->resources_refused, sizeof(w->resources_refused), "%s",
+			 blobmsg_get_string(tb[UXC_WAIT_RESOURCES_REFUSED]));
+
+	if (tb[UXC_WAIT_RESOURCES_ERRNO])
+		w->resources_errno = blobmsg_get_u32(tb[UXC_WAIT_RESOURCES_ERRNO]);
 	w->result = result;
 	uloop_end();
 }
@@ -3854,6 +3867,37 @@ static int json_file_write(const char *path, struct blob_attr *root, mode_t mode
 	return ret;
 }
 
+static int resources_file_sync(const char *name, struct blob_attr *table,
+			       char *path, size_t len)
+{
+	static struct blob_buf b;
+	struct blob_attr *cur;
+	int rem, ret;
+
+	if (!table) {
+		ret = rundir_path(name, "resources.json", path, len);
+		if (ret)
+			return ret;
+
+		if (unlink(path) && errno != ENOENT)
+			return -errno;
+
+		return 0;
+	}
+
+	ret = rundir_prepare(name, "resources.json", path, len);
+	if (ret)
+		return ret;
+
+	blob_buf_init(&b, 0);
+	blobmsg_for_each_attr(cur, table, rem)
+		blobmsg_add_blob(&b, cur);
+	ret = json_file_write(path, b.head, 0600);
+	blob_buf_free(&b);
+
+	return ret;
+}
+
 static int settings_edit(const char *name, struct blob_attr *patch, struct blob_attr *unset)
 {
 	struct blob_attr *reg_tb[__CONF_MAX];
@@ -3965,6 +4009,25 @@ static void last_exit_write(const char *name, const char *started_by,
 			strerror(-ret));
 }
 
+static int uxc_create_resources(const char *name, struct settings *us,
+				struct blob_buf *req)
+{
+	struct blob_attr *table = us ? us->tb[CONF_RESOURCES] : NULL;
+	char path[PATH_MAX];
+	int ret;
+
+	ret = resources_file_sync(name, table, path, sizeof(path));
+	if (ret) {
+		fprintf(stderr, "uxc: failed to write the resources of %s: %s\n", name,
+			strerror(-ret));
+		return ret;
+	}
+
+	blobmsg_add_string(req, "resources", path);
+
+	return 0;
+}
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode,
 		      const char *started_by)
@@ -3983,11 +4046,9 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	char envpath[PATH_MAX];
 	void *in, *ins, *j, *m;
 	char dir[PATH_MAX];
-	char reason[128];
 	int notify_fd;
 	int ret = 0;
 	uint32_t id;
-	int err;
 
 	if (!registration_find(name, tb))
 		return -ENOENT;
@@ -4052,6 +4113,13 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 
 	if (!statedir_path(name, dir, sizeof(dir)))
 		blobmsg_add_string(&req, "datadir", dir);
+
+	ret = uxc_create_resources(name, usettings, &req);
+	if (ret) {
+		blob_buf_free(&req);
+		last_exit_write(name, started_by, "uxc.resources", -ret);
+		return ret;
+	}
 
 	blobmsg_add_string(&req, "started_by", started_by);
 
@@ -4173,24 +4241,20 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 		return -ETIMEDOUT;
 	}
 
-	if (!usettings || !usettings->tb[CONF_RESOURCES])
+	if (!wait_state.resources_refused[0])
 		return 0;
 
-	ret = uxc_update_blob(name, usettings->tb[CONF_RESOURCES], reason,
-			      sizeof(reason), &err);
-	if (!ret)
-		return 0;
-
-	if (immediately) {
-		fprintf(stderr, "uxc: warning: resources of %s rejected: %s: %s\n",
-			name, reason, strerror(err));
+	if (!strcmp(started_by, "boot")) {
+		fprintf(stderr, "uxc: warning: resources of %s refused: %s: %s\n", name,
+			wait_state.resources_refused, strerror(wait_state.resources_errno));
 		return 0;
 	}
 
-	fprintf(stderr, "uxc: resources rejected: %s: %s\n", reason, strerror(err));
+	fprintf(stderr, "uxc: resources rejected: %s: %s\n", wait_state.resources_refused,
+		strerror(wait_state.resources_errno));
 	uxc_instance_drop(name);
 
-	return ret;
+	return wait_state.resources_errno ? -wait_state.resources_errno : -EPERM;
 }
 
 static void volume_status_add(struct blob_buf *b, const char *vol, const char *size_key)
@@ -5946,6 +6010,18 @@ static void patch_members_add(struct blob_buf *patch, const char *name,
 	blob_nest_end(patch, c);
 }
 
+static int resources_file_refresh(const char *name)
+{
+	struct settings *us = NULL;
+	char path[PATH_MAX];
+
+	reload_conf();
+	us = avl_find_element(&settings, name, us, avl);
+
+	return resources_file_sync(name, us ? us->tb[CONF_RESOURCES] : NULL, path,
+				   sizeof(path));
+}
+
 static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 			  struct blob_buf *unset, struct blob_buf *files,
 			  const char **name)
@@ -6297,6 +6373,8 @@ next_global:
 			ret = settings_edit(set_name, set_patch.head, set_unset.head);
 			provision_copies_finish(set_name, set_files.head, ret >= 0, &ret);
 		}
+		if (ret >= 0)
+			ret = resources_file_refresh(set_name) ?: ret;
 		blob_buf_free(&set_patch);
 		blob_buf_free(&set_unset);
 		blob_buf_free(&set_files);
