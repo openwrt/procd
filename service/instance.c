@@ -591,7 +591,7 @@ instance_writepid(struct service_instance *in)
 }
 
 static void
-instance_run(struct service_instance *in, int _stdout, int _stderr)
+instance_run(struct service_instance *in, int _stdout, int _stderr, int _status)
 {
 	struct blobmsg_list_node *var;
 	struct blob_attr *cur;
@@ -622,6 +622,9 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 
 	if (in->trace || seccomp)
 		argc += 1;
+
+	if (_status > -1 && in->notify_fd == JAIL_STATUS_FD)
+		in->notify_fd = fcntl(in->notify_fd, F_DUPFD, JAIL_STATUS_FD + 1);
 
 	if (in->has_jail && in->notify_fd > -1) {
 		fcntl(in->notify_fd, F_SETFD, 0);
@@ -679,6 +682,13 @@ instance_run(struct service_instance *in, int _stdout, int _stderr)
 	if (_stderr > -1) {
 		dup2(_stderr, STDERR_FILENO);
 		closefd(_stderr);
+	}
+
+	if (_status == JAIL_STATUS_FD) {
+		fcntl(_status, F_SETFD, 0);
+	} else if (_status > -1) {
+		dup2(_status, JAIL_STATUS_FD);
+		closefd(_status);
 	}
 
 	if (!in->has_jail && in->user && in->pw_gid && initgroups(in->user, in->pw_gid)) {
@@ -868,9 +878,81 @@ instance_signal(struct service_instance *in, int sig)
 	return kill(in->proc.pid, sig);
 }
 
+static const char *
+instance_jail_state_name(struct service_instance *in)
+{
+	if (!in->proc.pending)
+		return "stopped";
+
+	switch (in->jail_last.type) {
+	case JAIL_STATUS_CREATED:
+		return "created";
+	case JAIL_STATUS_RUNNING:
+		return "running";
+	case JAIL_STATUS_STOPPED:
+		return "stopped";
+	default:
+		return "creating";
+	}
+}
+
+static void
+instance_jail_status_close(struct service_instance *in)
+{
+	if (in->jail_status.fd < 0)
+		return;
+
+	uloop_fd_delete(&in->jail_status);
+	close(in->jail_status.fd);
+	in->jail_status.fd = -1;
+}
+
+static void
+instance_jail_status_update(struct service_instance *in, const struct jail_status *st)
+{
+	in->jail_last = *st;
+	in->jail_state_since = uptime_get();
+}
+
+static bool
+instance_jail_status_read(struct service_instance *in)
+{
+	struct jail_status st;
+	ssize_t len;
+
+	do {
+		len = recv(in->jail_status.fd, &st, sizeof(st), MSG_DONTWAIT);
+		if (len == sizeof(st))
+			instance_jail_status_update(in, &st);
+	} while (len > 0 || (len < 0 && errno == EINTR));
+
+	return len < 0 && errno == EAGAIN;
+}
+
+static void
+instance_jail_status_cb(struct uloop_fd *fd, unsigned int events)
+{
+	struct service_instance *in = container_of(fd, struct service_instance, jail_status);
+
+	if (!instance_jail_status_read(in))
+		instance_jail_status_close(in);
+}
+
+static void
+instance_jail_status_open(struct service_instance *in, int fd)
+{
+	memset(&in->jail_last, 0, sizeof(in->jail_last));
+	in->jail_state_since = uptime_get();
+	in->jail_reporting = true;
+	in->jail_status.fd = fd;
+	in->jail_status.cb = instance_jail_status_cb;
+	uloop_fd_add(&in->jail_status, ULOOP_READ);
+}
+
 void
 instance_start(struct service_instance *in)
 {
+	int spair[2] = { -1, -1 };
 	int opipe[2] = { -1, -1 };
 	int epipe[2] = { -1, -1 };
 	sigset_t oldset;
@@ -914,6 +996,13 @@ instance_start(struct service_instance *in)
 	if (!in->valid)
 		return;
 
+	instance_jail_status_close(in);
+	if (in->has_jail &&
+	    socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, spair)) {
+		ULOG_WARN("socketpair() failed: %m\n");
+		spair[0] = spair[1] = -1;
+	}
+
 	in->incarnation = ++last_incarnation;
 
 	procd_signal_block(&oldset);
@@ -921,6 +1010,8 @@ instance_start(struct service_instance *in)
 	pid = fork();
 	if (pid < 0) {
 		procd_signal_restore(&oldset);
+		closefd(spair[0]);
+		closefd(spair[1]);
 		return;
 	}
 
@@ -947,7 +1038,8 @@ instance_start(struct service_instance *in)
 			exit(127);
 		}
 
-		instance_run(in, opipe[1], epipe[1]);
+		closefd(spair[0]);
+		instance_run(in, opipe[1], epipe[1], spair[1]);
 		return;
 	}
 
@@ -968,6 +1060,11 @@ instance_start(struct service_instance *in)
 		ustream_fd_init(&in->_stdout, opipe[0]);
 		closefd(opipe[1]);
 		fcntl(opipe[0], F_SETFD, FD_CLOEXEC);
+	}
+
+	if (spair[0] > -1) {
+		closefd(spair[1]);
+		instance_jail_status_open(in, spair[0]);
 	}
 
 	if (epipe[0] > -1) {
@@ -1343,6 +1440,11 @@ instance_exit(struct uloop_process *p, int ret)
 	in->exit_code = instance_exit_code(ret);
 	uloop_timeout_cancel(&in->timeout);
 	uloop_timeout_cancel(&in->watchdog.timeout);
+
+	if (in->jail_status.fd > -1) {
+		instance_jail_status_read(in);
+		instance_jail_status_close(in);
+	}
 
 	if (in->halt)
 		instance_removepid(in);
@@ -2288,6 +2390,7 @@ instance_free(struct service_instance *in)
 	instance_free_stdio(in);
 	instance_free_stdio_fds(in);
 	instance_free_notify_fd(in);
+	instance_jail_status_close(in);
 	instance_free_pidfd(in);
 	uloop_process_delete(&in->proc);
 	uloop_timeout_cancel(&in->timeout);
@@ -2347,6 +2450,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->stdio_fd[0] = in->stdio_fd[1] = in->stdio_fd[2] = -1;
 	in->notify_fd = -1;
 	in->proc_pidfd = -1;
+	in->jail_status.fd = -1;
 
 	in->_stdout.fd.fd = -2;
 	in->_stdout.stream.string_data = true;
@@ -2392,6 +2496,10 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 		blobmsg_add_u32(b, "pid", in->proc.pid);
 	if (in->incarnation)
 		blobmsg_add_u64(b, "incarnation", in->incarnation);
+	if (in->jail_reporting) {
+		blobmsg_add_string(b, "jail_state", instance_jail_state_name(in));
+		blobmsg_add_u64(b, "jail_state_since", in->jail_state_since);
+	}
 	if (in->command)
 		blobmsg_add_blob(b, in->command);
 	if (in->bundle)

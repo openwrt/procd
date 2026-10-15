@@ -19,6 +19,7 @@
 #include <libubox/uloop.h>
 #include <libubox/ustream.h>
 #include "../utils/utils.h"
+#include "../jail-status.h"
 
 #define RESPAWN_ERROR	(5 * 60)
 #define SIGNALLED_OFFSET 128
@@ -126,6 +127,10 @@ struct service_instance {
 	struct blob_attr *config;
 	struct uloop_process proc;
 	int proc_pidfd;
+	struct uloop_fd jail_status;
+	struct jail_status jail_last;
+	uint64_t jail_state_since;
+	bool jail_reporting;
 	struct uloop_timeout timeout;
 	struct uloop_timeout cgroup_timeout;
 	struct uloop_fd cgroup_events;
