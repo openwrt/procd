@@ -6011,6 +6011,57 @@ static void reconcile_provision(const char *base)
 	globfree(&gl);
 }
 
+static bool reconcile_volume_owned(const char *name, const char *vol)
+{
+	struct blob_attr *cur, *tb[__CONF_MAX];
+	size_t len = strlen(name), rlen;
+	const char *reg;
+	int rem;
+
+	if (strncmp(vol, name, len) || (vol[len] && vol[len] != '.'))
+		return false;
+
+	blobmsg_for_each_attr(cur, blob_data(conf.head), rem) {
+		blobmsg_parse(conf_policy, __CONF_MAX, tb, blobmsg_data(cur), blobmsg_len(cur));
+		if (!tb[CONF_NAME])
+			continue;
+
+		reg = blobmsg_get_string(tb[CONF_NAME]);
+		rlen = strlen(reg);
+		if (rlen > len && !strncmp(vol, reg, rlen) && (!vol[rlen] || vol[rlen] == '.'))
+			return false;
+	}
+
+	return true;
+}
+
+static void reconcile_kept_volumes(const char *name)
+{
+	struct blob_attr *tb[__UVOL_ENTRY_MAX];
+	struct blob_attr *vols, *cur;
+	bool first = true;
+	const char *vol;
+	int rem;
+
+	vols = uvol_list_volumes();
+	blobmsg_for_each_attr(cur, vols, rem) {
+		blobmsg_parse(uvol_entry_policy, __UVOL_ENTRY_MAX, tb,
+			      blobmsg_data(cur), blobmsg_len(cur));
+		if (!tb[UVOL_ENTRY_NAME])
+			continue;
+
+		vol = blobmsg_get_string(tb[UVOL_ENTRY_NAME]);
+		if (!reconcile_volume_owned(name, vol))
+			continue;
+
+		if (first)
+			fprintf(stderr, "uxc: container '%s' removed; persistent data volumes "
+				"were kept. To delete this data, run:\n", name);
+		fprintf(stderr, "  uvol remove %s\n", vol);
+		first = false;
+	}
+}
+
 static int reconcile_purge(const char *base, const char *name, const char *statedir)
 {
 	char path[PATH_MAX];
@@ -6088,6 +6139,7 @@ static int reconcile_base(const char *base, int *purged)
 			ret = -EIO;
 			continue;
 		}
+		reconcile_kept_volumes(name);
 		++*purged;
 	}
 
