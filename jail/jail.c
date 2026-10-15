@@ -4504,30 +4504,15 @@ static const char *annotation_get(struct blob_attr *attrs, const char *key)
 	return NULL;
 }
 
-static struct timespec jail_created;
 static uint64_t jail_created_uptime;
 
 static void oci_state_fill_runtime(struct blob_buf *b)
 {
-	char buf[40];
-	struct tm tm;
-	size_t len;
-
 	if (opts.extroot)
 		blobmsg_add_string(b, "rootfs", opts.extroot);
 
-	if (!jail_created.tv_sec)
-		return;
-
-	if (!gmtime_r(&jail_created.tv_sec, &tm))
-		return;
-
-	len = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
-	if (!len)
-		return;
-
-	snprintf(buf + len, sizeof(buf) - len, ".%09ldZ", jail_created.tv_nsec);
-	blobmsg_add_string(b, "created", buf);
+	if (jail_created_uptime)
+		blobmsg_add_u64(b, "created", jail_created_uptime);
 }
 
 static void oci_state_fill_network(struct blob_buf *b)
@@ -7824,7 +7809,6 @@ static void post_main(struct uloop_timeout *t)
 		free_and_exit(EXIT_FAILURE);
 	}
 
-	clock_gettime(CLOCK_REALTIME, &jail_created);
 	jail_created_uptime = uptime_get();
 	jail_oci_state = OCI_STATE_CREATED;
 

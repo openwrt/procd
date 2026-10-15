@@ -1045,7 +1045,7 @@ static const struct blobmsg_policy state_policy[__STATE_MAX] = {
 	[STATE_BUNDLE] = { .name = "bundle", .type = BLOBMSG_TYPE_STRING },
 	[STATE_ANNOTATIONS] = { .name = "annotations", .type = BLOBMSG_TYPE_TABLE },
 	[STATE_NETWORK] = { .name = "org.openwrt.network", .type = BLOBMSG_TYPE_TABLE },
-	[STATE_CREATED] = { .name = "created", .type = BLOBMSG_TYPE_STRING },
+	[STATE_CREATED] = { .name = "created", .type = BLOBMSG_CAST_INT64 },
 	[STATE_ROOTFS] = { .name = "rootfs", .type = BLOBMSG_TYPE_STRING },
 };
 
@@ -4709,8 +4709,12 @@ static int uxc_state(char *name)
 
 	blob_buf_init(&buf, 0);
 	if (rsstate && rsstate->ocistate) {
-		blobmsg_for_each_attr(cur, rsstate->ocistate, rem)
-			blobmsg_add_blob(&buf, cur);
+		blobmsg_for_each_attr(cur, rsstate->ocistate, rem) {
+			if (!strcmp(blobmsg_name(cur), "created"))
+				calendar_add(&buf, "created", blobmsg_cast_u64(cur));
+			else
+				blobmsg_add_blob(&buf, cur);
+		}
 	} else {
 		blobmsg_add_string(&buf, "ociVersion", OCI_VERSION_STRING);
 		blobmsg_add_string(&buf, "id", tb[CONF_JAIL] ?
@@ -4789,6 +4793,7 @@ static int uxc_list(void)
 	size_t id_w = 2, pid_w = 3, status_w = 6, bundle_w = 6, created_w = 7, owner_w = 5;
 	struct blob_attr *cur, *tb[__CONF_MAX], *ts[__STATE_MAX], *netinfo;
 	char *name, *bundle, *ocistatus, *status, *created, *rootfs, *tmp;
+	char createdbuf[sizeof("YYYY-MM-DDThh:mm:ssZ")];
 	struct runtime_state *rsstate = NULL;
 	struct settings *usettings = NULL;
 	static struct blob_buf buf;
@@ -4848,8 +4853,10 @@ static int uxc_list(void)
 					container_pid = blobmsg_get_u32(ts[STATE_PID]);
 				if (ts[STATE_BUNDLE])
 					bundle = blobmsg_get_string(ts[STATE_BUNDLE]);
-				if (ts[STATE_CREATED])
-					created = blobmsg_get_string(ts[STATE_CREATED]);
+				if (ts[STATE_CREATED] &&
+				    calendar_format(blobmsg_cast_u64(ts[STATE_CREATED]),
+						    createdbuf, sizeof(createdbuf)))
+					created = createdbuf;
 				rootfs = ts[STATE_ROOTFS] ? blobmsg_get_string(ts[STATE_ROOTFS]) : NULL;
 				netinfo = ts[STATE_NETWORK];
 			}
