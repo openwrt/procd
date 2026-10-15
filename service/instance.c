@@ -43,6 +43,8 @@
 #include "instance.h"
 #include "vrf.h"
 
+#define JAIL_CREATE_TIMEOUT_DEFAULT 120
+
 #define UJAIL_BIN_PATH "/sbin/ujail"
 #define CGROUP_BASEDIR "/sys/fs/cgroup/services"
 #define CGROUP_DRAIN_TIMEOUT_MSEC 1000
@@ -160,6 +162,7 @@ enum {
 	JAIL_ATTR_SYSTEMDCGROUP,
 	JAIL_ATTR_ENVFILE,
 	JAIL_ATTR_STOP_TIMEOUT,
+	JAIL_ATTR_CREATE_TIMEOUT,
 	JAIL_ATTR_STATEDIR,
 	JAIL_ATTR_DATADIR,
 	JAIL_ATTR_RESOURCES,
@@ -190,6 +193,7 @@ static const struct blobmsg_policy jail_attr[__JAIL_ATTR_MAX] = {
 	[JAIL_ATTR_SYSTEMDCGROUP] = { "systemdcgroup", BLOBMSG_TYPE_BOOL },
 	[JAIL_ATTR_ENVFILE] = { "envfile", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_STOP_TIMEOUT] = { "stop_timeout", BLOBMSG_TYPE_INT32 },
+	[JAIL_ATTR_CREATE_TIMEOUT] = { "create_timeout", BLOBMSG_TYPE_INT32 },
 	[JAIL_ATTR_STATEDIR] = { "statedir", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_DATADIR] = { "datadir", BLOBMSG_TYPE_STRING },
 	[JAIL_ATTR_RESOURCES] = { "resources", BLOBMSG_TYPE_STRING },
@@ -957,6 +961,7 @@ instance_jail_state_name(struct service_instance *in)
 static void
 instance_jail_status_close(struct service_instance *in)
 {
+	uloop_timeout_cancel(&in->jail_create_timer);
 	if (in->jail_status.fd < 0)
 		return;
 
@@ -968,6 +973,9 @@ instance_jail_status_close(struct service_instance *in)
 static bool
 instance_jail_failed(struct service_instance *in, const struct jail_status *st)
 {
+	if (in->jail_create_expired)
+		return in->respawn_run;
+
 	if (st->flags & (JAIL_STATUS_F_REQUESTED | JAIL_STATUS_F_RESTARTING))
 		return false;
 
@@ -982,6 +990,7 @@ instance_jail_status_update(struct service_instance *in, const struct jail_statu
 {
 	in->jail_last = *st;
 	in->jail_state_since = uptime_get();
+	uloop_timeout_cancel(&in->jail_create_timer);
 
 	if (st->type != JAIL_STATUS_STOPPED || !in->bundle || !in->respawn ||
 	    !in->respawn_on_failure || in->halt || !instance_jail_failed(in, st))
@@ -1007,6 +1016,22 @@ instance_jail_status_read(struct service_instance *in)
 }
 
 static void
+instance_jail_create_timeout(struct uloop_timeout *t)
+{
+	struct service_instance *in = container_of(t, struct service_instance, jail_create_timer);
+
+	if (in->jail_status.fd > -1)
+		instance_jail_status_read(in);
+
+	if (in->jail_last.type || !in->proc.pending)
+		return;
+
+	LOG("Instance %s::%s was not created in time, stopping it\n", in->srv->name, in->name);
+	in->jail_create_expired = true;
+	instance_signal(in, SIGTERM);
+}
+
+static void
 instance_jail_status_cb(struct uloop_fd *fd, unsigned int events)
 {
 	struct service_instance *in = container_of(fd, struct service_instance, jail_status);
@@ -1018,12 +1043,17 @@ instance_jail_status_cb(struct uloop_fd *fd, unsigned int events)
 static void
 instance_jail_status_open(struct service_instance *in, int fd)
 {
+	uint64_t ms = (in->jail.create_timeout ?: JAIL_CREATE_TIMEOUT_DEFAULT) * 1000ULL;
+
 	memset(&in->jail_last, 0, sizeof(in->jail_last));
 	in->jail_state_since = uptime_get();
 	in->jail_reporting = true;
+	in->jail_create_expired = false;
 	in->jail_status.fd = fd;
 	in->jail_status.cb = instance_jail_status_cb;
 	uloop_fd_add(&in->jail_status, ULOOP_READ);
+	if (in->bundle)
+		uloop_timeout_set(&in->jail_create_timer, ms < INT_MAX ? ms : INT_MAX);
 }
 
 void
@@ -1731,6 +1761,9 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (string_changed(in->jail.resources, in_new->jail.resources))
 		return true;
 
+	if (in->jail.create_timeout != in_new->jail.create_timeout)
+		return true;
+
 	if (in->jail.stop_timeout != in_new->jail.stop_timeout)
 		return true;
 
@@ -1950,6 +1983,9 @@ instance_jail_parse(struct service_instance *in, struct blob_attr *attr)
 		if (jail->stop_timeout)
 			jail->argc += 2;
 	}
+
+	if (tb[JAIL_ATTR_CREATE_TIMEOUT])
+		jail->create_timeout = blobmsg_get_u32(tb[JAIL_ATTR_CREATE_TIMEOUT]);
 
 	if (tb[JAIL_ATTR_SETNS]) {
 		struct blob_attr *cur;
@@ -2349,6 +2385,7 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->has_jail = in_src->has_jail;
 	in->jail.flags = in_src->jail.flags;
 	in->jail.stop_timeout = in_src->jail.stop_timeout;
+	in->jail.create_timeout = in_src->jail.create_timeout;
 	in->jail.argc = in_src->jail.argc;
 	in->vrf_ifindex = in_src->vrf_ifindex;
 
@@ -2507,6 +2544,7 @@ instance_init(struct service_instance *in, struct service *s, struct blob_attr *
 	in->name = blobmsg_name(config);
 	in->config = config;
 	in->timeout.cb = instance_timeout;
+	in->jail_create_timer.cb = instance_jail_create_timeout;
 	in->proc.cb = instance_exit;
 	in->cgroup_events.fd = -1;
 	in->cgroup_events.cb = instance_cgroup_events_cb;
@@ -2569,6 +2607,8 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 	if (in->jail_reporting) {
 		blobmsg_add_string(b, "jail_state", instance_jail_state_name(in));
 		blobmsg_add_u64(b, "jail_state_since", in->jail_state_since);
+		if (in->jail_create_expired)
+			blobmsg_add_u8(b, "jail_create_expired", 1);
 	}
 	if (in->command)
 		blobmsg_add_blob(b, in->command);
@@ -2693,6 +2733,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 
 			if (in->jail.stop_timeout)
 				blobmsg_add_u32(b, "stop_timeout", in->jail.stop_timeout);
+
+			if (in->jail.create_timeout)
+				blobmsg_add_u32(b, "create_timeout", in->jail.create_timeout);
 
 			if (in->jail.statedir)
 				blobmsg_add_string(b, "statedir", in->jail.statedir);

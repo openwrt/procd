@@ -54,6 +54,7 @@ struct jail {
 	struct blobmsg_list mount;
 	struct blobmsg_list setns;
 	uint32_t stop_timeout;
+	uint32_t create_timeout;
 	int argc;
 };
 
@@ -131,6 +132,8 @@ struct service_instance {
 	struct jail_status jail_last;
 	uint64_t jail_state_since;
 	bool jail_reporting;
+	struct uloop_timeout jail_create_timer;
+	bool jail_create_expired;
 	bool respawning;
 	bool respawn_run;
 	bool exit_signalled;
