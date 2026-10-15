@@ -214,10 +214,10 @@ let bridge_vlan_ids = function(br) {
 };
 
 let bridge_port = function(br, pvid, vlans) {
-	let port = { device: br }, flags = [], have, v;
+	let port = { bridge: br }, flags = [], have, v;
 
 	if (pvid != null)
-		push(flags, pvid + ":*");
+		push(flags, pvid + ":u");
 	if (length(vlans))
 		have = bridge_vlan_ids(br);
 	for (v in vlans) {
@@ -225,14 +225,19 @@ let bridge_port = function(br, pvid, vlans) {
 			warn(sprintf("uxc-net: VLAN %d on '%s' is already the network's own VLAN\n", v.vid, br));
 			return null;
 		}
+		if (!v.tagged) {
+			warn(sprintf("uxc-net: VLAN %d on '%s' must be tagged, a port has one untagged VLAN\n",
+				     v.vid, br));
+			return null;
+		}
 		if (index(have, v.vid) < 0) {
 			warn(sprintf("uxc-net: bridge '%s' has no VLAN %d\n", br, v.vid));
 			return null;
 		}
-		push(flags, v.vid + (v.tagged ? ":t" : ""));
+		push(flags, sprintf("%d", v.vid));
 	}
 	if (length(flags))
-		port.vlans = flags;
+		port.bridge_vlan = flags;
 	return port;
 };
 
@@ -745,15 +750,13 @@ let autonet_create = function(shared, net, vh) {
 };
 
 let spec_new = function() {
-	return { devices: {}, interfaces: {}, bridge_ports: {}, firewall: [], dhcp: [],
-		 summary: null };
+	return { devices: {}, interfaces: {}, firewall: [], dhcp: [], summary: null };
 };
 
 let instance_publish = function(name, spec) {
 	return call("service", "set_data", { name: name, instance: name, data: {
 		"network-device": spec.devices,
 		"network-interface": spec.interfaces,
-		"bridge-port": spec.bridge_ports,
 		firewall: spec.firewall,
 		dhcp: spec.dhcp,
 		"container-network": spec.summary,
@@ -818,10 +821,9 @@ let bridged_up = function(name, ann, attach, m, spec, shared, owned) {
 		br = bridge_of(net, status, vlans);
 		if (!br)
 			return 1;
-		spec.bridge_ports[vh] = br;
 	}
 
-	spec.devices[vh] = veth_device(vc, m, "h", "c");
+	spec.devices[vh] = { ...veth_device(vc, m, "h", "c"), ...(br ?? {}) };
 	spec.interfaces[accif(name)] = jailed_interface(name, vc, "eth0", net);
 	spec.summary = {
 		attach: "bridged",
