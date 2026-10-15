@@ -34,9 +34,46 @@
 
 AVL_TREE(services, avl_strcmp, false, NULL);
 AVL_TREE(containers, avl_strcmp, false, NULL);
+static AVL_TREE(containers_seen, avl_strcmp, false, NULL);
 static struct blob_buf b;
 static struct ubus_context *ctx;
 static struct ubus_object main_object;
+
+static struct avl_node *
+container_seen_find(const char *name)
+{
+	return avl_find(&containers_seen, name);
+}
+
+static void
+container_seen_add(const char *name)
+{
+	struct avl_node *node;
+	char *key;
+
+	if (container_seen_find(name))
+		return;
+
+	node = calloc_a(sizeof(*node), &key, strlen(name) + 1);
+	if (!node)
+		return;
+
+	node->key = strcpy(key, name);
+	avl_insert(&containers_seen, node);
+}
+
+static void
+container_seen_del(const char *name)
+{
+	struct avl_node *node;
+
+	node = container_seen_find(name);
+	if (!node)
+		return;
+
+	avl_delete(&containers_seen, node);
+	free(node);
+}
 
 static void
 service_instance_add(struct service *s, struct blob_attr *attr, int *stdio_fds,
@@ -126,6 +163,7 @@ enum {
 	SERVICE_SET_VALIDATE,
 	SERVICE_SET_AUTOSTART,
 	SERVICE_SET_DATA,
+	SERVICE_SET_ONCE,
 	__SERVICE_SET_MAX
 };
 
@@ -137,6 +175,7 @@ static const struct blobmsg_policy service_set_attrs[__SERVICE_SET_MAX] = {
 	[SERVICE_SET_VALIDATE] = { "validate", BLOBMSG_TYPE_ARRAY },
 	[SERVICE_SET_AUTOSTART] = { "autostart", BLOBMSG_TYPE_BOOL },
 	[SERVICE_SET_DATA] = { "data", BLOBMSG_TYPE_TABLE },
+	[SERVICE_SET_ONCE] = { "once", BLOBMSG_TYPE_BOOL },
 };
 
 static int
@@ -447,6 +486,18 @@ container_handle_features(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
+static void
+container_add_reply(struct ubus_context *ctx, struct ubus_request_data *req,
+		    bool added)
+{
+	if (!req)
+		return;
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_u8(&b, "added", added);
+	ubus_send_reply(ctx, req, b.head);
+}
+
 static int
 service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		   struct ubus_request_data *req, const char *method,
@@ -459,6 +510,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	const char *name;
 	bool container = is_container_obj(obj);
 	bool add = !strcmp(method, "add");
+	bool once = false;
 	int sock, ret;
 
 	blobmsg_parse(service_set_attrs, __SERVICE_SET_MAX, tb, blobmsg_data(msg), blobmsg_data_len(msg));
@@ -467,6 +519,8 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		return UBUS_STATUS_INVALID_ARGUMENT;
 
 	name = blobmsg_data(cur);
+	if (container && add && tb[SERVICE_SET_ONCE])
+		once = blobmsg_get_bool(tb[SERVICE_SET_ONCE]);
 
 	sock = req ? ubus_request_get_caller_fd(req) : -1;
 	if (sock > -1) {
@@ -474,6 +528,12 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 			ULOG_WARN("failed to receive descriptors for %s: %m\n", name);
 
 		close(sock);
+	}
+
+	if (once && container_seen_find(name)) {
+		container_add_reply(ctx, req, false);
+		ret = UBUS_STATUS_OK;
+		goto out;
 	}
 
 	if (container)
@@ -484,7 +544,7 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 	if (s) {
 		P_DEBUG(2, "Update service %s\n", name);
 		ret = service_update(s, tb, add, false, stdio_fds, &notify_fd);
-		goto out;
+		goto done;
 	}
 
 	P_DEBUG(2, "Create service %s\n", name);
@@ -510,6 +570,11 @@ service_handle_set(struct ubus_context *ctx, struct ubus_object *obj,
 		service_event("service.start", s->name, NULL);
 	}
 
+done:
+	if (!ret && container)
+		container_seen_add(name);
+	if (!ret && once)
+		container_add_reply(ctx, req, true);
 out:
 	stdio_fds_close(stdio_fds);
 	if (notify_fd > -1)
@@ -604,6 +669,9 @@ service_handle_delete(struct ubus_context *ctx, struct ubus_object *obj,
 
 	if (!s)
 		return UBUS_STATUS_NOT_FOUND;
+
+	if (container)
+		container_seen_del(blobmsg_data(cur));
 
 	cur = tb[SERVICE_DEL_ATTR_INSTANCE];
 	if (!cur) {
