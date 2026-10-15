@@ -1305,7 +1305,7 @@ instance_timeout(struct uloop_timeout *t)
 	if (in->halt) {
 		LOG("Instance %s::%s pid %d not stopped on SIGTERM, sending SIGKILL instead\n",
 				in->srv->name, in->name, in->proc.pid);
-		if (in->has_jail)
+		if (in->has_cgroup)
 			instance_kill_cgroup(in->srv->name, in->name);
 
 		instance_signal(in, SIGKILL);
@@ -1455,7 +1455,7 @@ instance_exit_done(struct service_instance *in)
 	if (in->proc.pending)
 		return;
 
-	if (in->has_jail)
+	if (in->has_cgroup)
 		instance_rmdir_cgroup(in->srv->name, in->name);
 
 	runtime = in->stop.tv_sec - in->start.tv_sec;
@@ -1567,7 +1567,7 @@ instance_exit(struct uloop_process *p, int ret)
 
 	service_event("instance.stop", in->srv->name, in->name);
 
-	if (!in->has_jail) {
+	if (!in->has_cgroup) {
 		instance_exit_done(in);
 		return;
 	}
