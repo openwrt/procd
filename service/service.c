@@ -1213,11 +1213,45 @@ void service_event_instance_exit(const char *type, struct service_instance *in)
 	ubus_notify(ctx, &main_object, type, b.head, -1);
 }
 
+static int
+container_handle_respawn_cancel(struct ubus_context *ctx, struct ubus_object *obj,
+				struct ubus_request_data *req, const char *method,
+				struct blob_attr *msg)
+{
+	struct blob_attr *tb[__SERVICE_DEL_ATTR_MAX], *cur;
+	int ret = UBUS_STATUS_NOT_FOUND;
+	struct service_instance *in;
+	struct service *s;
+
+	blobmsg_parse(service_del_attrs, __SERVICE_DEL_ATTR_MAX, tb, blobmsg_data(msg),
+		      blobmsg_data_len(msg));
+
+	cur = tb[SERVICE_DEL_ATTR_NAME];
+	if (!cur)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	s = avl_find_element(&containers, blobmsg_data(cur), s, avl);
+	if (!s)
+		return UBUS_STATUS_NOT_FOUND;
+
+	cur = tb[SERVICE_DEL_ATTR_INSTANCE];
+	vlist_for_each_element(&s->instances, in, node) {
+		if (cur && strcmp(in->name, blobmsg_data(cur)))
+			continue;
+
+		if (instance_respawn_cancel(in))
+			ret = UBUS_STATUS_OK;
+	}
+
+	return ret;
+}
+
 static struct ubus_method container_object_methods[] = {
 	UBUS_METHOD("set", service_handle_set, service_set_attrs),
 	UBUS_METHOD("add", service_handle_set, service_set_attrs),
 	UBUS_METHOD("list", service_handle_list, service_list_attrs),
 	UBUS_METHOD("delete", service_handle_delete, service_del_attrs),
+	UBUS_METHOD("respawn_cancel", container_handle_respawn_cancel, service_del_attrs),
 	UBUS_METHOD("state", service_handle_state, service_state_attrs),
 	UBUS_METHOD_NOARG("get_features", container_handle_features),
 	UBUS_METHOD("console_set", container_handle_console, container_console_policy),

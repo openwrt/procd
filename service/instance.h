@@ -164,6 +164,7 @@ struct service_instance {
 void instance_start(struct service_instance *in);
 int instance_signal(struct service_instance *in, int sig);
 void instance_stop(struct service_instance *in, bool halt);
+bool instance_respawn_cancel(struct service_instance *in);
 void instance_update(struct service_instance *in, struct service_instance *in_new);
 void instance_init(struct service_instance *in, struct service *s, struct blob_attr *config);
 void instance_stdio_set(struct service_instance *in, int *fds);

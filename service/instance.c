@@ -2490,6 +2490,18 @@ instance_notify_set(struct service_instance *in, int *fd)
 	*fd = -1;
 }
 
+bool
+instance_respawn_cancel(struct service_instance *in)
+{
+	if (!in->respawn_next || in->halt)
+		return false;
+
+	uloop_timeout_cancel(&in->timeout);
+	in->respawn_next = 0;
+
+	return true;
+}
+
 void
 instance_free(struct service_instance *in)
 {
