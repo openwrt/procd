@@ -4038,6 +4038,22 @@ static int uxc_create_resources(const char *name, struct settings *us,
 	return 0;
 }
 
+static uint32_t stop_timeout_configured(struct blob_attr **tb, struct settings *us)
+{
+	struct blob_attr *cur = tb[CONF_STOP_TIMEOUT];
+	uint32_t secs;
+
+	if (us && us->tb[CONF_STOP_TIMEOUT])
+		cur = us->tb[CONF_STOP_TIMEOUT];
+
+	if (!cur)
+		return 0;
+
+	secs = blobmsg_get_u32(cur);
+
+	return secs <= INT_MAX / 1000 ? secs : 0;
+}
+
 static void uxc_create_respawn_add(struct blob_buf *req, const char *name,
 				   struct blob_attr **tb, struct settings *us)
 {
@@ -4083,6 +4099,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	char hostsbind[PATH_MAX];
 	char envpath[PATH_MAX];
 	void *in, *ins, *j, *m;
+	uint32_t stop_timeout;
 	char dir[PATH_MAX];
 	int notify_fd;
 	int ret = 0;
@@ -4143,9 +4160,9 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (tb[CONF_IDMAP_OFFSET])
 		blobmsg_add_string(&req, "idmap_offset", blobmsg_get_string(tb[CONF_IDMAP_OFFSET]));
 
-	if (usettings && usettings->tb[CONF_STOP_TIMEOUT])
-		blobmsg_add_u32(&req, "stop_timeout",
-				blobmsg_get_u32(usettings->tb[CONF_STOP_TIMEOUT]));
+	stop_timeout = stop_timeout_configured(tb, usettings);
+	if (stop_timeout)
+		blobmsg_add_u32(&req, "stop_timeout", stop_timeout);
 
 	if (!rundir_prepare(name, NULL, dir, sizeof(dir)))
 		blobmsg_add_string(&req, "statedir", dir);
@@ -4386,15 +4403,13 @@ static void container_info_provision_add(struct blob_buf *b, struct blob_attr **
 	blobmsg_close_array(b, a);
 }
 
-static uint32_t stop_timeout_effective(struct settings *us, struct runtime_state *rs)
+static uint32_t stop_timeout_effective(struct blob_attr **tb, struct settings *us,
+				       struct runtime_state *rs)
 {
 	if (runtime_live(rs))
 		return rs->stop_timeout ?: UXC_STOP_TIMEOUT;
 
-	if (us && us->tb[CONF_STOP_TIMEOUT])
-		return blobmsg_get_u32(us->tb[CONF_STOP_TIMEOUT]);
-
-	return UXC_STOP_TIMEOUT;
+	return stop_timeout_configured(tb, us) ?: UXC_STOP_TIMEOUT;
 }
 
 enum {
@@ -4676,7 +4691,7 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 	if (us && us->tb[CONF_ENV])
 		blobmsg_add_blob(b, us->tb[CONF_ENV]);
 
-	blobmsg_add_u32(b, "stop-timeout", stop_timeout_effective(us, rs));
+	blobmsg_add_u32(b, "stop-timeout", stop_timeout_effective(tb, us, rs));
 
 	if (us && us->tb[CONF_RESOURCES])
 		blobmsg_add_blob(b, us->tb[CONF_RESOURCES]);
