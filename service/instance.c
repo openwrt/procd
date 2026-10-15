@@ -22,6 +22,7 @@
 #include <net/if.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <fcntl.h>
@@ -35,6 +36,7 @@
 #include <libubox/utils.h>
 
 #include "../procd.h"
+#include "../uptime.h"
 #include "../rcS.h"
 
 #include "service.h"
@@ -53,6 +55,7 @@ enum {
 	INSTANCE_ATTR_FILE,
 	INSTANCE_ATTR_TRIGGER,
 	INSTANCE_ATTR_RESPAWN,
+	INSTANCE_ATTR_RESPAWN_POLICY,
 	INSTANCE_ATTR_NICE,
 	INSTANCE_ATTR_LIMITS,
 	INSTANCE_ATTR_WATCH,
@@ -89,6 +92,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_FILE] = { "file", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_TRIGGER] = { "triggers", BLOBMSG_TYPE_ARRAY },
 	[INSTANCE_ATTR_RESPAWN] = { "respawn", BLOBMSG_TYPE_ARRAY },
+	[INSTANCE_ATTR_RESPAWN_POLICY] = { "respawn_policy", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_NICE] = { "nice", BLOBMSG_TYPE_INT32 },
 	[INSTANCE_ATTR_LIMITS] = { "limits", BLOBMSG_TYPE_TABLE },
 	[INSTANCE_ATTR_WATCH] = { "watch", BLOBMSG_TYPE_ARRAY },
@@ -114,6 +118,23 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
 	[INSTANCE_ATTR_TMPOVERLAYSIZE] = { "tmpoverlaysize", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_BUNDLE] = { "bundle", BLOBMSG_TYPE_STRING },
 	[INSTANCE_ATTR_WATCHDOG] = { "watchdog", BLOBMSG_TYPE_ARRAY },
+};
+
+enum {
+	RESPAWN_POLICY_MIN,
+	RESPAWN_POLICY_MAX,
+	RESPAWN_POLICY_MULTIPLIER,
+	RESPAWN_POLICY_MAX_RETRIES,
+	RESPAWN_POLICY_RESET_PERIOD,
+	__RESPAWN_POLICY_MAX
+};
+
+static const struct blobmsg_policy respawn_policy_attr[__RESPAWN_POLICY_MAX] = {
+	[RESPAWN_POLICY_MIN] = { "min", BLOBMSG_TYPE_INT32 },
+	[RESPAWN_POLICY_MAX] = { "max", BLOBMSG_TYPE_INT32 },
+	[RESPAWN_POLICY_MULTIPLIER] = { "multiplier", BLOBMSG_TYPE_INT32 },
+	[RESPAWN_POLICY_MAX_RETRIES] = { "max_retries", BLOBMSG_TYPE_INT32 },
+	[RESPAWN_POLICY_RESET_PERIOD] = { "reset_period", BLOBMSG_TYPE_INT32 },
 };
 
 enum {
@@ -833,6 +854,7 @@ instance_start(struct service_instance *in)
 		return;
 	}
 
+	in->respawn_next = 0;
 	instance_free_stdio(in);
 	if (in->_stdout.fd.fd > -2 && in->stdio_fd[1] < 0) {
 		if (pipe(opipe)) {
@@ -1124,6 +1146,57 @@ instance_cgroup_wait_stop(struct service_instance *in)
 	in->cgroup_events.fd = -1;
 }
 
+static uint32_t
+instance_respawn_delay(struct service_instance *in)
+{
+	uint64_t d = in->respawn_timeout * 1000ULL;
+	uint64_t max = in->respawn_max * 1000ULL;
+	int n;
+
+	for (n = 1; n < in->respawn_count && d < max; n++)
+		d = d * in->respawn_multiplier / 1000;
+
+	return d < max ? d : max;
+}
+
+static bool
+instance_respawn_reset(struct service_instance *in, long runtime)
+{
+	if (in->respawn_on_failure && !in->respawn_threshold)
+		return false;
+
+	return runtime >= in->respawn_threshold;
+}
+
+static bool
+instance_respawn_schedule(struct service_instance *in, long runtime)
+{
+	uint32_t delay;
+
+	if (in->respawn_on_failure && !in->exit_code)
+		return true;
+
+	if (instance_respawn_reset(in, runtime))
+		in->respawn_count = in->respawn_on_failure ? 1 : 0;
+	else
+		in->respawn_count++;
+
+	if (in->respawn_count > in->respawn_retry && in->respawn_retry > 0) {
+		LOG("Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
+		    in->srv->name, in->name, in->respawn_count, runtime);
+		in->restart = in->respawn = 0;
+		service_event_instance_exit("instance.fail", in);
+		return false;
+	}
+
+	delay = instance_respawn_delay(in);
+	in->respawn_next = uptime_get() + delay / 1000;
+	service_event_instance_exit("instance.respawn", in);
+	uloop_timeout_set(&in->timeout, delay);
+
+	return true;
+}
+
 static void
 instance_exit_done(struct service_instance *in)
 {
@@ -1145,21 +1218,8 @@ instance_exit_done(struct service_instance *in)
 			instance_delete(in);
 	} else if (in->restart) {
 		restart = true;
-	} else if (in->respawn) {
-		if (runtime < in->respawn_threshold)
-			in->respawn_count++;
-		else
-			in->respawn_count = 0;
-		if (in->respawn_count > in->respawn_retry && in->respawn_retry > 0 ) {
-			LOG("Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
-								in->srv->name, in->name, in->respawn_count, runtime);
-			in->restart = in->respawn = 0;
-			in->halt = 1;
-			service_event_instance_exit("instance.fail", in);
-		} else {
-			service_event_instance_exit("instance.respawn", in);
-			uloop_timeout_set(&in->timeout, in->respawn_timeout * 1000);
-		}
+	} else if (in->respawn && !instance_respawn_schedule(in, runtime)) {
+		in->halt = 1;
 	}
 
 	if (restart) {
@@ -1377,6 +1437,12 @@ instance_config_changed(struct service_instance *in, struct service_instance *in
 	if (in->respawn_threshold != in_new->respawn_threshold)
 		return true;
 	if (in->respawn_timeout != in_new->respawn_timeout)
+		return true;
+	if (in->respawn_max != in_new->respawn_max)
+		return true;
+	if (in->respawn_multiplier != in_new->respawn_multiplier)
+		return true;
+	if (in->respawn_on_failure != in_new->respawn_on_failure)
 		return true;
 
 	if (in->reload_signal != in_new->reload_signal)
@@ -1721,6 +1787,39 @@ instance_config_parse_command(struct service_instance *in, struct blob_attr **tb
 }
 
 static bool
+instance_config_parse_respawn_policy(struct service_instance *in, struct blob_attr *attr)
+{
+	struct blob_attr *tb[__RESPAWN_POLICY_MAX];
+	uint32_t vals[__RESPAWN_POLICY_MAX];
+	int i;
+
+	blobmsg_parse(respawn_policy_attr, __RESPAWN_POLICY_MAX, tb,
+		      blobmsg_data(attr), blobmsg_data_len(attr));
+
+	for (i = 0; i < __RESPAWN_POLICY_MAX; i++) {
+		if (!tb[i])
+			return false;
+
+		vals[i] = blobmsg_get_u32(tb[i]);
+	}
+
+	if (!vals[RESPAWN_POLICY_MIN] || vals[RESPAWN_POLICY_MAX] < vals[RESPAWN_POLICY_MIN] ||
+	    vals[RESPAWN_POLICY_MULTIPLIER] < 1000 || vals[RESPAWN_POLICY_MAX] > INT_MAX / 1000)
+		return false;
+
+	in->respawn = true;
+	in->respawn_on_failure = true;
+	in->respawn_count = 0;
+	in->respawn_timeout = vals[RESPAWN_POLICY_MIN];
+	in->respawn_max = vals[RESPAWN_POLICY_MAX];
+	in->respawn_multiplier = vals[RESPAWN_POLICY_MULTIPLIER];
+	in->respawn_retry = vals[RESPAWN_POLICY_MAX_RETRIES];
+	in->respawn_threshold = vals[RESPAWN_POLICY_RESET_PERIOD];
+
+	return true;
+}
+
+static bool
 instance_config_parse(struct service_instance *in)
 {
 	struct blob_attr *tb[__INSTANCE_ATTR_MAX];
@@ -1752,7 +1851,12 @@ instance_config_parse(struct service_instance *in)
 		in->respawn_threshold = vals[0];
 		in->respawn_timeout = vals[1];
 		in->respawn_retry = vals[2];
+		in->respawn_max = vals[1];
+		in->respawn_multiplier = 1000;
 	}
+	if (tb[INSTANCE_ATTR_RESPAWN_POLICY] &&
+	    !instance_config_parse_respawn_policy(in, tb[INSTANCE_ATTR_RESPAWN_POLICY]))
+		return false;
 	if (tb[INSTANCE_ATTR_TRIGGER]) {
 		in->trigger = tb[INSTANCE_ATTR_TRIGGER];
 		trigger_add(in->trigger, in);
@@ -1972,6 +2076,9 @@ instance_config_move(struct service_instance *in, struct service_instance *in_sr
 	in->respawn_retry = in_src->respawn_retry;
 	in->respawn_threshold = in_src->respawn_threshold;
 	in->respawn_timeout = in_src->respawn_timeout;
+	in->respawn_max = in_src->respawn_max;
+	in->respawn_multiplier = in_src->respawn_multiplier;
+	in->respawn_on_failure = in_src->respawn_on_failure;
 	in->reload_signal = in_src->reload_signal;
 	in->term_timeout = in_src->term_timeout;
 	if (!in->watchdog.self_managed) {
@@ -2252,13 +2359,27 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
 	if (in->reload_signal)
 		blobmsg_add_u32(b, "reload_signal", in->reload_signal);
 
-	if (in->respawn) {
+	if (in->respawn && in->respawn_on_failure) {
+		void *r = blobmsg_open_table(b, "respawn_policy");
+		blobmsg_add_u32(b, "min", in->respawn_timeout);
+		blobmsg_add_u32(b, "max", in->respawn_max);
+		blobmsg_add_u32(b, "multiplier", in->respawn_multiplier);
+		blobmsg_add_u32(b, "max_retries", in->respawn_retry);
+		blobmsg_add_u32(b, "reset_period", in->respawn_threshold);
+		blobmsg_close_table(b, r);
+	} else if (in->respawn) {
 		void *r = blobmsg_open_table(b, "respawn");
 		blobmsg_add_u32(b, "threshold", in->respawn_threshold);
 		blobmsg_add_u32(b, "timeout", in->respawn_timeout);
 		blobmsg_add_u32(b, "retry", in->respawn_retry);
 		blobmsg_close_table(b, r);
 	}
+
+	if (in->respawn || in->respawn_count)
+		blobmsg_add_u32(b, "respawn_count", in->respawn_count);
+
+	if (in->respawn_next)
+		blobmsg_add_u64(b, "next_restart", in->respawn_next);
 
 	if (in->trace)
 		blobmsg_add_u8(b, "trace", true);

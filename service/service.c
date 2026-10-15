@@ -1200,6 +1200,8 @@ void service_event_instance_exit(const char *type, struct service_instance *in)
 	blobmsg_add_u32(&b, "pid", in->proc.pid);
 	blobmsg_add_u32(&b, "exit_code", in->exit_code);
 	blobmsg_add_u32(&b, "respawn_count", in->respawn_count);
+	if (in->respawn_next)
+		blobmsg_add_u64(&b, "next_restart", in->respawn_next);
 	if (in->command) {
 		struct blob_attr *cur;
 		int rem;

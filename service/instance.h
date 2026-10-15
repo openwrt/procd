@@ -113,6 +113,10 @@ struct service_instance {
 	uint32_t respawn_timeout;
 	uint32_t respawn_threshold;
 	uint32_t respawn_retry;
+	uint32_t respawn_max;
+	uint32_t respawn_multiplier;
+	bool respawn_on_failure;
+	uint64_t respawn_next;
 
 	struct blob_attr *config;
 	struct uloop_process proc;
