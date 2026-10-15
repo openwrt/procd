@@ -980,6 +980,9 @@ enum {
 	INSTANCE_EXITCODE,
 	INSTANCE_JAIL,
 	INSTANCE_DATA,
+	INSTANCE_RESPAWN_COUNT,
+	INSTANCE_NEXT_RESTART,
+	INSTANCE_LAST_RESTARTED,
 	__INSTANCE_MAX,
 };
 
@@ -990,6 +993,9 @@ static const struct blobmsg_policy instance_policy[__INSTANCE_MAX] = {
 	[INSTANCE_EXITCODE] = { .name = "exit_code", .type = BLOBMSG_TYPE_INT32 },
 	[INSTANCE_JAIL] = { .name = "jail", .type = BLOBMSG_TYPE_TABLE },
 	[INSTANCE_DATA] = { .name = "data", .type = BLOBMSG_TYPE_TABLE },
+	[INSTANCE_RESPAWN_COUNT] = { .name = "respawn_count", .type = BLOBMSG_TYPE_INT32 },
+	[INSTANCE_NEXT_RESTART] = { .name = "next_restart", .type = BLOBMSG_CAST_INT64 },
+	[INSTANCE_LAST_RESTARTED] = { .name = "last_restarted", .type = BLOBMSG_CAST_INT64 },
 };
 
 enum {
@@ -4028,6 +4034,34 @@ static int uxc_create_resources(const char *name, struct settings *us,
 	return 0;
 }
 
+static void uxc_create_respawn_add(struct blob_buf *req, const char *name,
+				   struct blob_attr **tb, struct settings *us)
+{
+	struct respawn_policy p;
+	struct blob_attr *table;
+	void *t;
+
+	table = respawn_policy_effective(tb[CONF_RESPAWN], us ? us->tb[CONF_RESPAWN] : NULL);
+	if (!table)
+		return;
+
+	if (respawn_policy_parse(table, &p)) {
+		fprintf(stderr, "uxc: warning: ignoring the invalid respawn policy of %s\n", name);
+		return;
+	}
+
+	if (!p.enable)
+		return;
+
+	t = blobmsg_open_table(req, "respawn_policy");
+	blobmsg_add_u32(req, "min", p.min);
+	blobmsg_add_u32(req, "max", p.max);
+	blobmsg_add_u32(req, "multiplier", p.multiplier);
+	blobmsg_add_u32(req, "max_retries", p.max_retries);
+	blobmsg_add_u32(req, "reset_period", p.reset_period);
+	blobmsg_close_table(req, t);
+}
+
 static int uxc_create(char *name, bool immediately, const char *console_socket,
 		      bool systemd_cgroup, const char *seccomp_mode,
 		      const char *started_by)
@@ -4088,6 +4122,7 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 			free(seccomp_log);
 		}
 	}
+	uxc_create_respawn_add(&req, name, tb, usettings);
 	j = blobmsg_open_table(&req, "jail");
 	blobmsg_add_string(&req, "name", jailname?:name);
 	blobmsg_add_u8(&req, "immediately", immediately);
@@ -4466,6 +4501,34 @@ static void last_exit_add(struct blob_buf *b, const char *name, struct runtime_s
 	blob_buf_free(&buf);
 }
 
+static void container_info_respawn_add(struct blob_buf *b, struct blob_attr *policy,
+				       struct runtime_state *rs)
+{
+	struct blob_attr *ti[__INSTANCE_MAX], *cur;
+	void *t;
+	int rem;
+
+	t = blobmsg_open_table(b, "respawn");
+	blobmsg_for_each_attr(cur, policy, rem)
+		blobmsg_add_blob(b, cur);
+
+	if (rs && rs->instance) {
+		blobmsg_parse(instance_policy, __INSTANCE_MAX, ti,
+			      blobmsg_data(rs->instance), blobmsg_len(rs->instance));
+		if (ti[INSTANCE_RESPAWN_COUNT])
+			blobmsg_add_u32(b, "retry-count",
+					blobmsg_get_u32(ti[INSTANCE_RESPAWN_COUNT]));
+		if (ti[INSTANCE_NEXT_RESTART])
+			blobmsg_add_u64(b, "next-restart",
+					blobmsg_cast_u64(ti[INSTANCE_NEXT_RESTART]));
+		if (ti[INSTANCE_LAST_RESTARTED])
+			blobmsg_add_u64(b, "last-restarted",
+					blobmsg_cast_u64(ti[INSTANCE_LAST_RESTARTED]));
+	}
+
+	blobmsg_close_table(b, t);
+}
+
 static struct blob_attr *container_network_published(struct runtime_state *rs)
 {
 	struct blob_attr *ti[__INSTANCE_MAX];
@@ -4579,9 +4642,10 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 	if (us && us->tb[CONF_MODULE_VERSION])
 		blobmsg_add_blob(b, us->tb[CONF_MODULE_VERSION]);
 
-	respawn = us && us->tb[CONF_RESPAWN] ? us->tb[CONF_RESPAWN] : tb[CONF_RESPAWN];
+	respawn = respawn_policy_effective(tb[CONF_RESPAWN],
+					   us ? us->tb[CONF_RESPAWN] : NULL);
 	if (respawn)
-		blobmsg_add_blob(b, respawn);
+		container_info_respawn_add(b, respawn, rs);
 
 	if (rs && rs->started_by)
 		blobmsg_add_string(b, "started-by", rs->started_by);
