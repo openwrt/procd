@@ -3098,16 +3098,9 @@ static int uxc_delete(char *name, bool force, bool volumes)
 	else if (tb[CONF_OVERLAY_SIZE])
 		statevol = name;
 
-	if (sfname) {
-		if (stat(sfname, &sb) == -1) {
-			ret = -ENOENT;
-			goto errout;
-		}
-
-		if (unlink(sfname) == -1) {
-			ret = -errno;
-			goto errout;
-		}
+	if (sfname && unlink(sfname) == -1 && errno != ENOENT) {
+		ret = -errno;
+		goto errout;
 	}
 
 	if (stat(cfname, &sb) == -1) {
