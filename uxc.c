@@ -4143,9 +4143,9 @@ static void add_reply_cb(struct ubus_request *req, int type, struct blob_attr *m
 		*added = blobmsg_get_bool(tb);
 }
 
-static int uxc_create(char *name, bool immediately, const char *console_socket,
-		      bool systemd_cgroup, const char *seccomp_mode,
-		      const char *started_by)
+static int uxc_create(char *name, bool immediately, bool attached,
+		      const char *console_socket, bool systemd_cgroup,
+		      const char *seccomp_mode, const char *started_by)
 {
 	char *path = NULL, *jailname = NULL, *pidfile = NULL;
 	bool once = !strcmp(started_by, "boot");
@@ -4334,7 +4334,8 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 
 	notify_fd = uxc_invoker_pidfd();
 	ret = ubus_invoke_fd(ctx, id, "add", req.head, add_reply_cb, &added, 3000,
-			     stdio_notify_fds_send(stdio_fds, notify_fd));
+			     stdio_notify_fds_send(attached ? stdio_fds : NULL,
+						   notify_fd));
 	if (notify_fd >= 0)
 		close(notify_fd);
 
@@ -5424,7 +5425,7 @@ static int uxc_restart(char *name, bool systemd_cgroup)
 		return -EBUSY;
 	}
 
-	ret = uxc_create(name, false, NULL, systemd_cgroup, NULL, "operator");
+	ret = uxc_create(name, false, false, NULL, systemd_cgroup, NULL, "operator");
 	if (ret)
 		return ret;
 
@@ -6068,7 +6069,7 @@ static int uxc_boot(const char *mountpoint)
 			continue;
 		}
 
-		err = uxc_create(name, true, NULL, false, NULL, "boot");
+		err = uxc_create(name, true, false, NULL, false, NULL, "boot");
 		if (err && err != -EALREADY) {
 			fprintf(stderr, "uxc: boot: could not start %s\n", name);
 			ret = -EIO;
@@ -6801,7 +6802,7 @@ static int cli_create(int argc, char **argv, bool systemd_cgroup)
 	if (ret > 0)
 		reload_conf();
 
-	return uxc_create(name, false, console_socket, systemd_cgroup, NULL,
+	return uxc_create(name, false, true, console_socket, systemd_cgroup, NULL,
 			  "operator");
 }
 
@@ -7077,7 +7078,7 @@ int main(int argc, char **argv)
 		   !strcmp(verb, "complain")) {
 		if (verb_argc != 2)
 			goto usage_out;
-		ret = uxc_create(verb_argv[1], true, NULL, false, verb, "operator");
+		ret = uxc_create(verb_argv[1], true, true, NULL, false, verb, "operator");
 	} else if (!strcmp(verb, "state")) {
 		if (verb_argc != 2)
 			goto usage_out;
