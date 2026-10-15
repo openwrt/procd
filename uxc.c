@@ -5071,6 +5071,27 @@ static int uxc_update(const char *name, const char *resources_file)
 	return ret;
 }
 
+static bool respawn_cancelled(const char *name)
+{
+	static struct blob_buf req;
+	uint32_t id;
+	int ret;
+
+	if (ubus_lookup_id(ctx, "container", &id))
+		return false;
+
+	blob_buf_init(&req, 0);
+	blobmsg_add_string(&req, "name", name);
+	ret = ubus_invoke(ctx, id, "respawn_cancel", req.head, NULL, NULL, 3000);
+	blob_buf_free(&req);
+	if (ret)
+		return false;
+
+	fprintf(stderr, "uxc: cancelled the scheduled respawn of %s\n", name);
+
+	return true;
+}
+
 static int uxc_kill(char *name, int signal, bool all)
 {
 	struct runtime_state *rsstate = NULL;
@@ -5093,6 +5114,8 @@ static int uxc_kill(char *name, int signal, bool all)
 	}
 
 	if (!runtime_live(rsstate)) {
+		if (respawn_cancelled(name))
+			return 0;
 		fprintf(stderr, "uxc: %s is not running\n", name);
 		return -ENOENT;
 	}
