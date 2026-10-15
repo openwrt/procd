@@ -935,9 +935,7 @@ static void hook_process_handler(struct uloop_process *c, int ret)
 	run_hooklist();
 }
 
-static struct uloop_process hook_process = {
-	.cb = hook_process_handler,
-};
+static struct uloop_process hook_process;
 
 static void hook_process_timeout_cb(struct uloop_timeout *t)
 {
@@ -1026,6 +1024,7 @@ static void run_hooklist(void)
 	if (state_fd > -1)
 		close(state_fd);
 
+	hook_process.cb = hook_process_handler;
 	uloop_process_add(&hook_process);
 
 	if (hook->timeout > 0)
@@ -2596,9 +2595,7 @@ static void jail_process_handler(struct uloop_process *c, int ret)
 	poststop();
 }
 
-static struct uloop_process jail_process = {
-	.cb = jail_process_handler,
-};
+static struct uloop_process jail_process;
 
 static int jail_pidfd_send_signal(int sig)
 {
@@ -7579,6 +7576,7 @@ static void post_main(struct uloop_timeout *t)
 		char sig_buf[1];
 
 		close(parent_pidfd);
+		jail_process.cb = jail_process_handler;
 		uloop_process_add(&jail_process);
 		jail_running = 1;
 		if (seteuid(0)) {
