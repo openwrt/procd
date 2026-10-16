@@ -1291,6 +1291,23 @@ static bool runtime_live(struct runtime_state *rs)
 	return strcmp(blobmsg_get_string(tb[STATE_STATUS]), "stopped") != 0;
 }
 
+static const char *runtime_status(struct runtime_state *rs)
+{
+	struct blob_attr *tb[__STATE_MAX];
+
+	if (!rs)
+		return "uninitialized";
+
+	if (rs->ocistate) {
+		blobmsg_parse(state_policy, __STATE_MAX, tb, blobmsg_data(rs->ocistate),
+			      blobmsg_len(rs->ocistate));
+		if (tb[STATE_STATUS])
+			return blobmsg_get_string(tb[STATE_STATUS]);
+	}
+
+	return rs->running ? "creating" : "stopped";
+}
+
 static void runtime_free(void)
 {
 	struct runtime_state *item, *tmp;
@@ -4960,7 +4977,6 @@ struct list_row {
 static void list_row_get(struct list_row *row, struct blob_attr **tb)
 {
 	struct blob_attr **ts = row->ts;
-	const char *ocistatus = NULL;
 
 	memset(row, 0, sizeof(*row));
 	row->name = blobmsg_get_string(tb[CONF_NAME]);
@@ -4972,8 +4988,6 @@ static void list_row_get(struct list_row *row, struct blob_attr **tb)
 		blobmsg_parse(state_policy, __STATE_MAX, ts,
 			      blobmsg_data(row->rs->ocistate),
 			      blobmsg_len(row->rs->ocistate));
-		if (ts[STATE_STATUS])
-			ocistatus = blobmsg_get_string(ts[STATE_STATUS]);
 		if (ts[STATE_PID])
 			row->pid = blobmsg_get_u32(ts[STATE_PID]);
 		if (ts[STATE_BUNDLE])
@@ -4986,12 +5000,7 @@ static void list_row_get(struct list_row *row, struct blob_attr **tb)
 			row->rootfs = blobmsg_get_string(ts[STATE_ROOTFS]);
 	}
 
-	if (ocistatus)
-		row->status = ocistatus;
-	else if (row->rs)
-		row->status = row->rs->running ? "creating" : "stopped";
-	else
-		row->status = "uninitialized";
+	row->status = runtime_status(row->rs);
 
 	if (row->pid > 0)
 		snprintf(row->pid_str, sizeof(row->pid_str), "%d", row->pid);
@@ -5140,7 +5149,9 @@ static int uxc_list(void)
 
 static int uxc_start(const char *name, bool console)
 {
+	struct runtime_state *rsstate = NULL;
 	struct uxc_wait_state wait_state;
+	const char *status;
 	unsigned int id;
 	char *objname;
 	pid_t pid;
@@ -5173,7 +5184,12 @@ static int uxc_start(const char *name, bool console)
 
 	ret = ubus_invoke(ctx, id, "start", NULL, NULL, NULL, 3000);
 	if (ret) {
-		fprintf(stderr, "uxc: start %s: %s\n", name, ubus_strerror(ret));
+		rsstate = avl_find_element(&runtime, name, rsstate, avl);
+		status = runtime_status(rsstate);
+		if (ret == UBUS_STATUS_INVALID_ARGUMENT && strcmp(status, "created"))
+			fprintf(stderr, "uxc: cannot start %s: it is %s\n", name, status);
+		else
+			fprintf(stderr, "uxc: start %s: %s\n", name, ubus_strerror(ret));
 		uxc_wait_disarm();
 		return -EIO;
 	}
