@@ -104,6 +104,8 @@ enum {
 	OPT_PROVISION,
 	OPT_RESPAWN,
 	OPT_STOP_TIMEOUT,
+	OPT_STDOUT,
+	OPT_STDERR,
 	OPT_UNSET,
 };
 
@@ -170,6 +172,8 @@ static const struct option set_opts[] = {
 	{"provision",		required_argument,	0,	OPT_PROVISION		},
 	{"resources",		required_argument,	0,	OPT_RESOURCES		},
 	{"respawn",		required_argument,	0,	OPT_RESPAWN		},
+	{"stderr",		required_argument,	0,	OPT_STDERR		},
+	{"stdout",		required_argument,	0,	OPT_STDOUT		},
 	{"stop-timeout",	required_argument,	0,	OPT_STOP_TIMEOUT	},
 	{"temp-overlay-size",	required_argument,	0,	OPT_TEMP_OVERLAY_SIZE	},
 	{"unset",		required_argument,	0,	OPT_UNSET		},
@@ -556,11 +560,13 @@ static void usage(void)
 	       "max-retries=N,reset-period=N]]\n");
 	printf("\t\t[--provision <file>:<dst>[:secret]]...\n");
 	printf("\t\t[--stop-timeout <seconds>] [--resources <file>]\n");
+	printf("\t\t[--stdout 0|1] [--stderr 0|1]\t\tlog stdout/stderr of <conf> to syslog\n");
 	printf("\t\t[--unset <key>]...\t\t\tedit the settings of <conf> in one rewrite\n");
 	printf("\t\t\t\t\t\t--unset keys: autostart pidfile temp-overlay-size\n");
 	printf("\t\t\t\t\t\twrite-overlay-path volumes module-version\n");
 	printf("\t\t\t\t\t\tdata-volumes data-volume=<vol> env env=<KEY> respawn\n");
 	printf("\t\t\t\t\t\tprovision provision=<dst> stop-timeout resources\n");
+	printf("\t\t\t\t\t\tstdout stderr\n");
 	printf("\tdelete <conf> [--force] [--volumes]\t"
 	       "delete <conf>; --volumes also reaps its rw state and per-container volumes\n");
 	printf("\treconcile\t\t\t\t"
@@ -601,6 +607,8 @@ enum {
 	CONF_PACKAGE,
 	CONF_PACKAGE_VERSION,
 	CONF_PUBLISHER,
+	CONF_STDOUT,
+	CONF_STDERR,
 	__CONF_MAX,
 };
 
@@ -630,6 +638,8 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	[CONF_PACKAGE] = { .name = "package", .type = BLOBMSG_TYPE_STRING },
 	[CONF_PACKAGE_VERSION] = { .name = "package-version", .type = BLOBMSG_TYPE_STRING },
 	[CONF_PUBLISHER] = { .name = "publisher", .type = BLOBMSG_TYPE_STRING },
+	[CONF_STDOUT] = { .name = "stdout", .type = BLOBMSG_TYPE_BOOL },
+	[CONF_STDERR] = { .name = "stderr", .type = BLOBMSG_TYPE_BOOL },
 };
 
 struct settings {
@@ -3259,6 +3269,17 @@ static bool autostart_effective(struct blob_attr **tb, struct settings *us)
 	return tb[CONF_AUTOSTART] && blobmsg_get_bool(tb[CONF_AUTOSTART]);
 }
 
+static bool conf_bool_effective(struct blob_attr **tb, struct settings *us,
+				int key)
+{
+	struct blob_attr *cur = tb[key];
+
+	if (us && us->tb[key])
+		cur = us->tb[key];
+
+	return cur && blobmsg_get_bool(cur);
+}
+
 enum overlay_kind {
 	OVERLAY_NONE,
 	OVERLAY_TMPFS,
@@ -3505,6 +3526,8 @@ static const struct settings_key settings_keys[] = {
 	{ .name = "resources", .type = BLOBMSG_TYPE_TABLE,
 	  .validate = resources_validate, .merge = resources_merge,
 	  .apply = resources_apply },
+	{ .name = "stdout", .type = BLOBMSG_TYPE_BOOL },
+	{ .name = "stderr", .type = BLOBMSG_TYPE_BOOL },
 };
 
 static const struct settings_key *settings_key_find(const char *name)
@@ -4213,6 +4236,10 @@ static int uxc_create(char *name, bool immediately, bool attached,
 		}
 	}
 	uxc_create_respawn_add(&req, name, tb, usettings);
+	if (conf_bool_effective(tb, usettings, CONF_STDOUT))
+		blobmsg_add_u8(&req, "stdout", 1);
+	if (conf_bool_effective(tb, usettings, CONF_STDERR))
+		blobmsg_add_u8(&req, "stderr", 1);
 	j = blobmsg_open_table(&req, "jail");
 	blobmsg_add_string(&req, "name", jailname?:name);
 	blobmsg_add_u8(&req, "immediately", immediately);
@@ -4747,6 +4774,8 @@ static void container_info_add(struct blob_buf *b, struct blob_attr *reg, struct
 		blobmsg_close_table(b, v);
 	}
 	blobmsg_add_u8(b, "autostart", autostart_effective(tb, us));
+	blobmsg_add_u8(b, "stdout", conf_bool_effective(tb, us, CONF_STDOUT));
+	blobmsg_add_u8(b, "stderr", conf_bool_effective(tb, us, CONF_STDERR));
 	if (containers_disabled())
 		blobmsg_add_u8(b, "containers-disabled", 1);
 
@@ -6552,6 +6581,14 @@ static int set_args_parse(int argc, char **argv, struct blob_buf *patch,
 			break;
 		case OPT_STOP_TIMEOUT:
 			ret = stop_timeout_arg_add(patch, optarg);
+			break;
+		case OPT_STDOUT:
+		case OPT_STDERR:
+			if (strcmp(optarg, "0") && strcmp(optarg, "1"))
+				ret = -EINVAL;
+			else
+				blobmsg_add_u8(patch, c == OPT_STDOUT ? "stdout" : "stderr",
+					       optarg[0] == '1');
 			break;
 		case OPT_RESOURCES:
 			if (!blobmsg_add_json_from_file(&resources, optarg))
