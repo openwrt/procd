@@ -119,6 +119,12 @@ static void perform_halt()
 		sleep(1);
 }
 
+static void state_shutdown_run(void)
+{
+	procd_inittab_run("shutdown");
+	sync();
+}
+
 static void state_enter(void)
 {
 	char ubus_cmd[] = "/sbin/ubusd";
@@ -175,8 +181,7 @@ static void state_enter(void)
 		/* Redirect output to the console for the users' benefit */
 		set_console();
 		LOG("- shutdown -\n");
-		procd_inittab_run("shutdown");
-		sync();
+		procd_inittab_stop(state_shutdown_run);
 		break;
 
 	case STATE_HALT:

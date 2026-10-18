@@ -329,11 +329,66 @@ void procd_inittab_kill(void)
 
 	list_for_each_entry(a, &actions, list) {
 		a->respawn = -1;
+		uloop_timeout_cancel(&a->tout);
 		if (a->proc.pid)
 			kill(a->proc.pid, SIGKILL);
 		if (!action_cgroup(a, cgroup, sizeof(cgroup)))
 			cgroup_kill(cgroup);
 	}
+}
+
+static struct {
+	struct uloop_timeout timeout;
+	struct uloop_fd events;
+	void (*done)(void);
+} stop;
+
+static void inittab_stop_finish(void)
+{
+	uloop_timeout_cancel(&stop.timeout);
+	uloop_fd_delete(&stop.events);
+	close(stop.events.fd);
+	stop.done();
+}
+
+static void inittab_stop_timeout_cb(struct uloop_timeout *t)
+{
+	if (cgroup_populated(stop.events.fd))
+		ERROR("Processes of inittab entries survived SIGKILL\n");
+
+	inittab_stop_finish();
+}
+
+static void inittab_stop_events_cb(struct uloop_fd *fd, unsigned int events)
+{
+	if (!cgroup_populated(fd->fd))
+		inittab_stop_finish();
+}
+
+void procd_inittab_stop(void (*done)(void))
+{
+	int fd;
+
+	procd_inittab_kill();
+
+	fd = open(INITTAB_CGROUP_BASEDIR "/cgroup.events", O_RDONLY);
+	if (fd < 0) {
+		done();
+		return;
+	}
+
+	if (!cgroup_populated(fd)) {
+		close(fd);
+		done();
+		return;
+	}
+
+	stop.done = done;
+	stop.events.fd = fd;
+	stop.events.cb = inittab_stop_events_cb;
+	stop.timeout.cb = inittab_stop_timeout_cb;
+	uloop_fd_add(&stop.events, ULOOP_PRIORITY);
+	uloop_timeout_set(&stop.timeout, CGROUP_DRAIN_TIMEOUT_MSEC);
 }
 
 void procd_inittab(void)

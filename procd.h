@@ -58,6 +58,7 @@ void procd_signal_preinit(void);
 void procd_inittab(void);
 void procd_inittab_run(const char *action);
 void procd_inittab_kill(void);
+void procd_inittab_stop(void (*done)(void));
 void procd_bcast_event(char *event, struct blob_attr *msg);
 
 struct trigger;
