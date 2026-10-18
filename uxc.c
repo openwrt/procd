@@ -6880,8 +6880,12 @@ static int cli_create(int argc, char **argv, bool systemd_cgroup)
 	if (ret > 0)
 		reload_conf();
 
-	return uxc_create(name, false, true, console_socket, systemd_cgroup, NULL,
-			  "operator");
+	ret = uxc_create(name, false, true, console_socket, systemd_cgroup, NULL,
+			 "operator");
+	if (ret < 0 && ret != -EEXIST && bundle)
+		uxc_delete(name, false, false);
+
+	return ret;
 }
 
 static int cli_exec(int argc, char **argv)
