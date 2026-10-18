@@ -681,6 +681,70 @@ static struct blob_attr *registration_find(const char *name, struct blob_attr **
 }
 
 enum {
+	STORE_STATE,
+	STORE_SECRETS,
+	__STORE_MAX,
+};
+
+static const char *const store_vol[__STORE_MAX] = {
+	[STORE_STATE] = UXC_VOL_CONFDIR "/state",
+	[STORE_SECRETS] = UXC_VOL_SECRETDIR,
+};
+
+static const char *const store_sub[__STORE_MAX] = {
+	[STORE_STATE] = "state",
+	[STORE_SECRETS] = "secrets",
+};
+
+static int store_root(const char *regdir, int store, char *out, size_t len)
+{
+	int ret;
+
+	if (!strcmp(regdir, UXC_VOL_CONFDIR))
+		ret = snprintf(out, len, "%s", store_vol[store]);
+	else
+		ret = snprintf(out, len, "%s/%s", regdir, store_sub[store]);
+
+	if (ret < 0 || (size_t)ret >= len)
+		return -ENAMETOOLONG;
+
+	return 0;
+}
+
+static int store_root_find(const char *name, int store, char *out, size_t len)
+{
+	struct blob_attr *tb[__CONF_MAX], *found;
+	char regdir[PATH_MAX];
+	int ret;
+
+	found = registration_find(name, tb);
+	if (!found)
+		return -ENOENT;
+
+	ret = registration_dir(blobmsg_name(found), regdir, sizeof(regdir));
+	if (ret)
+		return ret;
+
+	return store_root(regdir, store, out, len);
+}
+
+static int store_dir(const char *name, int store, char *out, size_t len)
+{
+	char root[PATH_MAX];
+	int ret;
+
+	ret = store_root_find(name, store, root, sizeof(root));
+	if (ret)
+		return ret;
+
+	ret = snprintf(out, len, "%s/%s", root, name);
+	if (ret < 0 || (size_t)ret >= len)
+		return -ENAMETOOLONG;
+
+	return 0;
+}
+
+enum {
 	LIST_INSTANCES,
 	__LIST_MAX,
 };
@@ -1655,7 +1719,8 @@ static void mkdir_path(const char *path, mode_t mode)
 	mkdir(tmp, mode);
 }
 
-static bool shared_secret(const char *scope, char *out, size_t outlen)
+static bool shared_secret(const char *root, const char *scope, char *out,
+			  size_t outlen)
 {
 	char dir[PATH_MAX], path[PATH_MAX], lockpath[PATH_MAX];
 	const char *p;
@@ -1671,11 +1736,11 @@ static bool shared_secret(const char *scope, char *out, size_t outlen)
 		    *p != '_' && *p != '.')
 			return false;
 
-	snprintf(dir, sizeof(dir), "%s/%s", UXC_VOL_SECRETDIR, scope);
+	snprintf(dir, sizeof(dir), "%s/%s", root, scope);
 	snprintf(path, sizeof(path), "%s/value", dir);
-	snprintf(lockpath, sizeof(lockpath), "%s/.lock", UXC_VOL_SECRETDIR);
+	snprintf(lockpath, sizeof(lockpath), "%s/.lock", root);
 
-	mkdir_path(UXC_VOL_SECRETDIR, 0700);
+	mkdir_path(root, 0700);
 	lockfd = open(lockpath, O_CREAT | O_RDWR, 0600);
 	if (lockfd < 0)
 		return false;
@@ -1730,12 +1795,16 @@ static bool envfile_has_key(const char *path, const char *key)
 static void materialise_initenv(const char *name, struct blob_attr *initenv)
 {
 	char statedir[PATH_MAX], dir[PATH_MAX], path[PATH_MAX], secret[64];
+	char secrets[PATH_MAX];
 	struct blob_attr *cur;
 	const char *key, *val;
 	int rem;
 	FILE *f;
 
-	snprintf(statedir, sizeof(statedir), "%s/state", UXC_VOL_CONFDIR);
+	if (store_root_find(name, STORE_STATE, statedir, sizeof(statedir)) ||
+	    store_root_find(name, STORE_SECRETS, secrets, sizeof(secrets)))
+		return;
+
 	snprintf(dir, sizeof(dir), "%s/%s", statedir, name);
 	snprintf(path, sizeof(path), "%s/env", dir);
 
@@ -1753,7 +1822,7 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 				continue;
 			val = secret;
 		} else if (!strncmp(val, "generate@", 9)) {
-			if (!shared_secret(val + 9, secret, sizeof(secret)))
+			if (!shared_secret(secrets, val + 9, secret, sizeof(secret)))
 				continue;
 			val = secret;
 		}
@@ -1993,9 +2062,11 @@ static int uxc_create(char *name, bool immediately, const char *console_socket,
 	if (tb[CONF_INITENV])
 		materialise_initenv(name, tb[CONF_INITENV]);
 
-	snprintf(envpath, sizeof(envpath), "%s/state/%s/env", UXC_VOL_CONFDIR, name);
-	if (!access(envpath, R_OK))
-		blobmsg_add_string(&req, "envfile", envpath);
+	if (!store_dir(name, STORE_STATE, envpath, sizeof(envpath) - strlen("/env"))) {
+		strcat(envpath, "/env");
+		if (!access(envpath, R_OK))
+			blobmsg_add_string(&req, "envfile", envpath);
+	}
 
 	m = blobmsg_open_table(&req, "mount");
 	if (tb[CONF_DATA_VOLUMES]) {
@@ -2956,11 +3027,11 @@ static int purge_cb(const char *path, const struct stat *sb, int typeflag,
 	return remove(path);
 }
 
-static int reconcile_purge(const char *name, const char *statedir)
+static int reconcile_purge(const char *base, const char *name, const char *statedir)
 {
 	char path[PATH_MAX];
 
-	snprintf(path, sizeof(path), "%s/settings/%s.json", UXC_VOL_CONFDIR, name);
+	snprintf(path, sizeof(path), "%s/settings/%s.json", base, name);
 	unlink(path);
 
 	if (nftw(statedir, purge_cb, 16, FTW_DEPTH | FTW_PHYS)) {
@@ -2973,14 +3044,17 @@ static int reconcile_purge(const char *name, const char *statedir)
 	return 0;
 }
 
-static int uxc_reconcile(void)
+static int reconcile_base(const char *base, int *purged)
 {
-	char glob_pat[PATH_MAX];
+	char root[PATH_MAX], glob_pat[PATH_MAX];
 	const char *name;
+	int i, ret = 0;
 	glob_t gl;
-	int i, purged = 0, ret = 0;
 
-	snprintf(glob_pat, sizeof(glob_pat), "%s/state/*", UXC_VOL_CONFDIR);
+	if (store_root(base, STORE_STATE, root, sizeof(root)))
+		return 0;
+
+	snprintf(glob_pat, sizeof(glob_pat), "%s/*", root);
 	if (glob(glob_pat, GLOB_NOSORT, NULL, &gl))
 		return 0;
 
@@ -2989,14 +3063,33 @@ static int uxc_reconcile(void)
 		name = name ? name + 1 : gl.gl_pathv[i];
 		if (uxc_registered(name))
 			continue;
-		if (reconcile_purge(name, gl.gl_pathv[i])) {
+		if (reconcile_purge(base, name, gl.gl_pathv[i])) {
 			ret = -EIO;
 			continue;
 		}
-		++purged;
+		++*purged;
 	}
 
 	globfree(&gl);
+
+	return ret;
+}
+
+static int uxc_reconcile(void)
+{
+	const char *bases[] = { confdir, UXC_VOL_CONFDIR };
+	int purged = 0, ret = 0, err;
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(bases); i++) {
+		if (i && !strcmp(bases[i], bases[0]))
+			continue;
+
+		err = reconcile_base(bases[i], &purged);
+		if (err)
+			ret = err;
+	}
+
 	if (purged)
 		fprintf(stderr, "uxc: purged %d orphaned container(s)\n", purged);
 
