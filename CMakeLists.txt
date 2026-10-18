@@ -21,7 +21,7 @@ INSTALL(TARGETS setlbf
 SET(SOURCES procd.c signal.c state.c hotplug-dispatch.c inittab.c rcS.c ubus.c
 	system.c sysupgrade.c service/service.c service/instance.c
 	service/validate.c service/trigger.c service/watch.c service/vrf.c
-	utils/utils.c)
+	utils/utils.c utils/cgroup.c)
 IF(NOT DISABLE_INIT)
   SET(SOURCES ${SOURCES} watchdog.c plug/coldplug.c plug/hotplug.c)
 ENDIF()

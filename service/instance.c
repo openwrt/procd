@@ -38,6 +38,7 @@
 #include "../procd.h"
 #include "../uptime.h"
 #include "../rcS.h"
+#include "../utils/cgroup.h"
 
 #include "service.h"
 #include "instance.h"
@@ -47,7 +48,6 @@
 
 #define UJAIL_BIN_PATH "/sbin/ujail"
 #define CGROUP_BASEDIR "/sys/fs/cgroup/services"
-#define CGROUP_DRAIN_TIMEOUT_MSEC 1000
 
 enum {
 	INSTANCE_ATTR_COMMAND,
@@ -725,37 +725,15 @@ instance_run(struct service_instance *in, int _stdout, int _stderr, int _status)
 static int
 instance_add_cgroup(const char *service, const char *instance)
 {
-	const char *cgroup_procs = "/cgroup.procs";
 	char cgnamebuf[256];
-	struct stat sb;
-	int fd, ret;
-
-	if (stat("/sys/fs/cgroup/cgroup.subtree_control", &sb))
-		return 0;
+	int ret;
 
 	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
 		       service, instance);
 	if (ret >= sizeof(cgnamebuf))
 		return -ENAMETOOLONG;
 
-	if (mkdir_p(cgnamebuf, 0700))
-		return -EPERM;
-
-	if (strlen(cgnamebuf) + strlen(cgroup_procs) >= sizeof(cgnamebuf))
-		return -ENAMETOOLONG;
-
-	strcat(cgnamebuf, cgroup_procs);
-
-	fd = open(cgnamebuf, O_WRONLY);
-	if (fd == -1)
-		return -EIO;
-
-	ret = dprintf(fd, "%d", getpid());
-	close(fd);
-	if (ret < 0)
-		return -EIO;
-
-	return 0;
+	return cgroup_join(cgnamebuf);
 }
 
 /*
@@ -793,22 +771,17 @@ static void
 instance_kill_cgroup(const char *service, const char *instance)
 {
 	char cgnamebuf[256];
-	int fd, ret;
+	int ret;
 
-	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s/cgroup.kill",
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s",
 		       CGROUP_BASEDIR, service, instance);
 	if (ret >= (int)sizeof(cgnamebuf))
 		return;
 
-	fd = open(cgnamebuf, O_WRONLY);
-	if (fd < 0)
-		return;
-
-	if (write(fd, "1", 1) < 0)
-		ULOG_WARN("failed to kill cgroup of %s::%s: %m\n", service,
-			  instance);
-
-	close(fd);
+	ret = cgroup_kill(cgnamebuf);
+	if (ret)
+		ULOG_WARN("failed to kill cgroup of %s::%s: %s\n", service,
+			  instance, strerror(-ret));
 }
 
 static void
@@ -1357,28 +1330,6 @@ instance_exit_code(int ret)
 	return 1;
 }
 
-static bool
-cgroups_populated(int fd)
-{
-	char buf[128];
-	ssize_t len;
-	char *val;
-
-	if (lseek(fd, 0, SEEK_SET) < 0)
-		return false;
-
-	len = read(fd, buf, sizeof(buf) - 1);
-	if (len <= 0)
-		return false;
-
-	buf[len] = '\0';
-	val = strstr(buf, "populated ");
-	if (!val)
-		return false;
-
-	return val[strlen("populated ")] == '1';
-}
-
 static void
 instance_cgroup_survivors(const char *service, const char *instance)
 {
@@ -1485,7 +1436,7 @@ instance_cgroup_timeout_cb(struct uloop_timeout *t)
 
 	in = container_of(t, struct service_instance, cgroup_timeout);
 	populated = in->cgroup_events.fd > -1 &&
-		    cgroups_populated(in->cgroup_events.fd);
+		    cgroup_populated(in->cgroup_events.fd);
 
 	instance_cgroup_wait_stop(in);
 
@@ -1502,7 +1453,7 @@ instance_cgroup_events_cb(struct uloop_fd *fd, unsigned int events)
 
 	in = container_of(fd, struct service_instance, cgroup_events);
 
-	if (cgroups_populated(fd->fd))
+	if (cgroup_populated(fd->fd))
 		return;
 
 	uloop_timeout_set(&in->cgroup_timeout, 0);
@@ -1533,7 +1484,7 @@ instance_cgroup_wait(struct service_instance *in)
 	uloop_timeout_set(&in->cgroup_timeout, CGROUP_DRAIN_TIMEOUT_MSEC);
 	uloop_fd_add(&in->cgroup_events, ULOOP_PRIORITY);
 
-	if (!cgroups_populated(fd))
+	if (!cgroup_populated(fd))
 		uloop_timeout_set(&in->cgroup_timeout, 0);
 }
 
