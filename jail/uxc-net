@@ -70,9 +70,7 @@ let icmpv6_types = [
 
 let sidecar_path = function(name) { return "/tmp/run/uvol/.meta/uxc/" + name + ".annotations"; };
 
-let state_dir = "/tmp/run/uvol/.meta/uxc/state";
-let macstore_dir  = function(name) { return state_dir + "/" + name; };
-let macstore_path = function(name) { return macstore_dir(name) + "/macaddrs"; };
+let macstore_path = function(datadir) { return datadir + "/macaddrs"; };
 
 let rand_mac = function() {
 	let f = fs.open("/dev/urandom", "r");
@@ -87,10 +85,10 @@ let rand_mac = function() {
 		ord(b, 1), ord(b, 2), ord(b, 3), ord(b, 4), ord(b, 5));
 };
 
-let ensure_macs = function(name, roles) {
+let ensure_macs = function(datadir, roles) {
 	let store = {}, out = {}, changed = false, raw, s, r, m;
 
-	raw = fs.readfile(macstore_path(name));
+	raw = datadir ? fs.readfile(macstore_path(datadir)) : null;
 	if (raw) {
 		try { s = json(raw); } catch (e) { s = null; }
 		if (type(s) == "object")
@@ -108,10 +106,9 @@ let ensure_macs = function(name, roles) {
 		out[r] = store[r];
 	}
 
-	if (changed) {
-		fs.mkdir(state_dir, 0700);
-		fs.mkdir(macstore_dir(name), 0700);
-		let f = fs.open(macstore_path(name), "w");
+	if (changed && datadir) {
+		fs.mkdir(datadir, 0700);
+		let f = fs.open(macstore_path(datadir), "w");
 		if (f) {
 			f.write(sprintf("%J\n", store));
 			f.close();
@@ -994,7 +991,7 @@ let instance_rollback = function(name) {
 	shared_reconcile();
 };
 
-let do_up = function(name, bundle) {
+let do_up = function(name, bundle, datadir) {
 	let attach, bh, ann, roles, m, spec, shared, owned, before, lock, rc, written;
 
 	if (!bundle) {
@@ -1029,7 +1026,7 @@ let do_up = function(name, bundle) {
 		push(roles, "bh");
 		push(roles, "bc");
 	}
-	m = ensure_macs(name, roles);
+	m = ensure_macs(datadir, roles);
 	spec = spec_new();
 
 	lock = shared_lock();
@@ -1091,14 +1088,15 @@ let do_down = function(name) {
 let name = ARGV[0];
 let action = ARGV[1];
 let bundle = ARGV[2];
+let datadir = ARGV[3];
 
 if (!name || !action) {
-	warn("usage: uxc-net <name> <up|down> [bundle]\n");
+	warn("usage: uxc-net <name> <up|down> [bundle [datadir]]\n");
 	exit(22);
 }
 
 if (action == "up")
-	exit(do_up(name, bundle));
+	exit(do_up(name, bundle, datadir));
 else if (action == "down")
 	exit(do_down(name));
 
