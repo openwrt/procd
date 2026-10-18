@@ -27,6 +27,7 @@
 #include <libubox/utils.h>
 #include <libubox/list.h>
 
+#include "utils/cgroup.h"
 #include "utils/utils.h"
 #include "procd.h"
 #include "rcS.h"
@@ -41,6 +42,8 @@
 #define TAG_PROCESS	3
 
 #define MAX_ARGS	8
+
+#define INITTAB_CGROUP_BASEDIR	"/sys/fs/cgroup/inittab"
 
 struct init_action;
 char *console = NULL;
@@ -60,6 +63,7 @@ struct init_action {
 
 	struct init_handler *handler;
 	struct uloop_process proc;
+	unsigned int index;
 
 	int respawn;
 	struct uloop_timeout tout;
@@ -89,12 +93,33 @@ static int dev_exist(const char *dev)
 	return 1;
 }
 
+static int action_cgroup(struct init_action *a, char *buf, size_t len)
+{
+	int ret;
+
+	ret = snprintf(buf, len, "%s/%s.%u", INITTAB_CGROUP_BASEDIR,
+		       a->handler->name, a->index);
+	if (ret < 0 || (size_t)ret >= len)
+		return -ENAMETOOLONG;
+
+	return 0;
+}
+
 static void fork_worker(struct init_action *a)
 {
+	char cgroup[256];
 	pid_t p;
+	int ret;
 
 	a->proc.pid = fork();
 	if (!a->proc.pid) {
+		ret = action_cgroup(a, cgroup, sizeof(cgroup));
+		if (!ret)
+			ret = cgroup_join(cgroup);
+		if (ret)
+			ERROR("Failed to place %s in its cgroup: %s\n", a->argv[0],
+			      strerror(-ret));
+
 		p = setsid();
 
 		if (patch_stdio(a->id))
@@ -300,11 +325,14 @@ void procd_inittab_run(const char *handler)
 void procd_inittab_kill(void)
 {
 	struct init_action *a;
+	char cgroup[256];
 
 	list_for_each_entry(a, &actions, list) {
 		a->respawn = -1;
 		if (a->proc.pid)
 			kill(a->proc.pid, SIGKILL);
+		if (!action_cgroup(a, cgroup, sizeof(cgroup)))
+			cgroup_kill(cgroup);
 	}
 }
 
@@ -312,9 +340,10 @@ void procd_inittab(void)
 {
 #define LINE_LEN	128
 	FILE *fp = fopen(tab, "r");
+	unsigned int count = 0;
+	regmatch_t matches[5];
 	struct init_action *a;
 	regex_t pat_inittab;
-	regmatch_t matches[5];
 	char *line;
 
 	if (!fp) {
@@ -357,9 +386,11 @@ void procd_inittab(void)
 		a->argv[i] = NULL;
 		a->id = tags[TAG_ID];
 		a->line = line;
+		a->index = count;
 
 		if (add_action(a, tags[TAG_ACTION]))
 			continue;
+		count++;
 		line = malloc(LINE_LEN);
 		a = calloc(1, sizeof(struct init_action));
 	}
