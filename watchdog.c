@@ -102,6 +102,16 @@ static int watchdog_set_drv_timeout(void)
 	return -1;
 }
 
+static void watchdog_fit_frequency(void)
+{
+	int max = wdt_drv_timeout / 2;
+
+	if (max < 1)
+		max = 1;
+	if (wdt_frequency > max)
+		watchdog_frequency(max);
+}
+
 static void watchdog_print_status(void)
 {
 	struct watchdog_info wdt_info;
@@ -151,6 +161,7 @@ void watchdog_set_stopped(bool val)
 	else {
 		watchdog_open(true);
 		watchdog_set_drv_timeout();
+		watchdog_fit_frequency();
 		watchdog_timeout_cb(&wdt_timeout);
 	}
 }
