@@ -97,7 +97,8 @@ static int watchdog_set_drv_timeout(void)
 		return 0;
 
 	ERROR("WDT failed to set timeout %ds: %m\n", wdt_drv_timeout);
-	ioctl(wdt_fd, WDIOC_GETTIMEOUT, &wdt_drv_timeout);
+	if (ioctl(wdt_fd, WDIOC_GETTIMEOUT, &wdt_drv_timeout))
+		ERROR("WDT failed to read the timeout back: %m\n");
 
 	return -1;
 }
