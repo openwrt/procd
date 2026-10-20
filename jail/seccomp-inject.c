@@ -37,6 +37,9 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <limits.h>
+#if defined(__mips__)
+#include <asm/hwcap.h>
+#endif
 
 #include "log.h"
 #include "seccomp-inject.h"
@@ -53,6 +56,9 @@
 #endif
 #ifndef AT_ENTRY
 #define AT_ENTRY 9
+#endif
+#ifndef AT_HWCAP
+#define AT_HWCAP 16
 #endif
 #ifndef AT_BASE
 #define AT_BASE 7
@@ -635,11 +641,21 @@ __asm__ (
 	".globl inj_syscall_insn_end\ninj_syscall_insn_end:\n"
 	".globl inj_bp_insn\ninj_bp_insn:\n\t" INJ_BP_ASM "\n"
 	".globl inj_bp_insn_end\ninj_bp_insn_end:\n"
+#if defined(__mips__)
+	".globl inj_bp_insn_mips16\ninj_bp_insn_mips16:\n\t.hword 0xe805\n"
+	".globl inj_bp_insn_mips16_end\ninj_bp_insn_mips16_end:\n"
+	".globl inj_bp_insn_micromips\ninj_bp_insn_micromips:\n\t.hword 0x4680\n"
+	".globl inj_bp_insn_micromips_end\ninj_bp_insn_micromips_end:\n"
+#endif
 	INJ_ASM_POP
 	".popsection\n"
 );
 extern const unsigned char inj_syscall_insn[], inj_syscall_insn_end[];
 extern const unsigned char inj_bp_insn[], inj_bp_insn_end[];
+#if defined(__mips__)
+extern const unsigned char inj_bp_insn_mips16[], inj_bp_insn_mips16_end[];
+extern const unsigned char inj_bp_insn_micromips[], inj_bp_insn_micromips_end[];
+#endif
 
 #define inj_syscall_len()	((size_t)(inj_syscall_insn_end - inj_syscall_insn))
 #define inj_bp_len()		((size_t)(inj_bp_insn_end - inj_bp_insn))
@@ -822,6 +838,50 @@ static int read_auxv(pid_t pid, unsigned long type, unsigned long *val)
 	close(fd);
 	return ret;
 }
+
+#if defined(__mips__)
+/* bit 0 selects MIPS16 or microMIPS, whichever ISA the CPU implements */
+static unsigned long inj_code_addr(unsigned long pc)
+{
+	return pc & ~1UL;
+}
+
+static const unsigned char *inj_bp_insn_at(pid_t pid, unsigned long addr,
+					   size_t *len)
+{
+	unsigned long hwcap = 0;
+
+	if (!(addr & 1UL)) {
+		*len = inj_bp_len();
+		return inj_bp_insn;
+	}
+
+	if (!read_auxv(pid, AT_HWCAP, &hwcap) && (hwcap & HWCAP_MIPS_MIPS16)) {
+		*len = (size_t)(inj_bp_insn_mips16_end - inj_bp_insn_mips16);
+		return inj_bp_insn_mips16;
+	}
+
+	*len = (size_t)(inj_bp_insn_micromips_end - inj_bp_insn_micromips);
+	return inj_bp_insn_micromips;
+}
+#else
+static unsigned long inj_code_addr(unsigned long pc)
+{
+	return pc;
+}
+
+#if !defined(__arm__)
+static const unsigned char *inj_bp_insn_at(pid_t pid, unsigned long addr,
+					   size_t *len)
+{
+	(void)pid;
+	(void)addr;
+
+	*len = inj_bp_len();
+	return inj_bp_insn;
+}
+#endif
+#endif
 
 #if defined(__arm__)
 
@@ -1034,17 +1094,19 @@ restore:
 #if !defined(__arm__)
 static int run_to_addr(pid_t pid, unsigned long addr)
 {
-	const unsigned char *bp = inj_bp_insn;
-	size_t bplen = inj_bp_len();
+	unsigned long bpaddr = inj_code_addr(addr);
 	unsigned char saved[INJ_INSN_MAX];
-	inj_regs regs;
+	const unsigned char *bp;
 	int status, sig = 0;
+	inj_regs regs;
+	size_t bplen;
 
-	if (inj_peek(pid, addr, saved, bplen)) {
+	bp = inj_bp_insn_at(pid, addr, &bplen);
+	if (inj_peek(pid, bpaddr, saved, bplen)) {
 		ERROR("seccomp-inject: read bp target: %m\n");
 		return -1;
 	}
-	if (inj_poke(pid, addr, bp, bplen)) {
+	if (inj_poke(pid, bpaddr, bp, bplen)) {
 		ERROR("seccomp-inject: poke breakpoint: %m\n");
 		return -1;
 	}
@@ -1076,12 +1138,12 @@ static int run_to_addr(pid_t pid, unsigned long addr)
 		ERROR("seccomp-inject: SETREGSET at bp: %m\n");
 		goto restore;
 	}
-	inj_poke(pid, addr, saved, bplen);
+	inj_poke(pid, bpaddr, saved, bplen);
 
 	return 0;
 
 restore:
-	inj_poke(pid, addr, saved, bplen);
+	inj_poke(pid, bpaddr, saved, bplen);
 	return -1;
 }
 #endif
@@ -1239,17 +1301,18 @@ int seccomp_bp_arm(pid_t pid, unsigned long addr, struct seccomp_bp *bp)
 	bp->addr = addr & ~1UL;
 	ins = arm_bp_insn(thumb, &len);
 #else
-	const unsigned char *ins = inj_bp_insn;
-	size_t len = inj_bp_len();
+	const unsigned char *ins;
+	size_t len;
 
+	ins = inj_bp_insn_at(pid, addr, &len);
 	bp->addr = addr;
 #endif
 
 	if (len > sizeof(bp->saved))
 		return -1;
-	if (inj_peek(pid, bp->addr, bp->saved, len))
+	if (inj_peek(pid, inj_code_addr(bp->addr), bp->saved, len))
 		return -1;
-	if (inj_poke(pid, bp->addr, ins, len))
+	if (inj_poke(pid, inj_code_addr(bp->addr), ins, len))
 		return -1;
 
 	bp->len = (unsigned char)len;
@@ -1278,7 +1341,7 @@ int seccomp_bp_match(pid_t pid, struct seccomp_bp **bps, int n)
 		if (pc != bps[i]->addr && pc != bps[i]->addr + bps[i]->len)
 			continue;
 
-		inj_poke(pid, bps[i]->addr, bps[i]->saved, bps[i]->len);
+		inj_poke(pid, inj_code_addr(bps[i]->addr), bps[i]->saved, bps[i]->len);
 		inj_set_pc(&regs, bps[i]->addr);
 		if (inj_setregs(pid, &regs))
 			return -1;
@@ -1407,7 +1470,7 @@ int seccomp_inject(pid_t pid, struct sock_fprog *prog)
 		return -1;
 	}
 
-	pc = inj_pc(&saved);
+	pc = inj_code_addr(inj_pc(&saved));
 	sp = inj_sp(&saved);
 	filterlen = (size_t)prog->len * sizeof(struct sock_filter);
 
