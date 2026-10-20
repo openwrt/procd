@@ -1,27 +1,84 @@
-name: OpenWrt CI testing
+name: Build and test
 
-on: [ push, pull_request ]
-env:
-  CI_ENABLE_UNIT_TESTING: 0
-  CI_TARGET_BUILD_DEPENDS: libubox
-  CI_CMAKE_EXTRA_BUILD_ARGS: -DJAIL_SUPPORT=1
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  native_testing:
-    name: Various native checks
-    runs-on: ubuntu-20.04
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - i386_pentium4
+          - aarch64_generic
+          - arm_cortex-a15_neon-vfpv4
+          - mips_24kc
+          - mipsel_24kc
+          - powerpc_8548
+        packages:
+          - procd procd-selinux procd-ujail procd-seccomp uxc
+        include:
+          - arch: riscv64_generic
+            packages: procd procd-selinux procd-ujail uxc
 
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v7
 
-      - uses: ynezz/gh-actions-openwrt-ci-native@v0.0.1
+      - name: Build
+        env:
+          ARTIFACTS: ${{ runner.temp }}/artifacts
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          mkdir -p "$ARTIFACTS"
+          sudo chown -R 1000:1000 "$GITHUB_WORKSPACE" "$ARTIFACTS"
+          docker run --rm \
+            --env PACKAGES \
+            --volume "$GITHUB_WORKSPACE:/procd" \
+            --volume "$GITHUB_WORKSPACE/.github/scripts:/ci:ro" \
+            --volume "$ARTIFACTS:/artifacts" \
+            ghcr.io/openwrt/sdk:${{ matrix.arch }}-master \
+            /ci/sdk-build.sh
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v2
-        if: failure()
+      - name: Restore ownership
+        if: always()
+        env:
+          ARTIFACTS: ${{ runner.temp }}/artifacts
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$ARTIFACTS"
+
+      - name: Sizes
+        env:
+          ARTIFACTS: ${{ runner.temp }}/artifacts
+        run: |
+          {
+            echo "### ${{ matrix.arch }}"
+            echo "| package | apk size |"
+            echo "| :--- | ---: |"
+            awk '{ printf "| %s | %s |\n", $1, $2 }' "$ARTIFACTS/sizes.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
         with:
-          name: native-build-artifacts
+          name: packages-${{ matrix.arch }}
+          path: ${{ runner.temp }}/artifacts/apk/
+          if-no-files-found: error
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ matrix.arch }}
+          path: ${{ runner.temp }}/artifacts/logs/
           if-no-files-found: ignore
-          path: |
-            build/scan
-            tests/cram/**/*.t.err
