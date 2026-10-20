@@ -23,6 +23,15 @@ echo "};"
 
 extra_syscalls="$(echo "#include <sys/syscall.h>" | ${CC} -E -dM - | sed -r -n -e 's/^#define __ARM_NR_([a-z0-9_]+)/\1/p')"
 
+# libc renames some syscalls (clock_gettime32), profiles use the kernel's names
+echo "static const struct { const char *name; int nr; } __syscall_aliases[] = {"
+printf '#include <sys/syscall.h>\n#include <asm/unistd.h>\n' | ${CC} -E -dM - | \
+	grep '^#define __NR_[a-z0-9_]\+[ \t].*[0-9].*$' | LC_ALL=C sort -u -k2,2 | \
+	LC_ALL=C sed -r -n -e 's/^\#define[ \t]+__NR_([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_LSYCABE]+)(.*)/ { "\1", \2 },/p'
+echo "$extra_syscalls" | \
+	LC_ALL=C sed -r -n -e 's/^([a-z0-9_]+)[ \t]+([ ()+0-9a-zNR_LAMBSE]+)(.*)/ { "\1", \2 },/p'
+echo "};"
+
 cat <<EOF
 static inline const char *syscall_name(unsigned i) {
   if (i < ARRAY_SIZE(__syscall_names))

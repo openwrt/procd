@@ -15,13 +15,11 @@
 
 static int find_syscall(const char *name)
 {
-	int i;
+	size_t i;
 
-	for (i = 0; i < SYSCALL_COUNT; i++) {
-		int sc = syscall_index_to_number(i);
-		if (syscall_name(sc) && !strcmp(syscall_name(sc), name))
-			return sc;
-	}
+	for (i = 0; i < ARRAY_SIZE(__syscall_aliases); i++)
+		if (!strcmp(__syscall_aliases[i].name, name))
+			return __syscall_aliases[i].nr;
 
 	return -1;
 }
