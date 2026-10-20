@@ -1,0 +1,78 @@
+#!/bin/sh
+
+. /usr/libexec/procd-ci/tap.sh
+
+SVC=procd-ci-sleeper
+WAIT_EVENT=/usr/libexec/procd-ci/wait-event.uc
+
+instance_pid() {
+	ubus call service list "{\"name\":\"$SVC\"}" | \
+		jsonfilter -e "@['$SVC'].instances.instance1.pid"
+}
+
+pid1_is_procd() {
+	[ "$(cat /proc/1/comm)" = procd ]
+}
+
+init_completed() {
+	{ dmesg; logread; } | grep -q 'procd: - init complete -'
+}
+
+root_is_overlay() {
+	awk '$2 == "/" { fs = $3 } END { exit fs != "overlay" }' /proc/mounts
+}
+
+ubus_answers() {
+	ubus call system "$1" >/dev/null
+}
+
+log_service_running() {
+	local svc
+
+	svc="$(ubus call service list '{"name":"log"}')"
+	echo "$svc"
+	[ "$(echo "$svc" | jsonfilter -e '@.log.instances.*.running')" = true ]
+}
+
+pid_alive() {
+	[ -n "$1" ] && kill -0 "$1" 2>/dev/null
+}
+
+service_start() {
+	ucode "$WAIT_EVENT" instance.start "$SVC" "/etc/init.d/$SVC" start && \
+		pid_alive "$(instance_pid)"
+}
+
+service_respawn() {
+	local old new
+
+	old="$(instance_pid)"
+	pid_alive "$old" || return 1
+	ucode "$WAIT_EVENT" instance.start "$SVC" /bin/kill -9 "$old" || return 1
+	new="$(instance_pid)"
+	[ "$new" != "$old" ] && pid_alive "$new" && ! pid_alive "$old"
+}
+
+service_stop() {
+	local old
+
+	old="$(instance_pid)"
+	ucode "$WAIT_EVENT" service.stop "$SVC" "/etc/init.d/$SVC" stop && \
+		! kill -0 "$old" 2>/dev/null
+}
+
+service_gone() {
+	! ubus call service list "{\"name\":\"$SVC\"}" | grep -q "\"$SVC\""
+}
+
+tap_check "pid 1 is procd" pid1_is_procd
+tap_check "boot reached init complete" init_completed
+tap_check "root is the squashfs overlay" root_is_overlay
+tap_check "system board" ubus_answers board
+tap_check "system info" ubus_answers info
+tap_check "log service running" log_service_running
+tap_check "service starts" service_start
+tap_check "service respawns after SIGKILL" service_respawn
+tap_check "service stops" service_stop
+tap_check "stopped service is removed" service_gone
+tap_done

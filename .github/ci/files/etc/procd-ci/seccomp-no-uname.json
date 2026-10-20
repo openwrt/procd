@@ -1,0 +1,25 @@
+{
+	"defaultAction": "SCMP_ACT_KILL_PROCESS",
+	"syscalls": [
+		{
+			"names": [
+				"exit",
+				"exit_group",
+				"getegid",
+				"getegid32",
+				"geteuid",
+				"geteuid32",
+				"getgid",
+				"getgid32",
+				"getpid",
+				"getuid",
+				"getuid32",
+				"ioctl",
+				"prctl",
+				"write",
+				"writev"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		}
+	]
+}

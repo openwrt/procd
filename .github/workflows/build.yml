@@ -82,3 +82,101 @@ jobs:
           name: logs-${{ matrix.arch }}
           path: ${{ runner.temp }}/artifacts/logs/
           if-no-files-found: ignore
+
+  test:
+    name: Test ${{ matrix.target }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86-64
+            arch: x86_64
+            qemu: qemu-system-x86
+            packages: uxc procd-seccomp oci-runtime-tests ucode-mod-ubus ucode-mod-uloop
+            suites: smoke ujail oci
+          - target: x86-generic
+            arch: i386_pentium4
+            qemu: qemu-system-x86
+            packages: uxc procd-seccomp oci-runtime-tests ucode-mod-ubus ucode-mod-uloop
+            suites: smoke ujail oci
+          - target: armsr-armv8
+            arch: aarch64_generic
+            qemu: qemu-system-arm
+            packages: uxc procd-seccomp ucode-mod-ubus ucode-mod-uloop
+            suites: smoke ujail
+          - target: armsr-armv7
+            arch: arm_cortex-a15_neon-vfpv4
+            qemu: qemu-system-arm
+            packages: uxc procd-seccomp ucode-mod-ubus ucode-mod-uloop
+            suites: smoke ujail
+          - target: malta-be
+            arch: mips_24kc
+            qemu: qemu-system-mips
+            packages: uxc procd-seccomp ucode-mod-ubus ucode-mod-uloop
+            suites: smoke ujail
+          - target: malta-le
+            arch: mipsel_24kc
+            qemu: qemu-system-mips
+            packages: uxc procd-seccomp ucode-mod-ubus ucode-mod-uloop
+            suites: smoke ujail
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          name: packages-${{ matrix.arch }}
+          path: ${{ runner.temp }}/packages
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.qemu }}
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | \
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build image
+        env:
+          IMAGES: ${{ runner.temp }}/images
+          PACKAGES: ${{ matrix.packages }}
+          SUITES: ${{ matrix.suites }}
+        run: |
+          mkdir -p "$IMAGES"
+          sudo chown -R 1000:1000 "$IMAGES"
+          docker run --rm \
+            --env PACKAGES \
+            --env SUITES \
+            --volume "${{ runner.temp }}/packages:/packages:ro" \
+            --volume "$GITHUB_WORKSPACE/.github/ci:/ci:ro" \
+            --volume "$GITHUB_WORKSPACE/.github/scripts:/scripts:ro" \
+            --volume "$IMAGES:/out" \
+            ghcr.io/openwrt/imagebuilder:${{ matrix.target }}-master \
+            /scripts/image-build.sh
+          sudo chown -R "$(id -u):$(id -g)" "$IMAGES"
+
+      - name: Run tests
+        run: |
+          .github/scripts/vm-run.sh ${{ matrix.target }} \
+            "${{ runner.temp }}/images" "${{ runner.temp }}/results"
+
+      - name: Evaluate
+        run: |
+          .github/scripts/evaluate.sh "${{ runner.temp }}/results" \
+            ${{ matrix.target }} ${{ matrix.suites }}
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: results-${{ matrix.target }}
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: ignore

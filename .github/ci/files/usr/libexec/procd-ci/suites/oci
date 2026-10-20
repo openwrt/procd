@@ -1,0 +1,14 @@
+#!/bin/sh
+
+TESTS=/usr/libexec/oci-runtime-test
+WORK=/tmp/oci-runtime-test
+
+mkdir -p "$WORK"
+cd "$WORK" || exit 1
+cp "$TESTS/runtimetest" "$TESTS"/rootfs-*.tar.gz . || exit 1
+
+for t in "$TESTS"/*.t; do
+	echo "### $(basename "$t" .t)"
+	RUNTIME=uxc "$t" 2>&1
+	echo "# exit status $?"
+done

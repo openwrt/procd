@@ -1,0 +1,33 @@
+#!/bin/sh
+
+OUT=/tmp/procd-ci
+MAGIC=PROCD-CI-RESULTS
+
+results_dev() {
+	local blk dev
+
+	for blk in /sys/class/block/*; do
+		[ -e "$blk/partition" ] && continue
+		dev="/dev/${blk##*/}"
+		[ "$(head -c ${#MAGIC} "$dev" 2>/dev/null)" = "$MAGIC" ] || continue
+		echo "$dev"
+		return 0
+	done
+	return 1
+}
+
+mkdir -p "$OUT"
+for suite in $(cat /etc/procd-ci/suites); do
+	echo "procd-ci: suite $suite" > /dev/console
+	"/usr/libexec/procd-ci/suites/$suite" > "$OUT/$suite.out" 2> "$OUT/$suite.err"
+	echo "$?" > "$OUT/$suite.rc"
+	[ "$suite" = oci ] || cat "$OUT/$suite.out" > /dev/console
+done
+
+logread > "$OUT/logread.txt"
+dmesg > "$OUT/dmesg.txt"
+
+dev="$(results_dev)" && tar -C "$OUT" -cf "$dev" .
+sync
+poweroff
+exec sleep 2147483647

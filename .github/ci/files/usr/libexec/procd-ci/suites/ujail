@@ -1,0 +1,51 @@
+#!/bin/sh
+
+. /usr/libexec/procd-ci/tap.sh
+
+PROFILE=/etc/procd-ci/seccomp-no-uname.json
+TRACE=/tmp/procd-ci-complain.ndjson
+
+jail_hostname() {
+	local name
+
+	name="$(ujail -n procd-ci -h procd-ci-jail -- /bin/busybox uname -n)"
+	echo "# nodename $name"
+	[ "$name" = procd-ci-jail ]
+}
+
+complain() {
+	rm -f "$TRACE"
+	ujail -c -m complain -M "$TRACE" -S "$PROFILE" -- "$@" >/dev/null
+	cat "$TRACE"
+}
+
+seccomp_allows() {
+	ujail -c -S "$PROFILE" -- /bin/busybox true && return 0
+
+	complain /bin/busybox true
+	return 1
+}
+
+seccomp_kills() {
+	local ret
+
+	ujail -c -S "$PROFILE" -- /bin/busybox uname >/dev/null
+	ret=$?
+	echo "# exit status $ret"
+	[ "$ret" -eq $((128 + $(kill -l SYS))) ] || return 1
+
+	[ "$(complain /bin/busybox uname | jsonfilter -a -e '@[@.action="kill"].syscall')" = uname ]
+}
+
+trace_reaches_main() {
+	rm -f "$TRACE"
+	ujail -c -m trace -M "$TRACE" -- /bin/busybox true || return 1
+	cat "$TRACE"
+	jsonfilter -a -e '@[@.phase="app"].syscall' < "$TRACE" | grep -qx exit_group
+}
+
+tap_check "jail gets its own hostname" jail_hostname
+tap_check "seccomp profile admits the loader and listed syscalls" seccomp_allows
+tap_check "seccomp profile kills an unlisted syscall" seccomp_kills
+tap_check "seccomp trace follows the workload into main" trace_reaches_main
+tap_done
