@@ -88,7 +88,7 @@ malta-be|malta-le)
 esac
 
 echo "::group::console"
-"$@" -nographic -no-reboot -nic none 2>&1 | tee "$OUT/console.log"
+"$@" -nographic -vga none -no-reboot -nic none 2>&1 | tee "$OUT/console.log"
 echo "::endgroup::"
 
 grep -q 'reboot: Power down' "$OUT/console.log" || {
