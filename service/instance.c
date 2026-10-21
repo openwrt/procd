@@ -887,6 +887,21 @@ instance_respawn_reset(struct service_instance *in, long runtime)
 	return runtime >= in->respawn_threshold;
 }
 
+static const char *
+instance_exit_how(struct service_instance *in)
+{
+	return in->exit_signalled ? "killed by signal" : "exited with code";
+}
+
+static int
+instance_exit_value(struct service_instance *in)
+{
+	if (in->exit_signalled)
+		return in->exit_code - SIGNALLED_OFFSET;
+
+	return in->exit_code;
+}
+
 static bool
 instance_respawn_schedule(struct service_instance *in, long runtime)
 {
@@ -898,14 +913,18 @@ instance_respawn_schedule(struct service_instance *in, long runtime)
 		in->respawn_count++;
 
 	if (in->respawn_count > in->respawn_retry && in->respawn_retry > 0) {
-		LOG("Instance %s::%s s in a crash loop %d crashes, %ld seconds since last crash\n",
-		    in->srv->name, in->name, in->respawn_count, runtime);
+		LOG("Instance %s::%s pid %d %s %d after %ld seconds, in a crash loop with %d crashes, not respawned\n",
+		    in->srv->name, in->name, in->proc.pid, instance_exit_how(in),
+		    instance_exit_value(in), runtime, in->respawn_count);
 		in->restart = in->respawn = 0;
 		service_event_instance_exit("instance.fail", in);
 		return false;
 	}
 
 	delay = instance_respawn_delay(in);
+	LOG("Instance %s::%s pid %d %s %d after %ld seconds, respawn count %d, respawn in %u ms\n",
+	    in->srv->name, in->name, in->proc.pid, instance_exit_how(in),
+	    instance_exit_value(in), runtime, in->respawn_count, delay);
 	in->respawn_next = uptime_get() + delay / 1000;
 	service_event_instance_exit("instance.respawn", in);
 	uloop_timeout_set(&in->timeout, delay);
