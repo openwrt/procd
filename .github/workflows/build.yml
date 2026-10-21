@@ -86,6 +86,7 @@ jobs:
   test:
     name: Test ${{ matrix.target }}
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
