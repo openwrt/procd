@@ -13,14 +13,14 @@ killsig 3 0
 linux_cgroups_blkio 40 0
 linux_cgroups_cpus 96 0
 linux_cgroups_devices 1 0
-linux_cgroups_hugetlb 0 0
+linux_cgroups_hugetlb 1 0
 linux_cgroups_memory 30 0
 linux_cgroups_network 1 0
 linux_cgroups_pids 3 0
 linux_cgroups_relative_blkio 10 0
 linux_cgroups_relative_cpus 6 0
 linux_cgroups_relative_devices 1 0
-linux_cgroups_relative_hugetlb 0 1
+linux_cgroups_relative_hugetlb 1 0
 linux_cgroups_relative_memory 5 0
 linux_cgroups_relative_network 1 0
 linux_cgroups_relative_pids 3 0

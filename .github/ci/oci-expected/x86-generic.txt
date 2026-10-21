@@ -13,14 +13,14 @@ killsig 3 0
 linux_cgroups_blkio 40 0
 linux_cgroups_cpus 96 0
 linux_cgroups_devices 1 0
-linux_cgroups_hugetlb 1 1
+linux_cgroups_hugetlb 1 0
 linux_cgroups_memory 30 0
 linux_cgroups_network 1 0
 linux_cgroups_pids 3 0
 linux_cgroups_relative_blkio 10 0
 linux_cgroups_relative_cpus 6 0
 linux_cgroups_relative_devices 1 0
-linux_cgroups_relative_hugetlb 0 1
+linux_cgroups_relative_hugetlb 1 0
 linux_cgroups_relative_memory 5 0
 linux_cgroups_relative_network 1 0
 linux_cgroups_relative_pids 3 0
@@ -50,7 +50,7 @@ process 309 0
 process_capabilities 302 0
 process_capabilities_fail 0 0
 process_oom_score_adj 307 0
-process_rlimits 312 7
+process_rlimits 311 0
 process_rlimits_fail 0 0
 process_user 308 0
 root_readonly_true 308 0
