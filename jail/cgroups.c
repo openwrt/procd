@@ -312,6 +312,9 @@ static const char *cgroups_oci_name(const char *key)
 	if (!strcmp(key, "cpu.max.burst"))
 		return "linux.resources.cpu.burst";
 
+	if (!strncmp(key, "hugetlb.", 8))
+		return "linux.resources.hugepageLimits";
+
 	return key;
 }
 
@@ -1440,6 +1443,63 @@ static int parseOCIlinuxcgroups_legacy_pids(struct blob_attr *msg)
 	return 0;
 }
 
+enum {
+	OCI_LINUX_CGROUPS_HUGEPAGELIMIT_PAGESIZE,
+	OCI_LINUX_CGROUPS_HUGEPAGELIMIT_LIMIT,
+	__OCI_LINUX_CGROUPS_HUGEPAGELIMIT_MAX,
+};
+
+static const struct blobmsg_policy oci_linux_cgroups_hugepagelimit_policy[] = {
+	[OCI_LINUX_CGROUPS_HUGEPAGELIMIT_PAGESIZE] = { "pageSize", BLOBMSG_TYPE_STRING },
+	[OCI_LINUX_CGROUPS_HUGEPAGELIMIT_LIMIT] = { "limit", BLOBMSG_CAST_INT64 },
+};
+
+static bool hugepage_size_valid(const char *size)
+{
+	size_t len = strspn(size, "0123456789");
+
+	if (!len)
+		return false;
+
+	if (size[len] && strchr("KMG", size[len]))
+		len++;
+
+	return !strcmp(&size[len], "B");
+}
+
+static int parseOCIlinuxcgroups_hugepagelimits(struct blob_attr *msg)
+{
+	struct blob_attr *tb[__OCI_LINUX_CGROUPS_HUGEPAGELIMIT_MAX];
+	char key[NAME_MAX + 1], val[32];
+	struct blob_attr *cur;
+	const char *size;
+	int rem;
+
+	blobmsg_for_each_attr(cur, msg, rem) {
+		if (blobmsg_type(cur) != BLOBMSG_TYPE_TABLE)
+			return EINVAL;
+
+		blobmsg_parse(oci_linux_cgroups_hugepagelimit_policy,
+			      __OCI_LINUX_CGROUPS_HUGEPAGELIMIT_MAX, tb,
+			      blobmsg_data(cur), blobmsg_len(cur));
+
+		if (!tb[OCI_LINUX_CGROUPS_HUGEPAGELIMIT_PAGESIZE] ||
+		    !tb[OCI_LINUX_CGROUPS_HUGEPAGELIMIT_LIMIT])
+			return EINVAL;
+
+		size = blobmsg_get_string(tb[OCI_LINUX_CGROUPS_HUGEPAGELIMIT_PAGESIZE]);
+		if (!hugepage_size_valid(size))
+			return EINVAL;
+
+		snprintf(key, sizeof(key), "hugetlb.%s.max", size);
+		snprintf(val, sizeof(val), "%" PRIu64,
+			 blobmsg_cast_u64(tb[OCI_LINUX_CGROUPS_HUGEPAGELIMIT_LIMIT]));
+		cgroups_set(key, val);
+	}
+
+	return 0;
+}
+
 static int parseOCIlinuxcgroups_unified(struct blob_attr *msg)
 {
 	struct blob_attr *cur;
@@ -1497,9 +1557,6 @@ int parseOCIlinuxcgroups(struct blob_attr *msg, bool is_update)
 
 	blobmsg_parse(oci_linux_cgroups_policy, __OCI_LINUX_CGROUPS_MAX, tb, blobmsg_data(msg), blobmsg_len(msg));
 
-	if (tb[OCI_LINUX_CGROUPS_HUGEPAGELIMITS])
-		return jail_unsupported(tb[OCI_LINUX_CGROUPS_HUGEPAGELIMITS]);
-
 	if (tb[OCI_LINUX_CGROUPS_INTELRDT])
 		return jail_unsupported(tb[OCI_LINUX_CGROUPS_INTELRDT]);
 
@@ -1523,6 +1580,12 @@ int parseOCIlinuxcgroups(struct blob_attr *msg, bool is_update)
 
 	if (tb[OCI_LINUX_CGROUPS_DEVICES]) {
 		ret = parseOCIlinuxcgroups_devices(tb[OCI_LINUX_CGROUPS_DEVICES]);
+		if (ret)
+			return ret;
+	}
+
+	if (tb[OCI_LINUX_CGROUPS_HUGEPAGELIMITS]) {
+		ret = parseOCIlinuxcgroups_hugepagelimits(tb[OCI_LINUX_CGROUPS_HUGEPAGELIMITS]);
 		if (ret)
 			return ret;
 	}
