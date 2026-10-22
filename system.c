@@ -378,7 +378,10 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	void *c;
 	char line[256];
 	char *key, *val;
+	uint64_t uptime, total, free, shared, buffered, swap_total, swap_free;
 	unsigned long long available, cached;
+	uint32_t loads[3];
+	double up, load[3];
 	FILE *f;
 	int i;
 	struct statvfs s;
@@ -390,28 +393,63 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	if (sysinfo(&info))
 		return UBUS_STATUS_UNKNOWN_ERROR;
 
-	if ((f = fopen("/proc/meminfo", "r")) == NULL)
-		return UBUS_STATUS_UNKNOWN_ERROR;
+	uptime = info.uptime;
+	for (i = 0; i < 3; i++)
+		loads[i] = info.loads[i];
+
+	total = (uint64_t)info.mem_unit * info.totalram;
+	free = (uint64_t)info.mem_unit * info.freeram;
+	shared = (uint64_t)info.mem_unit * info.sharedram;
+	buffered = (uint64_t)info.mem_unit * info.bufferram;
+	swap_total = (uint64_t)info.mem_unit * info.totalswap;
+	swap_free = (uint64_t)info.mem_unit * info.freeswap;
 
 	/* if linux < 3.14 MemAvailable is not in meminfo */
 	available = 0;
 	cached = 0;
 
-	while (fgets(line, sizeof(line), f))
-	{
-		key = strtok(line, " :");
-		val = strtok(NULL, " ");
+	if ((f = fopen("/proc/meminfo", "r"))) {
+		while (fgets(line, sizeof(line), f)) {
+			key = strtok(line, " :");
+			val = strtok(NULL, " ");
 
-		if (!key || !val)
-			continue;
+			if (!key || !val)
+				continue;
 
-		if (!strcasecmp(key, "MemAvailable"))
-			available = 1024 * atoll(val);
-		else if (!strcasecmp(key, "Cached"))
-			cached = 1024 * atoll(val);
+			if (!strcasecmp(key, "MemTotal"))
+				total = 1024 * atoll(val);
+			else if (!strcasecmp(key, "MemFree"))
+				free = 1024 * atoll(val);
+			else if (!strcasecmp(key, "Shmem"))
+				shared = 1024 * atoll(val);
+			else if (!strcasecmp(key, "Buffers"))
+				buffered = 1024 * atoll(val);
+			else if (!strcasecmp(key, "MemAvailable"))
+				available = 1024 * atoll(val);
+			else if (!strcasecmp(key, "Cached"))
+				cached = 1024 * atoll(val);
+			else if (!strcasecmp(key, "SwapTotal"))
+				swap_total = 1024 * atoll(val);
+			else if (!strcasecmp(key, "SwapFree"))
+				swap_free = 1024 * atoll(val);
+		}
+
+		fclose(f);
 	}
 
-	fclose(f);
+	if ((f = fopen("/proc/uptime", "r"))) {
+		if (fscanf(f, "%lf", &up) == 1 && up > 0)
+			uptime = (uint64_t)up;
+		fclose(f);
+	}
+
+	if ((f = fopen("/proc/loadavg", "r"))) {
+		if (fscanf(f, "%lf %lf %lf", &load[0], &load[1], &load[2]) == 3)
+			for (i = 0; i < 3; i++)
+				loads[i] = load[i] > 0 ?
+					(uint32_t)(load[i] * 65536 + 0.5) : 0;
+		fclose(f);
+	}
 #endif
 
 	now = time(NULL);
@@ -425,23 +463,19 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_add_u32(&b, "unixtime", now);
 
 #ifdef linux
-	blobmsg_add_u32(&b, "uptime",    info.uptime);
+	blobmsg_add_u32(&b, "uptime", (uint32_t)uptime);
 
 	c = blobmsg_open_array(&b, "load");
-	blobmsg_add_u32(&b, NULL, info.loads[0]);
-	blobmsg_add_u32(&b, NULL, info.loads[1]);
-	blobmsg_add_u32(&b, NULL, info.loads[2]);
+	blobmsg_add_u32(&b, NULL, loads[0]);
+	blobmsg_add_u32(&b, NULL, loads[1]);
+	blobmsg_add_u32(&b, NULL, loads[2]);
 	blobmsg_close_array(&b, c);
 
 	c = blobmsg_open_table(&b, "memory");
-	blobmsg_add_u64(&b, "total",
-			(uint64_t)info.mem_unit * (uint64_t)info.totalram);
-	blobmsg_add_u64(&b, "free",
-			(uint64_t)info.mem_unit * (uint64_t)info.freeram);
-	blobmsg_add_u64(&b, "shared",
-			(uint64_t)info.mem_unit * (uint64_t)info.sharedram);
-	blobmsg_add_u64(&b, "buffered",
-			(uint64_t)info.mem_unit * (uint64_t)info.bufferram);
+	blobmsg_add_u64(&b, "total", total);
+	blobmsg_add_u64(&b, "free", free);
+	blobmsg_add_u64(&b, "shared", shared);
+	blobmsg_add_u64(&b, "buffered", buffered);
 	blobmsg_add_u64(&b, "available", available);
 	blobmsg_add_u64(&b, "cached", cached);
 	blobmsg_close_table(&b, c);
@@ -464,10 +498,8 @@ static int system_info(struct ubus_context *ctx, struct ubus_object *obj,
 	}
 
 	c = blobmsg_open_table(&b, "swap");
-	blobmsg_add_u64(&b, "total",
-			(uint64_t)info.mem_unit * (uint64_t)info.totalswap);
-	blobmsg_add_u64(&b, "free",
-			(uint64_t)info.mem_unit * (uint64_t)info.freeswap);
+	blobmsg_add_u64(&b, "total", swap_total);
+	blobmsg_add_u64(&b, "free", swap_free);
 	blobmsg_close_table(&b, c);
 #endif
 
