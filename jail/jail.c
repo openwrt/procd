@@ -7482,12 +7482,15 @@ static void post_main(struct uloop_timeout *t)
 					char hostdir[PATH_MAX], hostresolv[PATH_MAX];
 					int hostresolvfd;
 
-					snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name);
+					if (snprintf(hostdir, PATH_MAX, "/tmp/resolv.conf-%s.d", opts.name) >= PATH_MAX ||
+					    snprintf(hostresolv, PATH_MAX, "%s/resolv.conf.auto", hostdir) >= PATH_MAX) {
+						ERROR("resolv.conf path for %s is too long\n", opts.name);
+						free_and_exit(-1);
+					}
 					if (mkdir_p(hostdir, 0755)) {
 						ERROR("mkdir(%s) failed: %m\n", hostdir);
 						free_and_exit(-1);
 					}
-					snprintf(hostresolv, PATH_MAX, "%s/resolv.conf.auto", hostdir);
 					hostresolvfd = open(hostresolv, O_WRONLY | O_CREAT, 0644);
 					if (hostresolvfd >= 0)
 						close(hostresolvfd);
