@@ -2247,7 +2247,7 @@ instance_config_parse(struct service_instance *in)
 
 		if (vals[1] > 0) {
 			in->watchdog.freq = vals[1];
-			P_DEBUG(3, "setting watchdog timeout (%d)\n", vals[0]);
+			P_DEBUG(3, "setting watchdog timeout (%d)\n", vals[1]);
 		} else {
 			in->watchdog.freq = 30;
 			P_DEBUG(3, "invalid watchdog timeout (%d) given, using default (30)\n", vals[1]);
