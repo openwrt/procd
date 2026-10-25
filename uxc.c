@@ -2124,6 +2124,7 @@ static int shared_secret(const char *root, const char *scope, const char *seed,
 	int ret = -1;
 	int lockfd;
 	size_t n;
+	int len;
 	FILE *f;
 
 	if (!scope || !*scope || *scope == '/' || strstr(scope, ".."))
@@ -2133,9 +2134,15 @@ static int shared_secret(const char *root, const char *scope, const char *seed,
 		    *p != '_' && *p != '.')
 			return -1;
 
-	snprintf(dir, sizeof(dir), "%s/%s", root, scope);
-	snprintf(path, sizeof(path), "%s/value", dir);
-	snprintf(lockpath, sizeof(lockpath), "%s/.lock", root);
+	len = snprintf(dir, sizeof(dir), "%s/%s", root, scope);
+	if (len < 0 || (size_t)len >= sizeof(dir))
+		return -1;
+	len = snprintf(path, sizeof(path), "%s/value", dir);
+	if (len < 0 || (size_t)len >= sizeof(path))
+		return -1;
+	len = snprintf(lockpath, sizeof(lockpath), "%s/.lock", root);
+	if (len < 0 || (size_t)len >= sizeof(lockpath))
+		return -1;
 
 	mkdir_path(root, 0700);
 	lockfd = open(lockpath, O_CREAT | O_RDWR, 0600);
@@ -2273,7 +2280,7 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 	char current[4096], secrets[PATH_MAX], secret[64];
 	struct blob_attr *cur;
 	const char *key, *val;
-	int rem, created;
+	int rem, created, len;
 	bool have;
 	FILE *f;
 
@@ -2281,7 +2288,9 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 	    store_root_find(name, STORE_SECRETS, secrets, sizeof(secrets)))
 		return;
 
-	snprintf(path, sizeof(path), "%s/env", dir);
+	len = snprintf(path, sizeof(path), "%s/env", dir);
+	if (len < 0 || (size_t)len >= sizeof(path))
+		return;
 
 	blobmsg_for_each_attr(cur, initenv, rem) {
 		if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING)
@@ -2294,7 +2303,9 @@ static void materialise_initenv(const char *name, struct blob_attr *initenv)
 		val = blobmsg_get_string(cur);
 		created = 0;
 		if (!strcmp(val, "generate")) {
-			snprintf(scope, sizeof(scope), "%s/%s", name, key);
+			len = snprintf(scope, sizeof(scope), "%s/%s", name, key);
+			if (len < 0 || (size_t)len >= sizeof(scope))
+				continue;
 			created = shared_secret(secrets, scope, have ? current : NULL, secret,
 						sizeof(secret));
 			if (created < 0 || have)
@@ -2366,7 +2377,10 @@ static int env_run_write(const char *name, struct blob_attr *env)
 	if (ret)
 		return ret;
 
-	snprintf(store, sizeof(store), "%s/env", dir);
+	ret = snprintf(store, sizeof(store), "%s/env", dir);
+	if (ret < 0 || (size_t)ret >= sizeof(store))
+		return -ENAMETOOLONG;
+
 	ret = rundir_path(name, "env.run", path, sizeof(path));
 	if (ret)
 		return ret;
@@ -5107,7 +5121,7 @@ static int uxc_list(void)
 	static struct blob_buf buf;
 	struct list_row row;
 	int rem, pass;
-	void *arr;
+	void *arr = NULL;
 	char *tmp;
 
 	if (quiet_output) {
@@ -6183,11 +6197,15 @@ static void reconcile_provision(const char *base)
 	const char *name;
 	glob_t gl;
 	size_t i;
+	int ret;
 
 	if (store_root(base, STORE_PROVISION, root, sizeof(root)))
 		return;
 
-	snprintf(glob_pat, sizeof(glob_pat), "%s/*", root);
+	ret = snprintf(glob_pat, sizeof(glob_pat), "%s/*", root);
+	if (ret < 0 || (size_t)ret >= sizeof(glob_pat))
+		return;
+
 	if (glob(glob_pat, GLOB_NOSORT, NULL, &gl))
 		return;
 
@@ -6247,7 +6265,7 @@ static void reconcile_kept_volumes(const char *base, const char *name)
 	struct blob_attr *vols, *cur;
 	bool first = true;
 	const char *vol;
-	int rem;
+	int rem, len;
 
 	vols = uvol_list_volumes();
 	blobmsg_for_each_attr(cur, vols, rem) {
@@ -6267,7 +6285,10 @@ static void reconcile_kept_volumes(const char *base, const char *name)
 	if (store_root(base, STORE_SECRETS, root, sizeof(root)))
 		return;
 
-	snprintf(secrets, sizeof(secrets), "%s/%s", root, name);
+	len = snprintf(secrets, sizeof(secrets), "%s/%s", root, name);
+	if (len < 0 || (size_t)len >= sizeof(secrets))
+		return;
+
 	if (access(secrets, F_OK))
 		return;
 
@@ -6278,8 +6299,12 @@ static void reconcile_kept_volumes(const char *base, const char *name)
 static int reconcile_purge(const char *base, const char *name, const char *statedir)
 {
 	char path[PATH_MAX];
+	int len;
 
-	snprintf(path, sizeof(path), "%s/settings/%s.json", base, name);
+	len = snprintf(path, sizeof(path), "%s/settings/%s.json", base, name);
+	if (len < 0 || (size_t)len >= sizeof(path))
+		return -ENAMETOOLONG;
+
 	unlink(path);
 
 	if (nftw(statedir, purge_cb, 16, FTW_DEPTH | FTW_PHYS)) {
@@ -6331,7 +6356,7 @@ static int reconcile_base(const char *base, int *purged)
 {
 	char root[PATH_MAX], glob_pat[PATH_MAX];
 	const char *name;
-	int i, ret = 0;
+	int i, len, ret = 0;
 	glob_t gl;
 
 	reconcile_provision(base);
@@ -6339,7 +6364,10 @@ static int reconcile_base(const char *base, int *purged)
 	if (store_root(base, STORE_STATE, root, sizeof(root)))
 		return 0;
 
-	snprintf(glob_pat, sizeof(glob_pat), "%s/*", root);
+	len = snprintf(glob_pat, sizeof(glob_pat), "%s/*", root);
+	if (len < 0 || (size_t)len >= sizeof(glob_pat))
+		return 0;
+
 	if (glob(glob_pat, GLOB_NOSORT, NULL, &gl))
 		return 0;
 
