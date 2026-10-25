@@ -1171,7 +1171,7 @@ static unsigned long find_libc_init(pid_t pid, int *main_argidx)
 	char seen[48][256];
 	unsigned long bases[48];
 	unsigned long lo, hi, val;
-	int nseen = 0, i;
+	int nseen = 0, i, len;
 	FILE *f;
 
 	*main_argidx = 0;
@@ -1198,7 +1198,9 @@ static unsigned long find_libc_init(pid_t pid, int *main_argidx)
 	fclose(f);
 
 	for (i = 0; i < nseen; i++) {
-		snprintf(rooted, sizeof(rooted), "/proc/%d/root%s", (int)pid, seen[i]);
+		len = snprintf(rooted, sizeof(rooted), "/proc/%d/root%s", (int)pid, seen[i]);
+		if (len < 0 || (size_t)len >= sizeof(rooted))
+			continue;
 		val = elf_dynsym_value(rooted, "__libc_start_main");
 		if (val) {
 			*main_argidx = 0;
@@ -1206,7 +1208,9 @@ static unsigned long find_libc_init(pid_t pid, int *main_argidx)
 		}
 	}
 	for (i = 0; i < nseen; i++) {
-		snprintf(rooted, sizeof(rooted), "/proc/%d/root%s", (int)pid, seen[i]);
+		len = snprintf(rooted, sizeof(rooted), "/proc/%d/root%s", (int)pid, seen[i]);
+		if (len < 0 || (size_t)len >= sizeof(rooted))
+			continue;
 		val = elf_dynsym_value(rooted, "__libc_init");
 		if (val) {
 			*main_argidx = 2;
