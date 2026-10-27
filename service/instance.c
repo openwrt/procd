@@ -49,6 +49,22 @@
 #define UJAIL_BIN_PATH "/sbin/ujail"
 #define CGROUP_BASEDIR "/sys/fs/cgroup/services"
 
+#if defined(CGROUP_MONITOR_CPU) || defined(CGROUP_MONITOR_MEMORY) || defined(CGROUP_MONITOR_IO)
+#define CGROUP_MONITORING
+
+static const char * const cgroup_controllers[] = {
+#ifdef CGROUP_MONITOR_CPU
+	"cpu",
+#endif
+#ifdef CGROUP_MONITOR_MEMORY
+	"memory",
+#endif
+#ifdef CGROUP_MONITOR_IO
+	"io",
+#endif
+};
+#endif
+
 enum {
 	INSTANCE_ATTR_COMMAND,
 	INSTANCE_ATTR_ENV,
@@ -722,11 +738,96 @@ instance_run(struct service_instance *in, int _stdout, int _stderr, int _status)
 	exit(127);
 }
 
+#ifdef CGROUP_MONITORING
+static bool
+cgroup_sep(char c)
+{
+	return c == '\0' || c == ' ' || c == '\t' || c == '\n';
+}
+
+static bool
+cgroup_has_controller(const char *list, const char *ctrl)
+{
+	size_t len = strlen(ctrl);
+	const char *p = list;
+
+	while ((p = strstr(p, ctrl))) {
+		if ((p == list || cgroup_sep(p[-1])) && cgroup_sep(p[len]))
+			return true;
+		p += len;
+	}
+
+	return false;
+}
+
+/*
+ * Delegate the configured controllers into a cgroup's subtree_control so they
+ * are available in its children. Only controllers the cgroup actually exposes
+ * are delegated, and failures are non-fatal.
+ */
+static void
+cgroup_delegate(const char *cgdir)
+{
+	char path[256], avail[256];
+	int fd, len;
+	size_t i;
+
+	snprintf(path, sizeof(path), "%s/cgroup.controllers", cgdir);
+	fd = open(path, O_RDONLY);
+	if (fd == -1)
+		return;
+	len = read(fd, avail, sizeof(avail) - 1);
+	close(fd);
+	if (len <= 0)
+		return;
+	avail[len] = '\0';
+
+	snprintf(path, sizeof(path), "%s/cgroup.subtree_control", cgdir);
+	fd = open(path, O_WRONLY);
+	if (fd == -1)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(cgroup_controllers); i++) {
+		if (!cgroup_has_controller(avail, cgroup_controllers[i]))
+			continue;
+		if (dprintf(fd, "+%s", cgroup_controllers[i]) < 0)
+			ULOG_WARN("failed delegating +%s to %s: %m\n",
+				  cgroup_controllers[i], path);
+	}
+
+	close(fd);
+}
+#endif
+
 static int
 instance_add_cgroup(const char *service, const char *instance)
 {
 	char cgnamebuf[256];
 	int ret;
+
+#ifdef CGROUP_MONITORING
+	struct stat sb;
+
+	if (stat("/sys/fs/cgroup/cgroup.subtree_control", &sb))
+		return 0;
+
+	/* delegate top-down so each level's children are accounted from creation */
+	cgroup_delegate("/sys/fs/cgroup");
+
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s", CGROUP_BASEDIR);
+	if (ret >= sizeof(cgnamebuf))
+		return -ENAMETOOLONG;
+	if (mkdir_p(cgnamebuf, 0700))
+		return -EPERM;
+	cgroup_delegate(cgnamebuf);
+
+	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s", CGROUP_BASEDIR, service);
+	if (ret >= sizeof(cgnamebuf))
+		return -ENAMETOOLONG;
+	if (mkdir_p(cgnamebuf, 0700))
+		return -EPERM;
+	cgroup_delegate(cgnamebuf);
+#endif
 
 	ret = snprintf(cgnamebuf, sizeof(cgnamebuf), "%s/%s/%s", CGROUP_BASEDIR,
 		       service, instance);
