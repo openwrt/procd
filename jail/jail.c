@@ -7994,7 +7994,12 @@ int main(int argc, char **argv)
 {
 	uid_t uid = getuid();
 	const char log[] = "/dev/log";
-	const char ubus[] = "/var/run/ubus/ubus.sock";
+	/*
+	 * The directory, not the socket: a restarted ubusd puts a new socket in
+	 * it, and a bind of the old socket would keep the jail on the dead one.
+	 * Read-only, so a jailed service cannot replace the socket for everyone.
+	 */
+	const char ubus[] = "/var/run/ubus";
 	const char udebug[] = "/var/run/udebug.sock";
 	int ret = EXIT_FAILURE;
 	int credidx;
@@ -8157,7 +8162,7 @@ int main(int argc, char **argv)
 			break;
 		case 'u':
 			opts.namespace |= CLONE_NEWNS;
-			add_mount_bind(ubus, 0, -1);
+			add_mount_bind(ubus, 1, -1);
 			break;
 		case 'D':
 			opts.namespace |= CLONE_NEWNS;
