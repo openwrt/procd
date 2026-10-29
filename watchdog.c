@@ -18,6 +18,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #include <unistd.h>
 
@@ -96,9 +97,20 @@ static int watchdog_set_drv_timeout(void)
 		return 0;
 
 	ERROR("WDT failed to set timeout %ds: %m\n", wdt_drv_timeout);
-	ioctl(wdt_fd, WDIOC_GETTIMEOUT, &wdt_drv_timeout);
+	if (ioctl(wdt_fd, WDIOC_GETTIMEOUT, &wdt_drv_timeout))
+		ERROR("WDT failed to read the timeout back: %m\n");
 
 	return -1;
+}
+
+static void watchdog_fit_frequency(void)
+{
+	int max = wdt_drv_timeout / 2;
+
+	if (max < 1)
+		max = 1;
+	if (wdt_frequency > max)
+		watchdog_frequency(max);
 }
 
 static void watchdog_print_status(void)
@@ -150,6 +162,7 @@ void watchdog_set_stopped(bool val)
 	else {
 		watchdog_open(true);
 		watchdog_set_drv_timeout();
+		watchdog_fit_frequency();
 		watchdog_timeout_cb(&wdt_timeout);
 	}
 }
@@ -174,9 +187,16 @@ int watchdog_timeout(int timeout)
 
 int watchdog_frequency(int frequency)
 {
-	if (frequency) {
+	if (frequency > 0) {
 		DEBUG(4, "Set watchdog frequency: %ds\n", frequency);
+		if (frequency > INT_MAX / 1000)
+			frequency = INT_MAX / 1000;
 		wdt_frequency = frequency;
+
+		/* ping now if the new interval ends before the pending ping */
+		if (wdt_timeout.pending &&
+		    uloop_timeout_remaining64(&wdt_timeout) > wdt_frequency * 1000)
+			watchdog_timeout_cb(&wdt_timeout);
 	}
 
 	return wdt_frequency;
