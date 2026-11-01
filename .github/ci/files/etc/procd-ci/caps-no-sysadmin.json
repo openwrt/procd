@@ -1,0 +1,17 @@
+{
+	"bounding": [
+		"CAP_DAC_OVERRIDE"
+	],
+	"effective": [
+		"CAP_DAC_OVERRIDE"
+	],
+	"ambient": [
+		"CAP_DAC_OVERRIDE"
+	],
+	"permitted": [
+		"CAP_DAC_OVERRIDE"
+	],
+	"inheritable": [
+		"CAP_DAC_OVERRIDE"
+	]
+}

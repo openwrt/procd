@@ -1,0 +1,21 @@
+{
+	"defaultAction": "SCMP_ACT_ALLOW",
+	"syscalls": [
+		{
+			"names": [
+				"fsconfig",
+				"fsmount",
+				"fsopen",
+				"fspick",
+				"mount",
+				"mount_setattr",
+				"move_mount",
+				"open_tree",
+				"umount",
+				"umount2"
+			],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 1
+		}
+	]
+}

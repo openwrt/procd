@@ -1,0 +1,136 @@
+#!/bin/sh
+
+. /usr/libexec/procd-ci/tap.sh
+
+LDSO="$(ls /lib/ld-musl-*.so.1)"
+
+jail_run() {
+	local script="$1"
+
+	shift
+	ujail -n procd-ci -p "$@" -- /bin/busybox sh -c \
+		"/bin/busybox grep ' /etc/procd-ci-\| /tmp/procd-ci-' /proc/self/mountinfo; $script" 2>&1
+}
+
+file_ro() {
+	local opt="$1" src="$2" dst="${3:-$2}" out
+
+	echo original > "$src"
+	out="$(jail_run "echo injected >> $dst && echo WROTE" "$opt" "$src${3:+:$3}")"
+	echo "$out"
+	grep -qx original "$src" && ! echo "$out" | grep -q WROTE
+}
+
+dir_ro() {
+	local out
+
+	rm -rf /tmp/procd-ci-dir
+	mkdir /tmp/procd-ci-dir
+	out="$(jail_run 'echo injected > /tmp/procd-ci-dir/new && echo WROTE' -r /tmp/procd-ci-dir)"
+	echo "$out"
+	[ ! -e /tmp/procd-ci-dir/new ] && ! echo "$out" | grep -q WROTE
+}
+
+program_ro() {
+	local out
+
+	out="$(jail_run "( : >> /bin/busybox ) && echo WROTE; ( : >> $LDSO ) && echo WROTE; echo DONE")"
+	echo "$out"
+	echo "$out" | grep -q DONE && ! echo "$out" | grep -q WROTE
+}
+
+dir_rw() {
+	local out
+
+	rm -rf /tmp/procd-ci-rw
+	mkdir /tmp/procd-ci-rw
+	out="$(jail_run 'echo injected > /tmp/procd-ci-rw/new && echo WROTE' -w /tmp/procd-ci-rw)"
+	echo "$out"
+	[ -e /tmp/procd-ci-rw/new ]
+}
+
+mounts_locked() {
+	local m script="/bin/busybox grep Cap /proc/self/status; /bin/busybox cat /proc/self/uid_map"
+	local out
+
+	echo original > /etc/procd-ci-r
+	rm -rf /tmp/procd-ci-dir
+	mkdir /tmp/procd-ci-dir
+	for m in /etc/procd-ci-r /tmp/procd-ci-dir "$LDSO" /dev /; do
+		script="$script; /bin/busybox mount -o remount,bind,rw $m && echo REMOUNTED $m"
+		script="$script; /bin/busybox umount $m && echo UNMOUNTED $m"
+	done
+	out="$(jail_run "$script; echo DONE" -o -r /etc/procd-ci-r -r /tmp/procd-ci-dir "$@")"
+	echo "$out"
+	echo "$out" | grep -q DONE && ! echo "$out" | grep -q 'REMOUNTED\|UNMOUNTED'
+}
+
+UNLOCKED="keeps CAP_SYS_ADMIN and no seccomp filter denies the mount syscalls"
+
+warns() {
+	local name="$1"
+
+	shift
+	ujail -n "$name" -p "$@" -- /bin/busybox true || return 1
+	logread | grep "$name $UNLOCKED"
+}
+
+silent() {
+	local name="$1"
+
+	shift
+	ujail -n "$name" -p "$@" -- /bin/busybox true || return 1
+	! logread | grep "$name $UNLOCKED"
+}
+
+jail_processes() {
+	local child mntns p
+
+	child="$(grep -l "^PPid:	$1$" /proc/[0-9]*/status 2>/dev/null | head -n 1)"
+	[ -n "$child" ] || return 0
+	child="${child#/proc/}"
+	mntns="$(readlink /proc/${child%/status}/ns/mnt)"
+	for p in /proc/[0-9]*; do
+		[ "$(readlink $p/ns/mnt 2>/dev/null)" = "$mntns" ] || continue
+		echo "  ${p#/proc/} $(cat $p/comm) $(grep -h '^Uid:\|^CapPrm:\|^CapBnd:\|^NoNewPrivs:\|^Seccomp:' $p/status | tr '\t\n' '  ')"
+	done
+}
+
+services_silent() {
+	local pid name ret=0
+
+	for pid in $(pidof ujail); do
+		[ "$(cut -d' ' -f4 /proc/$pid/stat)" = 1 ] || continue
+		name="$(tr '\0' '\n' < /proc/$pid/cmdline | sed -n '/^-n$/{n;p;q}')"
+		echo "jailed service: ${name:-pid $pid}"
+		jail_processes "$pid"
+		[ -n "$name" ] || continue
+		logread | grep "$name $UNLOCKED" && ret=1
+	done
+	return $ret
+}
+
+tap_check "no jailed service warns that its mounts are unlocked" services_silent
+tap_check "-r file is read-only in the jail" file_ro -r /etc/procd-ci-r
+tap_check "-r src:dst file is read-only in the jail" file_ro -r /etc/procd-ci-src /etc/procd-ci-dst
+tap_check "-b file is read-only in the jail" file_ro -b /etc/procd-ci-b
+tap_check "-r directory is read-only in the jail" dir_ro
+tap_check "jailed program and its interpreter are read-only" program_ro
+tap_check "-w directory is writable in the jail" dir_rw
+tap_check "jail without CAP_SYS_ADMIN cannot remount or unmount read-only mounts" \
+	mounts_locked -C /etc/procd-ci/caps-no-sysadmin.json
+tap_check "jail whose seccomp filter denies mounts cannot remount or unmount read-only mounts" \
+	mounts_locked -S /etc/procd-ci/seccomp-no-mount.json
+tap_check "uid 0 jail warns that its mounts are unlocked" warns procd-ci-root
+tap_check "user namespace jail warns that its mounts are unlocked" warns procd-ci-userns -f
+tap_check "jail without CAP_SYS_ADMIN does not warn" \
+	silent procd-ci-caps -C /etc/procd-ci/caps-no-sysadmin.json
+tap_check "non-root jail does not warn" silent procd-ci-user -U nobody
+tap_check "jail whose seccomp filter denies mounts does not warn" \
+	silent procd-ci-nomount -S /etc/procd-ci/seccomp-no-mount.json
+tap_check "jail whose seccomp filter kills by default does not warn" \
+	silent procd-ci-kill -c -S /etc/procd-ci/seccomp-no-uname.json
+tap_check "jail with a seccomp filter in complain mode warns" \
+	warns procd-ci-complain -m complain -M /tmp/procd-ci-complain.ndjson \
+	-S /etc/procd-ci/seccomp-no-mount.json
+tap_done

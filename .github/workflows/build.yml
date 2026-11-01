@@ -94,32 +94,32 @@ jobs:
             arch: x86_64
             qemu: qemu-system-x86
             packages: uxc procd-seccomp oci-runtime-tests ucode-mod-ubus ucode-mod-uloop
-            suites: smoke ujail oci
+            suites: smoke ujail bind oci
           - target: x86-generic
             arch: i386_pentium4
             qemu: qemu-system-x86
             packages: uxc procd-seccomp oci-runtime-tests ucode-mod-ubus ucode-mod-uloop
-            suites: smoke ujail oci
+            suites: smoke ujail bind oci
           - target: armsr-armv8
             arch: aarch64_generic
             qemu: qemu-system-arm
             packages: uxc procd-seccomp ucode-mod-ubus ucode-mod-uloop
-            suites: smoke ujail
+            suites: smoke ujail bind
           - target: armsr-armv7
             arch: arm_cortex-a15_neon-vfpv4
             qemu: qemu-system-arm
             packages: uxc procd-seccomp ucode-mod-ubus ucode-mod-uloop
-            suites: smoke ujail
+            suites: smoke ujail bind
           - target: malta-be
             arch: mips_24kc
             qemu: qemu-system-mips
             packages: uxc procd-seccomp ucode-mod-ubus ucode-mod-uloop
-            suites: smoke ujail
+            suites: smoke ujail bind
           - target: malta-le
             arch: mipsel_24kc
             qemu: qemu-system-mips
             packages: uxc procd-seccomp ucode-mod-ubus ucode-mod-uloop
-            suites: smoke ujail
+            suites: smoke ujail bind
 
     steps:
       - name: Checkout
