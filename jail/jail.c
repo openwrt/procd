@@ -6369,7 +6369,7 @@ static void post_start_hook(void)
 	/* restore securebits back to normal (and lock them if not in userns) */
 	if (opts.capset.apply) {
 		if (prctl(PR_SET_SECUREBITS, jail_in_userns() ? 0 :
-		    SECBIT_KEEP_CAPS_LOCKED|SECBIT_NO_SETUID_FIXUP_LOCKED|SECBIT_NOROOT_LOCKED)) {
+		    SECBIT_NO_SETUID_FIXUP_LOCKED|SECBIT_NOROOT_LOCKED)) {
 			ERROR("prctl(PR_SET_SECUREBITS) failed: %m\n");
 			free_and_exit(EXIT_FAILURE);
 		}
