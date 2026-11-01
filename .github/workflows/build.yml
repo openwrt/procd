@@ -26,11 +26,9 @@ jobs:
           - mips_24kc
           - mipsel_24kc
           - powerpc_8548
+          - riscv64_generic
         packages:
           - procd procd-selinux procd-ujail procd-seccomp uxc
-        include:
-          - arch: riscv64_generic
-            packages: procd procd-selinux procd-ujail uxc
 
     steps:
       - name: Checkout
