@@ -1779,6 +1779,28 @@ static int add_script_interp(const char *path, const char *map, int size)
 	return add_path_and_deps(buf, 1, -1, 0);
 }
 
+static int bind_tree_open(const char *path, unsigned long mountflags)
+{
+	struct ujail_mount_attr attr = { 0 };
+	int treefd;
+
+	treefd = sys_open_tree(AT_FDCWD, path, OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
+	if (treefd < 0)
+		return -1;
+
+	attr.attr_set = mountflags_to_attr(mountflags);
+	if (mountflags & (MS_NOATIME | MS_RELATIME | MS_STRICTATIME))
+		attr.attr_clr |= MOUNT_ATTR__ATIME;
+
+	if (sys_mount_setattr(treefd, "", AT_EMPTY_PATH, &attr, sizeof(attr)) < 0) {
+		WARNING("mount_setattr(%s): %m\n", path);
+		close(treefd);
+		return -1;
+	}
+
+	return treefd;
+}
+
 int add_2paths_and_deps(const char *path, const char *path2, int readonly, int error, int lib)
 {
 	assert(path != NULL);
@@ -1802,8 +1824,7 @@ int add_2paths_and_deps(const char *path, const char *path2, int readonly, int e
 		_add_mount_bind(path, path2, readonly, error);
 		bm = avl_find_element(&mounts, path2, bm, avl);
 		if (bm && bm->source_fd < 0)
-			bm->source_fd = sys_open_tree(AT_FDCWD, path,
-						      OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
+			bm->source_fd = bind_tree_open(path, bm->mountflags);
 	} else {
 		if (avl_find(&libraries, path))
 			return 0;
@@ -1881,8 +1902,7 @@ int add_2paths_nodeps(const char *path, const char *path2, int readonly, int err
 
 	bm = avl_find_element(&mounts, path2, bm, avl);
 	if (bm && bm->source_fd < 0)
-		bm->source_fd = sys_open_tree(AT_FDCWD, path,
-					      OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
+		bm->source_fd = bind_tree_open(path, bm->mountflags);
 
 	return 0;
 }
