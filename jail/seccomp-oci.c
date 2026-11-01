@@ -321,6 +321,11 @@ const char * const seccomp_loader_files[] = {
 	"statx", NULL,
 };
 
+const char * const seccomp_mount_family[] = {
+	"fsconfig", "fsmount", "fsopen", "fspick", "mount", "mount_setattr",
+	"move_mount", "open_tree", "umount", "umount2", NULL,
+};
+
 enum {
 	OCI_LINUX_SECCOMP_DEFAULTACTION,
 	OCI_LINUX_SECCOMP_DEFAULTERRNORET,
@@ -379,15 +384,29 @@ static const struct blobmsg_policy oci_linux_seccomp_syscalls_args_policy[] = {
 #define SECCOMP_RET_ACTION_FULL 0xffff0000U
 #endif
 
+static bool seccomp_ret_runs(uint32_t k, bool any)
+{
+	k &= SECCOMP_RET_ACTION_FULL;
+
+	if (k == SECCOMP_RET_ALLOW)
+		return true;
+
+	/* the syscall may still run: logged, or left to a tracer or listener */
+	return any && (k == SECCOMP_RET_LOG || k == SECCOMP_RET_TRACE ||
+		       k == SECCOMP_RET_USER_NOTIF);
+}
+
+/* any: nr is allowed on some path, else on every path; doubt yields any */
 static bool seccomp_nr_allows(const struct sock_fprog *prog, int nr,
 			      unsigned int pc, bool known, uint32_t acc,
-			      int *budget)
+			      int *budget, bool any)
 {
 	const struct sock_filter *f;
+	bool taken, skipped;
 	uint32_t k;
 
 	if (--(*budget) < 0)
-		return false;
+		return any;
 
 	while (pc < prog->len) {
 		f = &prog->filter[pc];
@@ -412,31 +431,31 @@ static bool seccomp_nr_allows(const struct sock_fprog *prog, int nr,
 			pc++;
 			break;
 		case BPF_JMP + BPF_JEQ + BPF_K:
-			if (!known)
-				return seccomp_nr_allows(prog, nr, pc + 1 + f->jt, false, 0, budget) &&
-				       seccomp_nr_allows(prog, nr, pc + 1 + f->jf, false, 0, budget);
-			pc += 1 + ((acc == k) ? f->jt : f->jf);
-			break;
 		case BPF_JMP + BPF_JGE + BPF_K:
-			if (!known)
-				return seccomp_nr_allows(prog, nr, pc + 1 + f->jt, false, 0, budget) &&
-				       seccomp_nr_allows(prog, nr, pc + 1 + f->jf, false, 0, budget);
-			pc += 1 + ((acc >= k) ? f->jt : f->jf);
-			break;
 		case BPF_JMP + BPF_JGT + BPF_K:
-			if (!known)
-				return seccomp_nr_allows(prog, nr, pc + 1 + f->jt, false, 0, budget) &&
-				       seccomp_nr_allows(prog, nr, pc + 1 + f->jf, false, 0, budget);
-			pc += 1 + ((acc > k) ? f->jt : f->jf);
+			if (!known) {
+				taken = seccomp_nr_allows(prog, nr, pc + 1 + f->jt,
+							  false, 0, budget, any);
+				skipped = seccomp_nr_allows(prog, nr, pc + 1 + f->jf,
+							    false, 0, budget, any);
+				return any ? (taken || skipped) : (taken && skipped);
+			}
+			if (f->code == BPF_JMP + BPF_JEQ + BPF_K)
+				taken = acc == k;
+			else if (f->code == BPF_JMP + BPF_JGE + BPF_K)
+				taken = acc >= k;
+			else
+				taken = acc > k;
+			pc += 1 + (taken ? f->jt : f->jf);
 			break;
 		case BPF_RET + BPF_K:
-			return (k & SECCOMP_RET_ACTION_FULL) == SECCOMP_RET_ALLOW;
+			return seccomp_ret_runs(k, any);
 		default:
-			return false;
+			return any;
 		}
 	}
 
-	return false;
+	return any;
 }
 
 bool seccomp_profile_covers(const struct sock_fprog *prog, const char * const *names)
@@ -451,7 +470,26 @@ bool seccomp_profile_covers(const struct sock_fprog *prog, const char * const *n
 		if (sc == -1)
 			continue;
 		budget = 4096;
-		if (!seccomp_nr_allows(prog, sc, 0, false, 0, &budget))
+		if (!seccomp_nr_allows(prog, sc, 0, false, 0, &budget, false))
+			return false;
+	}
+
+	return true;
+}
+
+bool seccomp_profile_denies(const struct sock_fprog *prog, const char * const *names)
+{
+	int i, sc, budget;
+
+	if (!prog)
+		return false;
+
+	for (i = 0; names && names[i]; i++) {
+		sc = find_syscall(names[i]);
+		if (sc == -1)
+			continue;
+		budget = 4096;
+		if (seccomp_nr_allows(prog, sc, 0, false, 0, &budget, true))
 			return false;
 	}
 
@@ -474,7 +512,7 @@ struct sock_fprog *seccomp_deny_delta(const char * const *names,
 			continue;
 		if (app) {
 			budget = 4096;
-			if (seccomp_nr_allows(app, sc, 0, false, 0, &budget))
+			if (seccomp_nr_allows(app, sc, 0, false, 0, &budget, false))
 				continue;
 		}
 		deny[ndeny++] = sc;

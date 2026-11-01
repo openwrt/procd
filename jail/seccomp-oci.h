@@ -21,10 +21,12 @@
 extern const char * const seccomp_linker_base[];
 extern const char * const seccomp_init_base[];
 extern const char * const seccomp_loader_files[];
+extern const char * const seccomp_mount_family[];
 #else
 static const char * const seccomp_linker_base[] = { NULL };
 static const char * const seccomp_init_base[] = { NULL };
 static const char * const seccomp_loader_files[] = { NULL };
+static const char * const seccomp_mount_family[] = { NULL };
 #endif
 
 struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
@@ -36,8 +38,13 @@ int applyOCIlinuxseccomp(struct sock_fprog *prog, const char *container_id,
 			 const char *bundle_path);
 bool seccomp_oci_needs_inproc(void);
 bool seccomp_profile_covers(const struct sock_fprog *prog, const char * const *names);
+bool seccomp_profile_denies(const struct sock_fprog *prog, const char * const *names);
 
 #ifndef SECCOMP_SUPPORT
+bool seccomp_profile_denies(const struct sock_fprog *prog, const char * const *names) {
+	return false;
+}
+
 struct sock_fprog *parseOCIlinuxseccomp(struct blob_attr *msg,
 					const char * const *extra_allow) {
 	return NULL;

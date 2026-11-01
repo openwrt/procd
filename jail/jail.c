@@ -247,6 +247,7 @@ static char **volume_sources;
 static int num_volume_sources;
 
 #define EXEC_ACK_EXEC	'X'
+#define EXEC_ACK_EXEC_UNLOCKED	'U'
 #define EXEC_ACK_HOOK	'H'
 #define CREATE_ACK_DONE	'C'
 #define CREATE_ACK_HOOK	'H'
@@ -6278,12 +6279,45 @@ static bool jail_ptrace_seccomp(void)
 	return opts.ociseccomp && !jail_inproc_seccomp();
 }
 
+/* prctl() only: an in-process seccomp filter may already be in place */
+static bool jail_sys_admin_kept(uid_t exec_uid)
+{
+	int secbits;
+
+	if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_SYS_ADMIN, 0, 0) == 1)
+		return true;
+
+	if (exec_uid)
+		return false;
+
+	secbits = prctl(PR_GET_SECUREBITS, 0, 0, 0, 0);
+	if (secbits > 0 && (secbits & SECBIT_NOROOT))
+		return false;
+
+	return prctl(PR_CAPBSET_READ, CAP_SYS_ADMIN, 0, 0, 0) != 0;
+}
+
+static bool jail_mounts_unlocked(uid_t exec_uid)
+{
+	if (!(opts.namespace & CLONE_NEWNS))
+		return false;
+
+	if (opts.ociseccomp && opts.seccomp_mode == SECCOMP_MODE_ENFORCE &&
+	    seccomp_profile_denies(opts.ociseccomp, seccomp_mount_family))
+		return false;
+
+	return jail_sys_admin_kept(exec_uid);
+}
+
 static void post_start_hook(void)
 {
 	struct sock_fprog *seccomp_prog = opts.ociseccomp_linker ?: opts.ociseccomp;
 	int pw_uid, pw_gid, gr_gid;
+	bool mounts_unlocked;
 	int exec_errno;
+	uid_t exec_uid;
 
+	exec_uid = geteuid();
 	hook_chain_check("startContainer", exec_ack[1], EXEC_ACK_HOOK);
 
 	if (opts.scheduler.set && applyOCIprocessscheduler())
@@ -6316,7 +6350,10 @@ static void post_start_hook(void)
 	/* use either cmdline-supplied user/group or uid/gid from OCI spec */
 	if (opts.ocibundle || opts.uidmap || !(opts.namespace & CLONE_NEWUSER)) {
 		get_jail_user(&pw_uid, &pw_gid, &gr_gid);
-		set_jail_user(opts.pw_uid?:pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
+		pw_uid = opts.pw_uid ?: pw_uid;
+		set_jail_user(pw_uid, opts.pw_gid?:pw_gid, opts.gr_gid?:gr_gid);
+		if (pw_uid != -1)
+			exec_uid = pw_uid;
 	} else if (opts.user || opts.group || opts.pw_uid != -1 || opts.pw_gid != -1 || opts.gr_gid != -1) {
 		WARNING("user/group identity switch (-U/-G) is not re-applied under "
 			"CLONE_NEWUSER without an OCI bundle or explicit uidmap; the "
@@ -6384,6 +6421,8 @@ static void post_start_hook(void)
 		free_and_exit(EXIT_FAILURE);
 	}
 
+	mounts_unlocked = jail_mounts_unlocked(exec_uid);
+
 	/* the supervisor can SIGKILL ujail on its own death (netifd on exit,
 	 * procd's instance_timeout() escalation); die with it, otherwise the
 	 * jailed process keeps running and the supervisor's supervisor starts
@@ -6432,7 +6471,8 @@ static void post_start_hook(void)
 		exit(EXIT_FAILURE);
 	}
 	DEBUG("exec-ing %s\n", *opts.jail_argv);
-	if (xwrite_byte(exec_ack[1], EXEC_ACK_EXEC) < 1) {
+	if (xwrite_byte(exec_ack[1], mounts_unlocked ? EXEC_ACK_EXEC_UNLOCKED :
+						   EXEC_ACK_EXEC) < 1) {
 		ERROR("cannot announce the exec to the parent: %m\n");
 		exit(EXIT_FAILURE);
 	}
@@ -6843,6 +6883,16 @@ static int exec_jail(void *arg)
 	return -1;
 }
 
+static void exec_ack_warn(char ack)
+{
+	if (ack != EXEC_ACK_EXEC_UNLOCKED)
+		return;
+
+	WARNING("%s keeps CAP_SYS_ADMIN and no seccomp filter denies the mount "
+		"syscalls: it can remount, unmount or replace every read-only "
+		"mount of the jail\n", opts.name ?: *opts.jail_argv);
+}
+
 static void jail_seccomp_run(void)
 {
 	struct seccomp_trace_opts t = {
@@ -6853,6 +6903,11 @@ static void jail_seccomp_run(void)
 		.dedup = 0,
 	};
 	int fd = -1;
+	char ack;
+
+	/* the trace loop below never returns to uloop and exec_ack_cb() */
+	if (exec_ack[0] >= 0 && read(exec_ack[0], &ack, 1) == 1)
+		exec_ack_warn(ack);
 
 	if (opts.seccomp_log) {
 		fd = open(opts.seccomp_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -7404,13 +7459,15 @@ static void exec_ack_cb(struct uloop_fd *fd, unsigned int events)
 		return;
 	}
 
-	if (exec_ack_buf[0] != EXEC_ACK_EXEC) {
+	if (exec_ack_buf[0] != EXEC_ACK_EXEC &&
+	    exec_ack_buf[0] != EXEC_ACK_EXEC_UNLOCKED) {
 		ERROR("container.start: unexpected exec acknowledgement\n");
 		poststart_dispatch(false);
 		return;
 	}
 
 	if (exec_ack_len == 1) {
+		exec_ack_warn(exec_ack_buf[0]);
 		jail_exec_acked = true;
 		emit_instance_event("instance.running");
 		poststart_dispatch(true);
