@@ -108,6 +108,9 @@
 #define OPT_ARGS	"a:A:b:cC:d:De:EfFg:G:h:iI:j:J:k:K:lm:M:n:NoO:pP:q:r:R:sS:uU:V:w:W:" \
 		"x:X:t:T:yY:Z"
 
+#define HOST_RESOLV_CONF_DIR	"/tmp/resolv.conf.d"
+#define JAIL_RESOLV_CONF_DIR	"/dev/resolv.conf.d"
+
 #define JAIL_MAX_CREDENTIALS	16
 static const char *cred_targets[JAIL_MAX_CREDENTIALS];
 static int n_cred_targets;
@@ -237,6 +240,7 @@ static struct {
 	struct landlock_config landlock;
 	bool private_ubus;
 	bool private_netifd;
+	char *resolvconf_link;
 	bool jail_network_started;
 } opts;
 
@@ -655,6 +659,7 @@ static void free_opts(bool parent) {
 	free(opts.netdevices);
 	free(opts.extroot);
 	free(opts.overlaydir);
+	free(opts.resolvconf_link);
 	free_hooklist(opts.hooks.prestart);
 	free_hooklist(opts.hooks.createRuntime);
 	free_hooklist(opts.hooks.createContainer);
@@ -969,11 +974,11 @@ static int prepare_jail_dev(void)
 	snprintf(path, sizeof(path), "%s/mqueue", jail_dev);
 	mkdir(path, 0755);
 
-	if ((opts.namespace & CLONE_NEWNET) && opts.private_netifd) {
+	if (opts.resolvconf_link) {
 		snprintf(path, sizeof(path), "%s/resolv.conf.d", jail_dev);
 		mkdir(path, 0755);
 		snprintf(path, sizeof(path), "%s/resolv.conf", jail_dev);
-		if (symlink("/dev/resolv.conf.d/resolv.conf.auto", path))
+		if (symlink(opts.resolvconf_link, path))
 			WARNING("symlink() failed to create /dev/resolv.conf: %m\n");
 	}
 
@@ -6712,14 +6717,15 @@ static int build_jail_fs(void)
 	if (opts.console)
 		create_dev_console(jail_root);
 
-	if ((opts.namespace & CLONE_NEWNET) && opts.private_netifd) {
+	if (opts.resolvconf_link) {
 		char jailetc[PATH_MAX], devresolv[PATH_MAX], etcresolv[PATH_MAX];
 		struct stat rcst;
 		int treefd;
 
 		snprintf(devresolv, PATH_MAX, "%s/dev/resolv.conf", jail_root);
 		snprintf(etcresolv, PATH_MAX, "%s/etc/resolv.conf", jail_root);
-		if (stat(etcresolv, &rcst) && (overlaydir || !opts.ronly)) {
+		if (stat(etcresolv, &rcst) &&
+		    (!opts.extroot || overlaydir || !opts.ronly)) {
 			snprintf(jailetc, PATH_MAX, "%s/etc", jail_root);
 			mkdir_p(jailetc, 0755);
 			close(creat(etcresolv, 0644));
@@ -7487,6 +7493,45 @@ static struct uloop_fd exec_ack_uloop = {
 	.cb = exec_ack_cb,
 };
 
+static char *resolv_conf_link_target(void)
+{
+	char *target, *link = NULL;
+
+	if (!access(HOST_RESOLV_CONF_DIR "/resolv.conf", F_OK))
+		return strdup(".." JAIL_RESOLV_CONF_DIR "/resolv.conf");
+
+	target = realpath("/etc/resolv.conf", NULL);
+	if (target && !strncmp(target, HOST_RESOLV_CONF_DIR "/",
+			       strlen(HOST_RESOLV_CONF_DIR "/")) &&
+	    asprintf(&link, ".." JAIL_RESOLV_CONF_DIR "%s",
+		     target + strlen(HOST_RESOLV_CONF_DIR)) < 0)
+		link = NULL;
+
+	free(target);
+	return link;
+}
+
+static void resolv_conf_share(void)
+{
+	int ret;
+
+	if (mount_is_defined("/etc/resolv.conf"))
+		return;
+
+	opts.resolvconf_link = resolv_conf_link_target();
+	if (opts.resolvconf_link) {
+		ret = add_mount(HOST_RESOLV_CONF_DIR, JAIL_RESOLV_CONF_DIR,
+				NULL, MS_BIND | MS_RDONLY | MS_NOEXEC |
+				MS_NOSUID | MS_NODEV | MS_NOATIME, 0, NULL, 0);
+		if (!ret || ret == EEXIST)
+			return;
+	}
+
+	free(opts.resolvconf_link);
+	opts.resolvconf_link = NULL;
+	add_mount_bind("/etc/resolv.conf", 1, 0);
+}
+
 static void post_main(struct uloop_timeout *t)
 {
 	int child_status;
@@ -7534,7 +7579,7 @@ static void post_main(struct uloop_timeout *t)
 #endif
 			if (opts.setns.ns == -1) {
 				if (!(opts.namespace & CLONE_NEWNET)) {
-					add_mount_bind("/etc/resolv.conf", 1, 0);
+					resolv_conf_share();
 				} else if (opts.private_netifd) {
 					char hostdir[PATH_MAX], hostresolv[PATH_MAX];
 					int hostresolvfd;
@@ -7551,8 +7596,12 @@ static void post_main(struct uloop_timeout *t)
 					hostresolvfd = open(hostresolv, O_WRONLY | O_CREAT, 0644);
 					if (hostresolvfd >= 0)
 						close(hostresolvfd);
-					add_mount(hostdir, "/dev/resolv.conf.d", NULL,
+					add_mount(hostdir, JAIL_RESOLV_CONF_DIR, NULL,
 						MS_BIND | MS_NOEXEC | MS_NOATIME | MS_NOSUID | MS_NODEV | MS_RDONLY, 0, NULL, 0);
+					opts.resolvconf_link =
+						strdup(JAIL_RESOLV_CONF_DIR "/resolv.conf.auto");
+					if (!opts.resolvconf_link)
+						free_and_exit(-1);
 				}
 			}
 			/* default mounts */
