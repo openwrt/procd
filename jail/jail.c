@@ -1974,7 +1974,7 @@ static void usage(void)
 	fprintf(stderr, "  -D\t\tjail has a udebug socket\n");
 	fprintf(stderr, "  -U <name>\tuser to run jailed process\n");
 	fprintf(stderr, "  -G <name>\tgroup to run jailed process\n");
-	fprintf(stderr, "  -o\t\tremont jail root (/) read only\n");
+	fprintf(stderr, "  -o\t\tremount jail root (/) read only\n");
 	fprintf(stderr, "  -R <dir>\texternal jail rootfs (system container)\n");
 	fprintf(stderr, "  -O <dir>\tdirectory for r/w overlayfs\n");
 	fprintf(stderr, "  -T <size>\tuse tmpfs r/w overlayfs with <size>\n");
