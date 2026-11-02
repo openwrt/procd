@@ -255,6 +255,9 @@ service_delete(struct service *s, bool container)
 	blobmsg_list_free(&s->data_blob);
 	free(s->data);
 	s->data = NULL;
+	trigger_del(s);
+	free(s->trigger);
+	s->trigger = NULL;
 	vlist_flush_all(&s->instances);
 	s->deleted = true;
 	service_stopped(s);
