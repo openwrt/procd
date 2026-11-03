@@ -531,6 +531,15 @@ static int watchdog_set(struct ubus_context *ctx, struct ubus_object *obj,
 		watchdog_timeout(timeout);
 	}
 
+	if (tb[WDT_TIMEOUT] && tb[WDT_FREQUENCY] &&
+	    blobmsg_get_u32(tb[WDT_FREQUENCY])) {
+		unsigned int timeout = watchdog_timeout(0);
+		unsigned int frequency = watchdog_frequency(0);
+
+		if (frequency > timeout / 2)
+			watchdog_frequency(timeout / 2);
+	}
+
 	if (tb[WDT_MAGICCLOSE])
 		watchdog_set_magicclose(blobmsg_get_bool(tb[WDT_MAGICCLOSE]));
 
