@@ -17,6 +17,7 @@
 #include <sys/reboot.h>
 
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +34,16 @@
 
 static struct uloop_process upgrade_proc;
 unsigned int debug = 2;
+
+static void upgraded_rebooting(struct uloop_signal *s)
+{
+	watchdog_set_stopped(true);
+}
+
+static struct uloop_signal reboot_signal = {
+	.cb = upgraded_rebooting,
+	.signo = SIGHUP,
+};
 
 static void upgrade_proc_cb(struct uloop_process *proc, int ret)
 {
@@ -96,6 +107,7 @@ int main(int argc, char **argv)
 
 	uloop_init();
 	watchdog_init(0);
+	uloop_signal_add(&reboot_signal);
 	sysupgrade(argv[1], argv[2]);
 
 	reboot(RB_AUTOBOOT);
