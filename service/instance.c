@@ -820,10 +820,12 @@ instance_rmdir_cgroup(const char *service, const char *instance)
 }
 
 static void
-instance_remove_cgroup(const char *service, const char *instance)
+instance_remove_cgroup(struct service_instance *in)
 {
-	instance_kill_cgroup(service, instance);
-	instance_rmdir_cgroup(service, instance);
+	if (in->has_jail) {
+		instance_kill_cgroup(in->srv->name, in->name);
+	}
+	instance_rmdir_cgroup(in->srv->name, in->name);
 }
 
 static void
@@ -1325,6 +1327,9 @@ instance_delete(struct service_instance *in)
 	struct service *s = in->srv;
 
 	avl_delete(&s->instances.avl, &in->node.avl);
+	if (in->has_cgroup) {
+		instance_remove_cgroup(in);
+	}
 	instance_free(in);
 	service_stopped(s);
 }
@@ -1540,7 +1545,9 @@ instance_exit(struct uloop_process *p, int ret)
 		return;
 	}
 
-	instance_kill_cgroup(in->srv->name, in->name);
+	if (in->has_jail) {
+		instance_kill_cgroup(in->srv->name, in->name);
+	}
 	instance_cgroup_wait(in);
 }
 
@@ -2513,9 +2520,6 @@ instance_free(struct service_instance *in)
 	instance_cgroup_wait_stop(in);
 	trigger_del(in);
 	watch_del(in);
-	if (in->has_cgroup)
-		instance_remove_cgroup(in->srv->name, in->name);
-
 	instance_config_cleanup(in);
 	free(in->config);
 	free(in->data_blob);
