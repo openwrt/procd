@@ -264,6 +264,9 @@ static int system_board(struct ubus_context *ctx, struct ubus_object *obj,
 		}
 
 		fclose(f);
+	} else {
+		/* Behave like openwrt ec991424749b9eed37d01bc8adb9fb22fb0c98a7 */
+		blobmsg_add_string(&b, "board_name", "generic");
 	}
 
 	if (rootfs_type)
