@@ -1,0 +1,72 @@
+#!/bin/sh
+#
+# procd-cgexec - run a command inside a service's cgroup (cgroup v2)
+#
+# Moves itself into the owning service's cgroup before exec'ing the command, so
+# the command's CPU/memory is charged to that service rather than to whoever
+# launched it. The command runs in a leaf cgroup, services/<service>/<label>,
+# because cgroup v2's no-internal-process rule forbids putting it directly in
+# services/<service>. If placement fails it warns and runs the command anyway.
+
+myName=${0##*/}
+
+base="/sys/fs/cgroup/services"
+label="cgexec"
+
+usage() {
+    cat <<EOF
+$myName - run a command inside a service's cgroup (cgroup v2)
+
+Usage: $myName [options] <service> <command> [args...]
+
+Runs <command> in services/<service>/<label> so its CPU/memory is charged to
+<service> instead of to whatever cgroup launched it.
+
+Options:
+  -l, --label <name>   child leaf cgroup under the service (default: $label)
+  -h, --help           show this help
+
+Example (in a crontab):
+  */5 * * * *  $myName myservice /usr/bin/mytask.sh
+EOF
+}
+
+warn() {
+    echo "$myName: $*" >&2
+    logger -t "$myName" -p daemon.warn "$*"
+}
+die() { echo "$myName: $*" >&2; exit 1; }
+
+# Options come before the service name; everything after it is the command.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -l|--label) label="${2:-}"; shift 2 ;;
+        -h|--help)  usage; exit 0 ;;
+        --)         shift; break ;;
+        -*)         die "unknown option: $1 (try --help)" ;;
+        *)          break ;;
+    esac
+done
+
+service="${1:-}"
+[ -n "$service" ] || { usage >&2; exit 1; }
+shift
+[ $# -gt 0 ] || die "no command given (try --help)"
+
+target="$base/$service/$label"
+
+place() {
+    [ -e /sys/fs/cgroup/cgroup.controllers ] || { warn "cgroup v2 not mounted; running uncontained"; return 1; }
+    mkdir -p "$target" 2>/dev/null            || { warn "cannot create $target; running uncontained"; return 1; }
+    # writing +memory again is a no-op, so no need to check first
+    echo +memory > "$base/$service/cgroup.subtree_control" 2>/dev/null
+    echo $$ > "$target/cgroup.procs" 2>/dev/null \
+                                              || { warn "cannot join $target; running uncontained"; return 1; }
+    return 0
+}
+
+place
+
+# exec keeps this PID (already moved into the cgroup), so the command and all of
+# its children run accounted to <service>.
+exec "$@"
