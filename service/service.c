@@ -258,6 +258,13 @@ service_delete(struct service *s, bool container)
 	trigger_del(s);
 	free(s->trigger);
 	s->trigger = NULL;
+	/*
+	 * The flush deletes each instance that no longer runs, and
+	 * service_stopped() then frees a service that is already marked
+	 * deleted. Keep the mark off until the flush is done, as the code
+	 * below still uses the service.
+	 */
+	s->deleted = false;
 	vlist_flush_all(&s->instances);
 	s->deleted = true;
 	service_stopped(s);
