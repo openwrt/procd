@@ -1547,7 +1547,14 @@ instance_exit(struct uloop_process *p, int ret)
 void
 instance_stop(struct service_instance *in, bool halt)
 {
-	if (!in->proc.pending) {
+	/*
+	 * While the cgroup drains, instance_exit_done() is still due and
+	 * acts on the flags below. A delete here would leave the caller
+	 * with an instance, and maybe a service, that is already freed.
+	 */
+	bool draining = in->cgroup_timeout.pending;
+
+	if (!in->proc.pending && !draining) {
 		if (halt)
 			instance_delete(in);
 		return;
@@ -1556,6 +1563,11 @@ instance_stop(struct service_instance *in, bool halt)
 	in->restart = in->respawn = false;
 	in->respawning = false;
 	in->respawn_next = 0;
+	if (!in->proc.pending) {
+		uloop_timeout_cancel(&in->timeout);
+		return;
+	}
+
 	instance_signal(in, SIGTERM);
 	uloop_timeout_set(&in->timeout, instance_term_timeout(in) * 1000);
 }
