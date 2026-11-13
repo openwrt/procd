@@ -1,0 +1,88 @@
+#!/bin/sh
+
+. /usr/libexec/procd-ci/tap.sh
+
+SVC=procd-ci-delete
+CG=/sys/fs/cgroup/services/$SVC
+
+service_listed() {
+	ubus call service list "{\"name\":\"$SVC\"}" | grep -q "\"$SVC\""
+}
+
+instance_pid() {
+	ubus call service list "{\"name\":\"$SVC\"}" | \
+		jsonfilter -e "@['$SVC'].instances.i1.pid"
+}
+
+service_delete() {
+	ubus call service delete "{\"name\":\"$SVC\"}"
+}
+
+instance_in_cgroup() {
+	local n=0
+
+	until grep -qx "$1" "$CG/i1/cgroup.procs" 2>/dev/null; do
+		n=$((n + 1))
+		[ "$n" -le 10 ] || return 1
+		sleep 1
+	done
+}
+
+delete_twice() {
+	local pid="$1" n=0
+
+	service_delete || return 1
+	while [ -d "/proc/$pid" ]; do
+		n=$((n + 1))
+		[ "$n" -le 10000000 ] || return 1
+	done
+	service_delete
+}
+
+# When procd reaps the main process of an instance, it kills the cgroup
+# of the instance and waits up to one second for the cgroup to drain.
+# The kernel does not deliver that SIGKILL to PID 1, so with procd in
+# the cgroup the drain takes the full second, and the second delete
+# always arrives while the instance drains. procd leaves the cgroup at
+# once after that, because the processes it starts meanwhile start in
+# that cgroup too.
+delete_in_drain() {
+	local pid ret
+
+	ubus call service set "{\"name\":\"$SVC\",\"instances\":{\"i1\":{\"command\":[\"/bin/sleep\",\"600\"]}}}" || return 1
+	pid="$(instance_pid)"
+	[ -n "$pid" ] && instance_in_cgroup "$pid" || return 1
+
+	echo 1 > "$CG/i1/cgroup.procs" || return 1
+	delete_twice "$pid"
+	ret=$?
+	echo 1 > /sys/fs/cgroup/cgroup.procs
+	return "$ret"
+}
+
+procd_alive() {
+	[ "$(cat /proc/1/comm)" = procd ] && ubus call service list >/dev/null
+}
+
+service_gone() {
+	local n=0
+
+	while service_listed; do
+		n=$((n + 1))
+		[ "$n" -le 10 ] || return 1
+		sleep 1
+	done
+}
+
+cleanup() {
+	grep -qx '0::/' /proc/1/cgroup || echo 1 > /sys/fs/cgroup/cgroup.procs
+	! service_listed || { service_delete; service_gone; }
+	[ ! -d "$CG" ] || rmdir "$CG/i1" "$CG"
+	grep -qx '0::/' /proc/1/cgroup && [ ! -d "$CG" ]
+}
+
+tap_check "second delete reaches a draining instance" delete_in_drain
+tap_check "procd survives the second delete" procd_alive
+tap_check "deleted service is removed" service_gone
+tap_check "procd and the cgroup are back in place" cleanup
+tap_done
